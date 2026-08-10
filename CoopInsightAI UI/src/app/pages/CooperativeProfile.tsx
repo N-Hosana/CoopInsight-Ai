@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
-import { useSearchParams, useNavigate } from "react-router";
+import { useParams, useSearchParams, useNavigate } from "react-router";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
+import { api } from "../services/api";
 import {
   Building2,
   MapPin,
@@ -52,60 +53,64 @@ interface CooperativeProfileData {
   documents: CooperativeDocument[];
 }
 
-const defaultProfiles: CooperativeProfileData[] = [
-  {
-    id: "coop-1",
-    name: "Green Valley Farmers",
-    registrationNumber: "RWA-2024-001",
-    district: "Gasabo District",
-    sector: "Agriculture",
-    type: "Savings & Credit",
-    chairperson: "David Mugisha",
-    chairpersonEmail: "david.mugisha@greenvalley.coop",
-    chairpersonPhone: "+250788234567",
-    treasurer: "Sarah Johnson",
-    treasurerEmail: "sarah.johnson@greenvalley.coop",
-    treasurerPhone: "+250788456789",
-    secretary: "Aline Uwase",
-    secretaryEmail: "aline.uwase@greenvalley.coop",
-    secretaryPhone: "+250788567890",
-    registrationDate: "2024-02-10",
-    status: "Active",
-    bylawsFileName: "GreenValley_Bylaws.pdf",
-    licenseFileName: "GreenValley_BusinessLicense.pdf",
-    permitsFileName: "GreenValley_OperatingPermit.pdf",
-    constitutionFileName: "GreenValley_Constitution.pdf",
-    operatingArea: "Gasabo District",
-    membershipSize: "320",
-    description: "A cooperative supporting smallholder farmers with production, savings, and market access.",
-    documents: [
-      { id: "doc-1", name: "Cooperative Bylaws", type: "Bylaws", uploadedAt: "2024-02-11", size: "245 KB" },
-      { id: "doc-2", name: "Business License", type: "License", uploadedAt: "2024-02-12", size: "123 KB" },
-      { id: "doc-3", name: "Market Permit", type: "Permit", uploadedAt: "2024-02-13", size: "98 KB" },
-      { id: "doc-4", name: "Constitution", type: "Constitution", uploadedAt: "2024-02-11", size: "456 KB" },
-    ],
-  },
-];
-
-function getStoredCooperatives() {
-  try {
-    const stored = localStorage.getItem("coopinsight_cooperatives");
-    return stored ? (JSON.parse(stored) as CooperativeProfileData[]) : defaultProfiles;
-  } catch (error) {
-    return defaultProfiles;
-  }
+interface HealthScore {
+  score: number;
+  breakdown: Record<string, number>;
+  trend: "up" | "down" | "stable";
 }
 
-function saveStoredCooperatives(cooperatives: CooperativeProfileData[]) {
-  localStorage.setItem("coopinsight_cooperatives", JSON.stringify(cooperatives));
-}
+const mapApiCooperative = (raw: any): CooperativeProfileData => {
+  const leadership: any[] = raw.leadership ?? [];
+  const find = (role: string) => leadership.find((l: any) => l.role?.toLowerCase().includes(role));
+  const chair = find("chair");
+  const treasurer = find("treasurer");
+  const secretary = find("secretary");
+  return {
+    id: raw.id,
+    name: raw.name ?? "",
+    registrationNumber: raw.registration_number ?? raw.registrationNumber ?? "",
+    district: raw.district ?? raw.cell ?? "",
+    sector: raw.sector ?? "",
+    type: raw.type ?? "",
+    status: raw.status ?? "",
+    registrationDate: raw.registration_date ?? raw.registrationDate ?? "",
+    description: raw.description ?? "",
+    operatingArea: [raw.cell, raw.village].filter(Boolean).join(", ") || raw.sector || "",
+    membershipSize: String(raw.member_count ?? raw.membershipSize ?? "0"),
+    chairperson: chair?.name ?? "",
+    chairpersonEmail: chair?.email ?? "",
+    chairpersonPhone: chair?.phone ?? "",
+    treasurer: treasurer?.name ?? "",
+    treasurerEmail: treasurer?.email ?? "",
+    treasurerPhone: treasurer?.phone ?? "",
+    secretary: secretary?.name ?? "",
+    secretaryEmail: secretary?.email ?? "",
+    secretaryPhone: secretary?.phone ?? "",
+    bylawsFileName: "",
+    licenseFileName: "",
+    permitsFileName: "",
+    documents: raw.documents ?? [],
+  };
+};
 
 export function CooperativeProfile() {
   const { user } = useAuth();
+  const { id: paramId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+
+  // Resolve cooperative id: URL param > query string > user's own cooperative
   const queryId = searchParams.get("id");
+  const cooperativeId = paramId || queryId || user?.cooperativeId || null;
+  const comingFromList = !!(paramId || queryId);
+
   const [cooperative, setCooperative] = useState<CooperativeProfileData | null>(null);
+  const [healthScore, setHealthScore] = useState<HealthScore | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const [isEditing, setIsEditing] = useState(false);
   const [showDocumentForm, setShowDocumentForm] = useState(false);
   const [formData, setFormData] = useState<CooperativeProfileData | null>(null);
@@ -115,30 +120,69 @@ export function CooperativeProfile() {
     file: null as File | null,
   });
 
+  const fetchCooperative = async () => {
+    if (!cooperativeId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const [coopRes, healthRes] = await Promise.allSettled([
+        api.get<{ cooperative: CooperativeProfileData } | CooperativeProfileData>(`/cooperatives/${cooperativeId}`),
+        api.get<HealthScore>(`/cooperatives/${cooperativeId}/health-score`),
+      ]);
+
+      if (coopRes.status === "fulfilled") {
+        // Backend returns { success, data: {...} } with snake_case DB columns
+        const raw = (coopRes.value as any).data ?? (coopRes.value as any).cooperative ?? coopRes.value;
+        const data = mapApiCooperative(raw);
+        setCooperative(data);
+        setFormData(data);
+      } else {
+        setError("Failed to load cooperative profile.");
+      }
+
+      if (healthRes.status === "fulfilled") {
+        setHealthScore(healthRes.value as HealthScore);
+      }
+      // Health score failure is non-fatal — just leave it null
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const allCoops = getStoredCooperatives();
-    let selected: CooperativeProfileData | undefined;
-    if (queryId) {
-      selected = allCoops.find((c) => c.id === queryId);
-    } else if (user?.cooperativeId) {
-      selected = allCoops.find((c) => c.id === user.cooperativeId);
-    }
-    if (!selected) selected = allCoops[0];
-    if (selected) {
-      setCooperative(selected);
-      setFormData(selected);
-    }
-  }, [user, queryId]);
+    fetchCooperative();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cooperativeId]);
 
   const canEdit = user?.role === "manager" || user?.role === "admin";
 
-  const handleSave = () => {
-    if (!formData) return;
-    const allCoops = getStoredCooperatives();
-    const updated = allCoops.map((coop) => (coop.id === formData.id ? formData : coop));
-    saveStoredCooperatives(updated);
-    setCooperative(formData);
-    setIsEditing(false);
+  const handleSave = async () => {
+    if (!formData || !cooperativeId) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      // Only send backend-allowed fields (strip UI-only and meta fields)
+      const allowedPayload: Record<string, unknown> = {};
+      const allowed = ["name", "type", "sector", "cell", "village", "description", "phone", "email", "address", "status"];
+      for (const key of allowed) {
+        if (formData[key as keyof CooperativeProfileData] !== undefined) {
+          allowedPayload[key] = formData[key as keyof CooperativeProfileData];
+        }
+      }
+      const res = await api.put<{ data: CooperativeProfileData }>(
+        `/cooperatives/${cooperativeId}`,
+        allowedPayload
+      );
+      const updatedRaw = (res as any).data ?? res;
+      const updated = mapApiCooperative(updatedRaw);
+      setCooperative(updated);
+      setFormData(updated);
+      setIsEditing(false);
+    } catch (err: any) {
+      setSaveError(err?.message || "Failed to save changes. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleAddDocument = (e: React.FormEvent) => {
@@ -203,8 +247,8 @@ Secretary: ${cooperative.secretary}
 Email: ${cooperative.secretaryEmail || "N/A"}
 Phone: ${cooperative.secretaryPhone || "N/A"}
 
-DOCUMENTS (${cooperative.documents.length})
-${cooperative.documents.map((doc) => `- ${doc.name} (${doc.type}) - ${doc.uploadedAt} - ${doc.size || "0 KB"}`).join("\n")}
+DOCUMENTS (${cooperative.documents?.length ?? 0})
+${(cooperative.documents ?? []).map((doc) => `- ${doc.name} (${doc.type}) - ${doc.uploadedAt} - ${doc.size || "0 KB"}`).join("\n")}
 
 DESCRIPTION
 ${cooperative.description}
@@ -221,12 +265,22 @@ ${cooperative.description}
     URL.revokeObjectURL(url);
   };
 
-  if (!cooperative || !formData) {
+  if (loading) {
+    return (
+      <div className="max-w-6xl mx-auto py-10">
+        <Card className="p-6">
+          <p className="text-gray-500">Loading cooperative profile…</p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (error || !cooperative || !formData) {
     return (
       <div className="max-w-6xl mx-auto py-10">
         <Card className="p-6">
           <h1 className="text-2xl font-semibold">Cooperative Profile</h1>
-          <p className="mt-4 text-gray-600">No cooperative profile available for your account yet.</p>
+          <p className="mt-4 text-gray-600">{error || "No cooperative profile available for your account yet."}</p>
         </Card>
       </div>
     );
@@ -234,11 +288,21 @@ ${cooperative.description}
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 py-8">
-      {queryId && (
-        <button onClick={() => navigate("/cooperatives")} className="flex items-center gap-2 text-[#2563EB] hover:text-[#1d4ed8] text-sm font-medium">
+      {comingFromList && (
+        <button
+          onClick={() => navigate("/cooperatives")}
+          className="flex items-center gap-2 text-[#2563EB] hover:text-[#1d4ed8] text-sm font-medium"
+        >
           ← Back to Cooperatives
         </button>
       )}
+
+      {saveError && (
+        <div className="bg-red-50 border border-red-200 text-red-800 rounded-lg px-4 py-3 text-sm">
+          {saveError}
+        </div>
+      )}
+
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">{cooperative.name}</h1>
@@ -250,7 +314,7 @@ ${cooperative.description}
             Export Profile
           </Button>
           {canEdit && (
-            <Button variant="secondary" onClick={() => setIsEditing(!isEditing)}>
+            <Button variant="secondary" onClick={() => { setIsEditing(!isEditing); setSaveError(null); }}>
               {isEditing ? "Cancel" : "Edit Profile"}
             </Button>
           )}
@@ -457,7 +521,7 @@ ${cooperative.description}
             )}
 
             <div className="space-y-2">
-              {formData.documents.map((doc) => (
+              {(formData.documents ?? []).map((doc) => (
                 <div
                   key={doc.id}
                   className="flex items-center justify-between p-3 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors"
@@ -486,9 +550,9 @@ ${cooperative.description}
           </div>
 
           {isEditing && (
-            <Button onClick={handleSave}>
+            <Button onClick={handleSave} disabled={saving}>
               <Save className="w-4 h-4 mr-2" />
-              Save Changes
+              {saving ? "Saving…" : "Save Changes"}
             </Button>
           )}
         </div>
@@ -507,6 +571,41 @@ ${cooperative.description}
             </div>
             <p className="text-gray-600 leading-7">{cooperative.description}</p>
           </div>
+
+          {healthScore && (
+            <div className="rounded-2xl border border-gray-200 bg-white p-6">
+              <h3 className="text-sm font-medium text-gray-700 mb-4">Health Score</h3>
+              <div className="flex items-center gap-4 mb-4">
+                <span className="text-4xl font-bold text-[#2563EB]">{healthScore.score}</span>
+                <span
+                  className={`text-xs px-2 py-1 rounded-full font-medium ${
+                    healthScore.trend === "up"
+                      ? "bg-green-100 text-green-800"
+                      : healthScore.trend === "down"
+                      ? "bg-red-100 text-red-800"
+                      : "bg-gray-100 text-gray-800"
+                  }`}
+                >
+                  {healthScore.trend === "up" ? "↑ Improving" : healthScore.trend === "down" ? "↓ Declining" : "→ Stable"}
+                </span>
+              </div>
+              {healthScore.breakdown && Object.keys(healthScore.breakdown).length > 0 && (
+                <div className="space-y-2">
+                  {Object.entries(healthScore.breakdown).map(([key, val]) => (
+                    <div key={key}>
+                      <div className="flex justify-between text-xs text-gray-600 mb-1">
+                        <span className="capitalize">{key.replace(/_/g, " ")}</span>
+                        <span>{val}%</span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-1.5">
+                        <div className="bg-[#2563EB] h-1.5 rounded-full" style={{ width: `${val}%` }}></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </Card>
     </div>

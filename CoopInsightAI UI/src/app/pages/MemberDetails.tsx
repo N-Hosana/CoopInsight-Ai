@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useNavigate, useParams } from "react-router";
 import { useAuth } from "../contexts/AuthContext";
 import {
@@ -12,73 +12,112 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { Button } from "../components/Button";
-import {
-  members,
-  getMemberLoanHistory,
-  getMemberDividendHistory,
-  getMemberCommunicationLog,
-  getMemberContributionHistory,
-  formatFrw,
-} from "../data/financialData";
+import { api } from "../services/api";
 
 interface Member {
   id: string;
   name: string;
-  role: string;
-  contribution: string;
-  cooperative: string;
-  cooperativeId: string;
-  phone: string;
   email: string;
-  nationalId: string;
-  joinDate?: string;
-  status?: "Active" | "Probation" | "Inactive";
+  phone: string;
+  role: string;
+  national_id: string;
+  join_date: string;
+  status: string;
+  cooperative_id: string;
+  cooperative_name: string;
+  total_contributions: number;
+  loan_balance: number;
+  savings_balance: number;
 }
 
-const fallbackMembers: Member[] = [
-  {
-    id: "member-1",
-    name: "Sarah Johnson",
-    role: "Producer",
-    contribution: "RWF 2,500",
-    cooperative: "Green Valley Farmers",
-    cooperativeId: "coop-1",
-    phone: "+250788123456",
-    email: "sarah@greenvalley.coop",
-    nationalId: "1199212345678904",
-    joinDate: "2024-02-15",
-    status: "Active",
-  },
-];
+interface Loan {
+  id: string;
+  amount: number;
+  balance: number;
+  interest_rate: number;
+  due_date: string;
+  status: string;
+  disbursed_at: string;
+}
+
+interface Contribution {
+  id: string;
+  amount: number;
+  type: string;
+  recorded_at: string;
+  description: string;
+}
+
+interface Dividend {
+  id: string;
+  amount: number;
+  period: string;
+  status: string;
+  paid_at: string;
+}
+
+function formatFrw(amount: number): string {
+  return `RWF ${amount.toLocaleString()}`;
+}
 
 export function MemberDetails() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const member = useMemo(() => {
-    const stored = localStorage.getItem("coopinsight_members");
-    const items: Member[] = stored ? JSON.parse(stored) : [];
-    return items.find((item) => item.id === id) || fallbackMembers.find((item) => item.id === id) || null;
-  }, [id]);
+  const [member, setMember] = useState<Member | null>(null);
+  const [loans, setLoans] = useState<Loan[]>([]);
+  const [contributions, setContributions] = useState<Contribution[]>([]);
+  const [dividends, setDividends] = useState<Dividend[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const memberData = useMemo(() => {
-    if (!member) return null;
-    return members.find((m) => m.id === id);
-  }, [member, id]);
+  useEffect(() => {
+    if (!id) return;
+    setLoading(true);
+    setError(null);
+
+    Promise.all([
+      api.get(`/members/${id}`),
+      api.get(`/members/${id}/loans`),
+      api.get(`/members/${id}/contributions`),
+      api.get(`/members/${id}/dividends`),
+    ])
+      .then(([memberRes, loansRes, contributionsRes, dividendsRes]) => {
+        setMember(memberRes.data.member);
+        setLoans(loansRes.data.loans ?? []);
+        setContributions(contributionsRes.data.contributions ?? []);
+        setDividends(dividendsRes.data.dividends ?? []);
+      })
+      .catch((err) => {
+        setError(err?.response?.data?.message ?? "Failed to load member data.");
+      })
+      .finally(() => setLoading(false));
+  }, [id]);
 
   const authorized = useMemo(() => {
     if (!user || !member) return false;
     if (user.role === "member") return user.id === member.id;
-    if (user.role === "manager") return user.cooperativeId === member.cooperativeId;
+    if (user.role === "manager") return user.cooperativeId === member.cooperative_id;
     if (user.role === "admin") return true;
     return false;
   }, [member, user]);
 
-  const loanHistory = useMemo(() => (member ? getMemberLoanHistory(member.id) : []), [member]);
-  const dividendHistory = useMemo(() => (member ? getMemberDividendHistory(member.id) : []), [member]);
-  const communicationLog = useMemo(() => (member ? getMemberCommunicationLog(member.id) : []), [member]);
-  const contributionHistory = useMemo(() => (member ? getMemberContributionHistory(member.id) : []), [member]);
+  if (loading) {
+    return (
+      <div className="max-w-4xl mx-auto py-12">
+        <p className="text-gray-700">Loading member details...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-4xl mx-auto py-12">
+        <p className="text-red-600">{error}</p>
+      </div>
+    );
+  }
 
   if (!member) {
     return (
@@ -112,33 +151,29 @@ Generated: ${new Date().toLocaleString()}
 MEMBER INFORMATION
 Name: ${member.name}
 ID: ${member.id}
-National ID: ${member.nationalId}
+National ID: ${member.national_id}
 Role: ${member.role}
-Status: ${member.status || "Active"}
-Cooperative: ${member.cooperative}
-Join Date: ${member.joinDate}
+Status: ${member.status}
+Cooperative: ${member.cooperative_name}
+Join Date: ${member.join_date}
 
 CONTACT INFORMATION
 Phone: ${member.phone}
 Email: ${member.email}
 
 FINANCIAL SUMMARY
-Contribution: ${member.contribution}
-Membership Fee: ${memberData ? formatFrw(memberData.membershipFee) : "N/A"}
-Loan Balance: ${memberData ? formatFrw(memberData.loanBalance) : "N/A"}
-Savings Balance: ${memberData ? formatFrw(memberData.savingsBalance) : "N/A"}
+Total Contributions: ${formatFrw(member.total_contributions)}
+Loan Balance: ${formatFrw(member.loan_balance)}
+Savings Balance: ${formatFrw(member.savings_balance)}
 
-CONTRIBUTION HISTORY (${contributionHistory.length} transactions)
-${contributionHistory.map((t) => `- ${t.date}: ${t.description} - ${formatFrw(t.amount)}`).join("\n")}
+CONTRIBUTION HISTORY (${contributions.length} transactions)
+${contributions.map((c) => `- ${c.recorded_at}: ${c.description || c.type} - ${formatFrw(c.amount)}`).join("\n")}
 
-LOAN HISTORY (${loanHistory.length} loans)
-${loanHistory.map((l) => `- ${l.date}: ${formatFrw(l.amount)} (${l.status}) - Interest: ${l.interestRate}%`).join("\n")}
+LOAN HISTORY (${loans.length} loans)
+${loans.map((l) => `- ${l.disbursed_at}: ${formatFrw(l.amount)} (${l.status}) - Interest: ${l.interest_rate}% - Balance: ${formatFrw(l.balance)}`).join("\n")}
 
-DIVIDEND HISTORY (${dividendHistory.length} distributions)
-${dividendHistory.map((d) => `- ${d.date}: ${formatFrw(d.amount)} (${d.period})`).join("\n")}
-
-COMMUNICATION LOG (${communicationLog.length} interactions)
-${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n")}
+DIVIDEND HISTORY (${dividends.length} distributions)
+${dividends.map((d) => `- ${d.paid_at ?? "Pending"}: ${formatFrw(d.amount)} (${d.period}) - ${d.status}`).join("\n")}
     `.trim();
 
     const blob = new Blob([report], { type: "text/plain" });
@@ -172,11 +207,11 @@ ${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n"
           <div>
             <h1 className="text-3xl font-bold text-gray-900">{member.name}</h1>
             <p className="text-gray-600 mt-2">
-              {member.role} at {member.cooperative}
+              {member.role} at {member.cooperative_name}
             </p>
           </div>
           <div className="rounded-3xl bg-[#F1F8F2] px-4 py-2 text-sm font-medium text-[#1B4332]">
-            {member.status || "Active"}
+            {member.status}
           </div>
         </div>
 
@@ -193,7 +228,7 @@ ${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n"
               <Building2 className="w-5 h-5 text-[#2D6A4F]" />
               <span className="text-sm font-medium text-gray-900">Cooperative</span>
             </div>
-            <p className="text-gray-700">{member.cooperative}</p>
+            <p className="text-gray-700">{member.cooperative_name}</p>
           </div>
           <div className="rounded-2xl bg-gray-50 p-6 space-y-3">
             <div className="flex items-center gap-3">
@@ -201,35 +236,25 @@ ${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n"
               <span className="text-sm font-medium text-gray-900">Join Date</span>
             </div>
             <p className="text-gray-700">
-              {member.joinDate ? new Date(member.joinDate).toLocaleDateString() : "N/A"}
+              {member.join_date ? new Date(member.join_date).toLocaleDateString() : "N/A"}
             </p>
           </div>
         </div>
       </div>
 
       {/* Financial Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="rounded-2xl border border-gray-200 p-6 bg-white">
-          <p className="text-sm text-gray-500 mb-2">Contribution</p>
-          <p className="text-2xl font-bold text-gray-900">{member.contribution}</p>
+          <p className="text-sm text-gray-500 mb-2">Total Contributions</p>
+          <p className="text-2xl font-bold text-gray-900">{formatFrw(member.total_contributions)}</p>
         </div>
         <div className="rounded-2xl border border-gray-200 p-6 bg-white">
           <p className="text-sm text-gray-500 mb-2">Loan Balance</p>
-          <p className="text-2xl font-bold text-red-600">
-            {memberData ? formatFrw(memberData.loanBalance) : "RWF 0"}
-          </p>
+          <p className="text-2xl font-bold text-red-600">{formatFrw(member.loan_balance)}</p>
         </div>
         <div className="rounded-2xl border border-gray-200 p-6 bg-white">
           <p className="text-sm text-gray-500 mb-2">Savings Balance</p>
-          <p className="text-2xl font-bold text-green-600">
-            {memberData ? formatFrw(memberData.savingsBalance) : "RWF 0"}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-gray-200 p-6 bg-white">
-          <p className="text-sm text-gray-500 mb-2">Membership Fee</p>
-          <p className="text-2xl font-bold text-blue-600">
-            {memberData ? formatFrw(memberData.membershipFee) : "RWF 0"}
-          </p>
+          <p className="text-2xl font-bold text-green-600">{formatFrw(member.savings_balance)}</p>
         </div>
       </div>
 
@@ -240,14 +265,16 @@ ${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n"
           <h2 className="text-lg font-semibold text-gray-900">Contribution History</h2>
         </div>
         <div className="space-y-3">
-          {contributionHistory.length > 0 ? (
-            contributionHistory.map((trans) => (
-              <div key={trans.id} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
+          {contributions.length > 0 ? (
+            contributions.map((contrib) => (
+              <div key={contrib.id} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
                 <div>
-                  <p className="font-medium text-gray-900">{trans.description}</p>
-                  <p className="text-sm text-gray-500">{trans.date}</p>
+                  <p className="font-medium text-gray-900">{contrib.description || contrib.type}</p>
+                  <p className="text-sm text-gray-500">
+                    {contrib.recorded_at ? new Date(contrib.recorded_at).toLocaleDateString() : "N/A"}
+                  </p>
                 </div>
-                <p className="text-sm font-semibold text-green-600">{formatFrw(trans.amount)}</p>
+                <p className="text-sm font-semibold text-green-600">{formatFrw(contrib.amount)}</p>
               </div>
             ))
           ) : (
@@ -264,16 +291,16 @@ ${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n"
             <h2 className="text-lg font-semibold text-gray-900">Loan History</h2>
           </div>
           <div className="space-y-3">
-            {loanHistory.length > 0 ? (
-              loanHistory.map((loan) => (
+            {loans.length > 0 ? (
+              loans.map((loan) => (
                 <div key={loan.id} className="p-3 rounded-lg bg-gray-50">
                   <div className="flex items-center justify-between mb-2">
                     <p className="font-medium text-gray-900">{formatFrw(loan.amount)}</p>
                     <span
                       className={`text-xs font-medium px-2 py-1 rounded ${
-                        loan.status === "Active"
+                        loan.status === "active"
                           ? "bg-yellow-100 text-yellow-800"
-                          : loan.status === "Paid"
+                          : loan.status === "paid"
                           ? "bg-green-100 text-green-800"
                           : "bg-red-100 text-red-800"
                       }`}
@@ -281,9 +308,14 @@ ${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n"
                       {loan.status}
                     </span>
                   </div>
-                  <p className="text-sm text-gray-600">Date: {loan.date}</p>
-                  <p className="text-sm text-gray-600">Due: {loan.dueDate}</p>
-                  <p className="text-sm text-gray-600">Interest: {loan.interestRate}%</p>
+                  <p className="text-sm text-gray-600">
+                    Date: {loan.disbursed_at ? new Date(loan.disbursed_at).toLocaleDateString() : "N/A"}
+                  </p>
+                  <p className="text-sm text-gray-600">
+                    Due: {loan.due_date ? new Date(loan.due_date).toLocaleDateString() : "N/A"}
+                  </p>
+                  <p className="text-sm text-gray-600">Interest: {loan.interest_rate}%</p>
+                  <p className="text-sm text-gray-600">Balance: {formatFrw(loan.balance)}</p>
                 </div>
               ))
             ) : (
@@ -299,12 +331,14 @@ ${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n"
             <h2 className="text-lg font-semibold text-gray-900">Dividend Distribution</h2>
           </div>
           <div className="space-y-3">
-            {dividendHistory.length > 0 ? (
-              dividendHistory.map((div) => (
+            {dividends.length > 0 ? (
+              dividends.map((div) => (
                 <div key={div.id} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
                   <div>
                     <p className="font-medium text-gray-900">{div.period}</p>
-                    <p className="text-sm text-gray-500">{div.date}</p>
+                    <p className="text-sm text-gray-500">
+                      {div.paid_at ? new Date(div.paid_at).toLocaleDateString() : "Pending"}
+                    </p>
                   </div>
                   <div className="text-right">
                     <p className="font-semibold text-green-600">{formatFrw(div.amount)}</p>
@@ -319,34 +353,14 @@ ${communicationLog.map((c) => `- ${c.date}: ${c.type} - ${c.message}`).join("\n"
         </div>
       </div>
 
-      {/* Communication Log */}
+      {/* Communication Log placeholder — no backend endpoint provided */}
       <div className="rounded-2xl border border-gray-200 p-6 bg-white">
         <div className="flex items-center gap-3 mb-4">
           <MessageSquare className="w-5 h-5 text-[#2563EB]" />
           <h2 className="text-lg font-semibold text-gray-900">Communication Log</h2>
         </div>
-        <div className="space-y-3">
-          {communicationLog.length > 0 ? (
-            communicationLog.map((log) => (
-              <div key={log.id} className="flex items-start gap-3 p-3 rounded-lg bg-gray-50">
-                <div className="mt-1">
-                  <span className="inline-flex px-2 py-1 text-xs font-medium rounded bg-blue-100 text-blue-800">
-                    {log.type}
-                  </span>
-                </div>
-                <div className="flex-1">
-                  <p className="font-medium text-gray-900">{log.message}</p>
-                  <p className="text-sm text-gray-500">{log.date}</p>
-                </div>
-                <span className="text-xs text-gray-600">{log.status}</span>
-              </div>
-            ))
-          ) : (
-            <p className="text-gray-500 text-sm">No communication log</p>
-          )}
-        </div>
+        <p className="text-gray-500 text-sm">No communication log</p>
       </div>
     </div>
   );
 }
-

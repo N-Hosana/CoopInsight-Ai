@@ -4,6 +4,8 @@ import { useAuth } from "../contexts/AuthContext";
 import { Mail, CheckCircle, XCircle, ArrowLeft } from "lucide-react";
 import { Button } from "../components/Button";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
 export function EmailVerification() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -42,9 +44,21 @@ export function EmailVerification() {
     if (!email) return;
 
     setIsVerifying(true);
-    // In a real app, this would call an API to resend verification email
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    setMessage("Verification email sent! Please check your inbox.");
+    try {
+      const res = await fetch(`${API_URL}/auth/resend-verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMessage(data.message ?? "Verification email sent! Please check your inbox.");
+      } else {
+        setMessage(data.message ?? "Failed to resend verification email. Please try again.");
+      }
+    } catch {
+      setMessage("Network error. Please check your connection and try again.");
+    }
     setIsVerifying(false);
   };
 

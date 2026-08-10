@@ -10,7 +10,7 @@ const navigation = [
   { name: "Activities", path: "/activities", icon: Activity },
   { name: "Record Transaction", path: "/record-transaction", icon: CreditCard },
   { name: "AI Insights", path: "/ai-insights", icon: BarChart3 },
-  { name: "Government Monitoring", path: "/government-monitoring", icon: ShieldCheck },
+  { name: "RCA Monitoring", path: "/government-monitoring", icon: ShieldCheck },
   { name: "Reports", path: "/reports", icon: FileText },
 ];
 

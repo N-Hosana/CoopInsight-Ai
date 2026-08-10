@@ -5,6 +5,7 @@ import { Button } from "../components/Button";
 import { Input } from "../components/Input";
 import { SMSPanel } from "../components/SMSPanel";
 import { useAuth } from "../contexts/AuthContext";
+import { api } from "../services/api";
 import { Plus, Building2, Users, ChevronDown, ChevronUp, MessageSquare, ExternalLink } from "lucide-react";
 
 interface Member {
@@ -35,6 +36,7 @@ interface Cooperative {
   status: string;
   operatingArea: string;
   membershipSize: string;
+  composition: "Male" | "Female" | "Mixed";
   bylawsFileName: string;
   constitutionFileName: string;
   licenseFileName: string;
@@ -56,171 +58,83 @@ interface Cooperative {
   documents: CooperativeDocument[];
 }
 
-const initialCooperatives: Cooperative[] = [
-  {
-    id: "coop-1",
-    name: "Green Valley Farmers",
-    sector: "Agriculture",
-    district: "Gasabo District",
-    type: "Savings & Credit",
-    registrationNumber: "RWA-2024-001",
-    registrationDate: "2024-02-10",
-    status: "Active",
-    operatingArea: "Gasabo District",
-    membershipSize: "320",
-    bylawsFileName: "GreenValley_Bylaws.pdf",
-    constitutionFileName: "GreenValley_Constitution.pdf",
-    licenseFileName: "GreenValley_BusinessLicense.pdf",
-    permitsFileName: "GreenValley_OperatingPermit.pdf",
+function mapApiCooperative(raw: any, membershipSize?: number, composition: Cooperative["composition"] = "Mixed"): Cooperative {
+  return {
+    id: String(raw.id ?? ""),
+    name: raw.name ?? "",
+    sector: raw.sector ?? "",
+    district: raw.address ?? "Gasabo District",
+    type: raw.sector ?? "",
+    registrationNumber: raw.registration_number ?? "",
+    registrationDate: raw.established_date ?? "",
+    status: raw.status ?? "Active",
+    operatingArea: raw.address ?? "",
+    membershipSize: String(membershipSize ?? raw.member_count ?? 0),
+    composition,
+    bylawsFileName: "",
+    constitutionFileName: "",
+    licenseFileName: "",
+    permitsFileName: "",
     leadership: {
-      chairperson: "David Mugisha",
-      chairpersonEmail: "david.mugisha@greenvalley.coop",
-      chairpersonPhone: "+250788234567",
-      treasurer: "Sarah Johnson",
-      treasurerEmail: "sarah.johnson@greenvalley.coop",
-      treasurerPhone: "+250788456789",
-      secretary: "Aline Uwase",
-      secretaryEmail: "aline.uwase@greenvalley.coop",
-      secretaryPhone: "+250788567890",
+      chairperson: "",
+      treasurer: "",
+      secretary: "",
     },
-    totalRevenue: "$45,200",
-    healthScore: 85,
-    members: [
-      { id: "m1", name: "Sarah Johnson", role: "Producer", contribution: "$2,500", phone: "+1234567890", status: "Active", progress: "Planting cycle complete" },
-      { id: "m2", name: "Lisa Thompson", role: "Coordinator", contribution: "$2,100", phone: "+1234567891", status: "Active", progress: "Member onboarding" },
-      { id: "m3", name: "Robert Martinez", role: "Producer", contribution: "$1,800", phone: "+1234567892", status: "Active", progress: "Harvest planning" },
-    ],
-    documents: [
-      { id: "doc-1", name: "Cooperative Bylaws", type: "Bylaws", uploadedAt: "2024-02-11" },
-      { id: "doc-2", name: "Business License", type: "License", uploadedAt: "2024-02-12" },
-      { id: "doc-3", name: "Operating Permit", type: "Permit", uploadedAt: "2024-02-13" },
-      { id: "doc-4", name: "Cooperative Constitution", type: "Constitution", uploadedAt: "2024-02-11" },
-    ],
-  },
-  {
-    id: "coop-2",
-    name: "Sunrise Dairy Cooperative",
-    sector: "Agriculture",
-    district: "Gasabo District",
-    type: "Agriculture",
-    registrationNumber: "RWA-2024-015",
-    registrationDate: "2023-11-05",
-    status: "Active",
-    operatingArea: "Kigali City",
-    membershipSize: "210",
-    bylawsFileName: "SunriseDairy_Bylaws.pdf",
-    constitutionFileName: "SunriseDairy_Constitution.pdf",
-    licenseFileName: "SunriseDairy_License.pdf",
-    permitsFileName: "SunriseDairy_Permits.pdf",
-    leadership: {
-      chairperson: "Michael Chen",
-      chairpersonEmail: "michael.chen@sunrise.coop",
-      chairpersonPhone: "+250788123123",
-      treasurer: "James Wilson",
-      treasurerEmail: "james.wilson@sunrise.coop",
-      treasurerPhone: "+250788321321",
-      secretary: "Nadine Uwimana",
-      secretaryEmail: "nadine.uwimana@sunrise.coop",
-      secretaryPhone: "+250788654654",
-    },
-    totalRevenue: "$68,900",
-    healthScore: 72,
-    members: [
-      { id: "m4", name: "Michael Chen", role: "Manager", contribution: "$5,000", phone: "+1234567893", status: "Active", progress: "Operational oversight" },
-      { id: "m5", name: "James Wilson", role: "Treasurer", contribution: "$4,500", phone: "+1234567894", status: "Active", progress: "Financial reporting" },
-    ],
-    documents: [
-      { id: "doc-4", name: "Dairy Business License", type: "License", uploadedAt: "2023-11-07" },
-      { id: "doc-5", name: "Annual Bylaws", type: "Bylaws", uploadedAt: "2023-11-06" },
-      { id: "doc-6", name: "Cooperative Constitution", type: "Constitution", uploadedAt: "2023-11-06" },
-    ],
-  },
-  {
-    id: "coop-3",
-    name: "Ocean View Fisheries",
-    sector: "Fisheries",
-    district: "Gasabo District",
-    type: "Fisheries",
-    registrationNumber: "RWA-2025-003",
-    registrationDate: "2024-05-01",
-    status: "Active",
-    operatingArea: "Southern Province",
-    membershipSize: "130",
-    bylawsFileName: "OceanView_Bylaws.pdf",
-    constitutionFileName: "OceanView_Constitution.pdf",
-    licenseFileName: "OceanView_License.pdf",
-    permitsFileName: "OceanView_Permit.pdf",
-    leadership: {
-      chairperson: "Emily Rodriguez",
-      chairpersonEmail: "emily.rodriguez@oceanview.coop",
-      chairpersonPhone: "+250788345345",
-      treasurer: "Anna Peterson",
-      treasurerEmail: "anna.peterson@oceanview.coop",
-      treasurerPhone: "+250788543543",
-      secretary: "Carlos Ruiz",
-      secretaryEmail: "carlos.ruiz@oceanview.coop",
-      secretaryPhone: "+250788987987",
-    },
-    totalRevenue: "$32,100",
-    healthScore: 68,
-    members: [
-      { id: "m6", name: "Emily Rodriguez", role: "Artisan", contribution: "$1,800", phone: "+1234567895", status: "Active", progress: "New market research" },
-      { id: "m7", name: "Anna Peterson", role: "Secretary", contribution: "$2,200", phone: "+1234567896", status: "Active", progress: "Permit renewals" },
-      { id: "m8", name: "Carlos Ruiz", role: "Producer", contribution: "$1,600", phone: "+1234567897", status: "Inactive", progress: "On leave" },
-    ],
-    documents: [
-      { id: "doc-6", name: "Fishery Permit", type: "Permit", uploadedAt: "2024-05-02" },
-      { id: "doc-7", name: "Cooperative Bylaws", type: "Bylaws", uploadedAt: "2024-05-01" },
-      { id: "doc-8", name: "Cooperative Constitution", type: "Constitution", uploadedAt: "2024-05-01" },
-    ],
-  },
-  {
-    id: "coop-4",
-    name: "Mountain Peak Agricultural",
-    sector: "Agriculture",
-    district: "Gasabo District",
-    type: "Agriculture",
-    registrationNumber: "RWA-2023-047",
-    registrationDate: "2023-09-18",
-    status: "Active",
-    operatingArea: "Eastern Province",
-    membershipSize: "210",
-    bylawsFileName: "MountainPeak_Bylaws.pdf",
-    constitutionFileName: "MountainPeak_Constitution.pdf",
-    licenseFileName: "MountainPeak_License.pdf",
-    permitsFileName: "MountainPeak_Permit.pdf",
-    leadership: {
-      chairperson: "David Kim",
-      chairpersonEmail: "david.kim@mountainpeak.coop",
-      chairpersonPhone: "+250788765432",
-      treasurer: "Maria Garcia",
-      treasurerEmail: "maria.garcia@mountainpeak.coop",
-      treasurerPhone: "+250788876543",
-      secretary: "Jean Nkurunziza",
-      secretaryEmail: "jean.nkurunziza@mountainpeak.coop",
-      secretaryPhone: "+250788987654",
-    },
-    totalRevenue: "$52,800",
-    healthScore: 79,
-    members: [
-      { id: "m9", name: "David Kim", role: "Producer", contribution: "$3,200", phone: "+1234567898", status: "Active", progress: "Market planning" },
-      { id: "m10", name: "Maria Garcia", role: "Quality Control", contribution: "$2,800", phone: "+1234567899", status: "Active", progress: "Quality review" },
-    ],
-    documents: [
-      { id: "doc-8", name: "Agricultural License", type: "License", uploadedAt: "2023-09-20" },
-      { id: "doc-9", name: "Cooperative Constitution", type: "Constitution", uploadedAt: "2023-09-18" },
-    ],
-  },
-];
+    members: [],
+    totalRevenue: "$0",
+    healthScore: 58,
+    documents: [],
+  };
+}
 
 export function Cooperatives() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [cooperatives, setCooperatives] = useState<Cooperative[]>(() => {
-    const saved = localStorage.getItem('coopinsight_cooperatives');
-    return saved ? JSON.parse(saved) : initialCooperatives;
-  });
-  
+  const [cooperatives, setCooperatives] = useState<Cooperative[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchCooperatives = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api.get<any>("/cooperatives?page=1&limit=100");
+      const membersResponse = await api.get<any>("/members?page=1&limit=500");
+      const rawList: any[] = Array.isArray(response?.data) ? response.data : [];
+      const memberList: any[] = Array.isArray(membersResponse?.data) ? membersResponse.data : [];
+
+      const counts = new Map<string, { count: number; genders: Set<string> }>();
+      for (const member of memberList) {
+        const coopId = String(member.cooperative_id ?? "");
+        if (!coopId) continue;
+        const existing = counts.get(coopId) ?? { count: 0, genders: new Set<string>() };
+        existing.count += 1;
+        if (member.gender) existing.genders.add(String(member.gender).toLowerCase());
+        counts.set(coopId, existing);
+      }
+
+      setCooperatives(rawList.map((raw: any) => {
+        const coopId = String(raw.id ?? "");
+        const memberInfo = counts.get(coopId);
+        const count = memberInfo?.count ?? Number(raw.member_count ?? 0);
+        const composition = memberInfo?.genders.size === 0
+          ? "Mixed"
+          : memberInfo?.genders.size === 1
+            ? (memberInfo.genders.has("male") ? "Male" : "Female")
+            : "Mixed";
+        return mapApiCooperative(raw, count, composition as Cooperative["composition"]);
+      }));
+    } catch (err: any) {
+      setError(err?.response?.data?.message ?? err?.message ?? "Failed to load cooperatives.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCooperatives();
+  }, []);
+
   // Filter cooperatives based on user role
   const filteredCooperatives = (() => {
     if (user?.role === "member" && user.cooperativeId) {
@@ -236,6 +150,7 @@ export function Cooperatives() {
   const [showForm, setShowForm] = useState(false);
   const [showSMS, setShowSMS] = useState(false);
   const [formError, setFormError] = useState("");
+  const [formSubmitting, setFormSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     name: "",
     sector: "",
@@ -261,11 +176,7 @@ export function Cooperatives() {
     permitsFileName: "",
   });
 
-  useEffect(() => {
-    localStorage.setItem('coopinsight_cooperatives', JSON.stringify(cooperatives));
-  }, [cooperatives]);
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError("");
 
@@ -301,69 +212,49 @@ export function Cooperatives() {
       return;
     }
 
-    const newCooperative: Cooperative = {
-      id: Date.now().toString(),
-      name: formData.name,
-      sector: formData.sector,
-      district: formData.district,
-      type: formData.type,
-      registrationNumber: formData.registrationNumber,
-      registrationDate: formData.registrationDate,
-      status: formData.status,
-      operatingArea: formData.operatingArea,
-      membershipSize: formData.membershipSize,
-      bylawsFileName: formData.bylawsFileName,
-      constitutionFileName: formData.constitutionFileName,
-      licenseFileName: formData.licenseFileName,
-      permitsFileName: formData.permitsFileName,
-      leadership: {
-        chairperson: formData.chairperson,
-        chairpersonEmail: formData.chairpersonEmail,
-        chairpersonPhone: formData.chairpersonPhone,
-        treasurer: formData.treasurer,
-        treasurerEmail: formData.treasurerEmail,
-        treasurerPhone: formData.treasurerPhone,
-        secretary: formData.secretary,
-        secretaryEmail: formData.secretaryEmail,
-        secretaryPhone: formData.secretaryPhone,
-      },
-      members: [],
-      totalRevenue: "$0",
-      healthScore: 58,
-      documents: [
-        { id: `doc-${Date.now()}-bylaws`, name: formData.bylawsFileName, type: "Bylaws", uploadedAt: new Date().toLocaleDateString() },
-        { id: `doc-${Date.now()}-constitution`, name: formData.constitutionFileName, type: "Constitution", uploadedAt: new Date().toLocaleDateString() },
-        { id: `doc-${Date.now()}-license`, name: formData.licenseFileName, type: "License", uploadedAt: new Date().toLocaleDateString() },
-        { id: `doc-${Date.now()}-permit`, name: formData.permitsFileName, type: "Permit", uploadedAt: new Date().toLocaleDateString() },
-      ],
-    };
-
-    setCooperatives([newCooperative, ...cooperatives]);
-    setFormData({
-      name: "",
-      sector: "",
-      district: "Gasabo District",
-      type: "",
-      registrationNumber: "",
-      registrationDate: "",
-      status: "Active",
-      operatingArea: "",
-      membershipSize: "",
-      chairperson: "",
-      chairpersonEmail: "",
-      chairpersonPhone: "",
-      treasurer: "",
-      treasurerEmail: "",
-      treasurerPhone: "",
-      secretary: "",
-      secretaryEmail: "",
-      secretaryPhone: "",
-      bylawsFileName: "",
-      constitutionFileName: "",
-      licenseFileName: "",
-      permitsFileName: "",
-    });
-    setShowForm(false);
+    setFormSubmitting(true);
+    try {
+      await api.post("/cooperatives", {
+        name: formData.name,
+        registration_number: formData.registrationNumber,
+        sector: formData.sector,
+        status: formData.status,
+        member_count: Number(formData.membershipSize),
+        established_date: formData.registrationDate,
+        address: formData.operatingArea,
+        description: `Type: ${formData.type}`,
+      });
+      await fetchCooperatives();
+      setFormData({
+        name: "",
+        sector: "",
+        district: "Gasabo District",
+        type: "",
+        registrationNumber: "",
+        registrationDate: "",
+        status: "Active",
+        operatingArea: "",
+        membershipSize: "",
+        chairperson: "",
+        chairpersonEmail: "",
+        chairpersonPhone: "",
+        treasurer: "",
+        treasurerEmail: "",
+        treasurerPhone: "",
+        secretary: "",
+        secretaryEmail: "",
+        secretaryPhone: "",
+        bylawsFileName: "",
+        constitutionFileName: "",
+        licenseFileName: "",
+        permitsFileName: "",
+      });
+      setShowForm(false);
+    } catch (err: any) {
+      setFormError(err?.response?.data?.message ?? err?.message ?? "Failed to register cooperative.");
+    } finally {
+      setFormSubmitting(false);
+    }
   };
 
   const toggleExpand = (coopId: string) => {
@@ -376,7 +267,7 @@ export function Cooperatives() {
     return "text-red-600";
   };
 
-  const allMembers = filteredCooperatives.flatMap(coop => 
+  const allMembers = filteredCooperatives.flatMap(coop =>
     coop.members.map(member => ({
       ...member,
       cooperative: coop.name,
@@ -469,10 +360,18 @@ export function Cooperatives() {
                 >
                   <option value="">Select a type</option>
                   <option value="Agriculture">Agriculture</option>
-                  <option value="Savings & Credit">Savings & Credit</option>
-                  <option value="Fisheries">Fisheries</option>
+                  <option value="Livestock">Livestock</option>
                   <option value="Handicrafts">Handicrafts</option>
-                  <option value="Retail">Retail</option>
+                  <option value="Services">Services</option>
+                  <option value="Trading">Trading</option>
+                  <option value="Transport">Transport</option>
+                  <option value="Construction">Construction</option>
+                  <option value="Carpentry">Carpentry</option>
+                  <option value="Dairy">Dairy</option>
+                  <option value="Coffee">Coffee</option>
+                  <option value="Tea">Tea</option>
+                  <option value="Honey Production">Honey Production</option>
+                  <option value="Poultry">Poultry</option>
                 </select>
               </div>
               <div>
@@ -657,7 +556,9 @@ export function Cooperatives() {
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row">
-              <Button type="submit">Register Cooperative</Button>
+              <Button type="submit" disabled={formSubmitting}>
+                {formSubmitting ? "Registering..." : "Register Cooperative"}
+              </Button>
               <Button type="button" variant="secondary" onClick={() => setShowForm(false)}>
                 Cancel
               </Button>
@@ -666,201 +567,227 @@ export function Cooperatives() {
         </Card>
       )}
 
-      {/* Cooperatives List with Expandable Details */}
-      <div className="space-y-4">
-        {filteredCooperatives.map((coop) => {
-          const isExpanded = expandedCoop === coop.id;
-          
-          return (
-            <Card key={coop.id} className="overflow-hidden">
-              {/* Cooperative Header */}
-              <div
-                className="p-6 cursor-pointer hover:bg-gray-50 transition-colors"
-                onClick={() => toggleExpand(coop.id)}
-              >
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-lg bg-[#2D6A4F]/10 flex items-center justify-center flex-shrink-0">
-                    <Building2 className="w-6 h-6 text-[#2D6A4F]" />
-                  </div>
-                  <div className="flex-1">
-                    <h3 className="font-semibold text-gray-900 text-lg mb-1">{coop.name}</h3>
-                    <div className="flex items-center gap-4 text-sm text-gray-600">
-                      <span className="flex items-center gap-1">
-                        <Users className="w-4 h-4" />
-                        {coop.members.length} members
-                      </span>
-                      <span>•</span>
-                      <span>{coop.sector}</span>
-                      <span>•</span>
-                      <span>{coop.district}</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-6">
-                    <div className="text-right">
-                      <p className="text-sm text-gray-500">Revenue</p>
-                      <p className="text-lg font-semibold text-gray-900">{coop.totalRevenue}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm text-gray-500">Health Score</p>
-                      <p className={`text-lg font-semibold ${getHealthColor(coop.healthScore)}`}>
-                        {coop.healthScore}%
-                      </p>
-                    </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); navigate(`/cooperatives/profile?id=${coop.id}`); }}
-                      className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-[#2D6A4F] border border-[#2D6A4F] rounded-lg hover:bg-[#2D6A4F]/10 transition-colors"
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                      View Details
-                    </button>
-                    {isExpanded ? (
-                      <ChevronUp className="w-5 h-5 text-gray-400" />
-                    ) : (
-                      <ChevronDown className="w-5 h-5 text-gray-400" />
-                    )}
-                  </div>
-                </div>
-              </div>
+      {/* Loading / Error States */}
+      {loading && (
+        <div className="flex items-center justify-center py-16 text-gray-500">
+          Loading cooperatives...
+        </div>
+      )}
+      {!loading && error && (
+        <div className="flex flex-col items-center justify-center py-16 gap-4">
+          <p className="text-red-600">{error}</p>
+          <Button variant="secondary" onClick={fetchCooperatives}>Retry</Button>
+        </div>
+      )}
 
-              {/* Expanded Content - Members Table, leadership, and documents */}
-              {isExpanded && (
-                <div className="border-t border-gray-200 bg-gray-50">
-                  <div className="p-6 space-y-6">
-                    <div>
-                      <h4 className="font-medium text-gray-900 mb-4">Members & Their Activities</h4>
-                      {coop.members.length > 0 ? (
-                        <div className="bg-white rounded-lg overflow-hidden border border-gray-200">
-                          <table className="w-full">
-                            <thead className="bg-gray-50">
-                              <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contribution</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Phone</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-gray-200">
-                              {coop.members.map((member) => (
-                                <tr key={member.id} className="hover:bg-gray-50">
-                                  <td className="px-4 py-3 text-sm font-medium text-gray-900">{member.name}</td>
-                                  <td className="px-4 py-3 text-sm text-gray-700">{member.role}</td>
-                                  <td className="px-4 py-3 text-sm text-gray-700">{member.contribution}</td>
-                                  <td className="px-4 py-3 text-sm text-gray-500">{member.phone}</td>
-                                  <td className="px-4 py-3">
-                                    <span
-                                      className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                        member.status === "Active"
-                                          ? "bg-green-100 text-green-800"
-                                          : "bg-gray-100 text-gray-800"
-                                      }`}
-                                    >
-                                      {member.status}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-3 text-sm text-gray-700">{member.progress}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
+      {/* Cooperatives List with Expandable Details */}
+      {!loading && !error && (
+        <div className="space-y-4">
+          {filteredCooperatives.length === 0 && (
+            <div className="flex items-center justify-center py-16 text-gray-500">
+              No cooperatives found.
+            </div>
+          )}
+          {filteredCooperatives.map((coop) => {
+            const isExpanded = expandedCoop === coop.id;
+
+            return (
+              <Card key={coop.id} className="overflow-hidden">
+                {/* Cooperative Header */}
+                <div
+                  className="p-6 cursor-pointer hover:bg-gray-50 transition-colors"
+                  onClick={() => toggleExpand(coop.id)}
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 rounded-lg bg-[#2D6A4F]/10 flex items-center justify-center flex-shrink-0">
+                      <Building2 className="w-6 h-6 text-[#2D6A4F]" />
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-semibold text-gray-900 text-lg mb-1">{coop.name}</h3>
+                      <div className="flex items-center gap-4 text-sm text-gray-600">
+                        <span className="flex items-center gap-1">
+                          <Users className="w-4 h-4" />
+                          {coop.membershipSize} members
+                        </span>
+                        <span>•</span>
+                        <span>{coop.composition}</span>
+                        <span>•</span>
+                        <span>{coop.sector}</span>
+                        <span>•</span>
+                        <span>{coop.district}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-6">
+                      <div className="text-right">
+                        <p className="text-sm text-gray-500">Revenue</p>
+                        <p className="text-lg font-semibold text-gray-900">{coop.totalRevenue}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm text-gray-500">Health Score</p>
+                        <p className={`text-lg font-semibold ${getHealthColor(coop.healthScore)}`}>
+                          {coop.healthScore}%
+                        </p>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); navigate(`/cooperatives/profile?id=${coop.id}`); }}
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-[#2D6A4F] border border-[#2D6A4F] rounded-lg hover:bg-[#2D6A4F]/10 transition-colors"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        View Details
+                      </button>
+                      {isExpanded ? (
+                        <ChevronUp className="w-5 h-5 text-gray-400" />
                       ) : (
-                        <p className="text-gray-500 text-sm">No members yet</p>
+                        <ChevronDown className="w-5 h-5 text-gray-400" />
                       )}
                     </div>
-
-                    <div className="grid gap-6 lg:grid-cols-2">
-                      <div className="bg-white rounded-2xl border border-gray-200 p-6">
-                        <h4 className="text-lg font-semibold text-gray-900 mb-4">Cooperative details</h4>
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <div>
-                            <p className="text-sm text-gray-500">Registration number</p>
-                            <p className="font-medium text-gray-900">{coop.registrationNumber}</p>
-                          </div>
-                          <div>
-                            <p className="text-sm text-gray-500">Registration date</p>
-                            <p className="font-medium text-gray-900">{coop.registrationDate}</p>
-                          </div>
-                          <div>
-                            <p className="text-sm text-gray-500">Status</p>
-                            <p className="font-medium text-gray-900">{coop.status}</p>
-                          </div>
-                          <div>
-                            <p className="text-sm text-gray-500">Operating area</p>
-                            <p className="font-medium text-gray-900">{coop.operatingArea}</p>
-                          </div>
-                          <div>
-                            <p className="text-sm text-gray-500">Membership size</p>
-                            <p className="font-medium text-gray-900">{coop.membershipSize}</p>
-                          </div>
-                          <div>
-                            <p className="text-sm text-gray-500">Cooperative type</p>
-                            <p className="font-medium text-gray-900">{coop.type}</p>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="bg-white rounded-2xl border border-gray-200 p-6">
-                        <h4 className="text-lg font-semibold text-gray-900 mb-4">Leadership & Contact</h4>
-                        <div className="space-y-4 text-sm text-gray-700">
-                          <div className="grid gap-2">
-                            <p className="text-sm text-gray-500">Chairperson</p>
-                            <p className="font-medium text-gray-900">{coop.leadership.chairperson}</p>
-                            {coop.leadership.chairpersonEmail && <p className="text-gray-500">{coop.leadership.chairpersonEmail}</p>}
-                            {coop.leadership.chairpersonPhone && <p className="text-gray-500">{coop.leadership.chairpersonPhone}</p>}
-                          </div>
-                          <div className="grid gap-2">
-                            <p className="text-sm text-gray-500">Treasurer</p>
-                            <p className="font-medium text-gray-900">{coop.leadership.treasurer}</p>
-                            {coop.leadership.treasurerEmail && <p className="text-gray-500">{coop.leadership.treasurerEmail}</p>}
-                            {coop.leadership.treasurerPhone && <p className="text-gray-500">{coop.leadership.treasurerPhone}</p>}
-                          </div>
-                          <div className="grid gap-2">
-                            <p className="text-sm text-gray-500">Secretary</p>
-                            <p className="font-medium text-gray-900">{coop.leadership.secretary}</p>
-                            {coop.leadership.secretaryEmail && <p className="text-gray-500">{coop.leadership.secretaryEmail}</p>}
-                            {coop.leadership.secretaryPhone && <p className="text-gray-500">{coop.leadership.secretaryPhone}</p>}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="bg-white rounded-2xl border border-gray-200 p-6">
-                      <div className="flex items-center justify-between gap-4 mb-4">
-                        <div>
-                          <h4 className="text-lg font-semibold text-gray-900">Document access</h4>
-                          <p className="text-sm text-gray-500">Secure metadata for cooperative bylaws, constitution, licenses and permits.</p>
-                        </div>
-                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">Restricted view</span>
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="rounded-2xl border border-gray-200 p-4">
-                          <p className="text-sm text-gray-500">Bylaws</p>
-                          <p className="font-medium text-gray-900">{coop.bylawsFileName}</p>
-                        </div>
-                        <div className="rounded-2xl border border-gray-200 p-4">
-                          <p className="text-sm text-gray-500">Constitution</p>
-                          <p className="font-medium text-gray-900">{coop.constitutionFileName}</p>
-                        </div>
-                        <div className="rounded-2xl border border-gray-200 p-4">
-                          <p className="text-sm text-gray-500">Business license</p>
-                          <p className="font-medium text-gray-900">{coop.licenseFileName}</p>
-                        </div>
-                        <div className="rounded-2xl border border-gray-200 p-4">
-                          <p className="text-sm text-gray-500">Permits</p>
-                          <p className="font-medium text-gray-900">{coop.permitsFileName}</p>
-                        </div>
-                      </div>
-                      <p className="text-sm text-gray-500 mt-4">Document files are stored securely; this view shows metadata only.</p>
-                    </div>
                   </div>
                 </div>
-              )}
-            </Card>
-          );
-        })}
-      </div>
+
+                {/* Expanded Content - Members Table, leadership, and documents */}
+                {isExpanded && (
+                  <div className="border-t border-gray-200 bg-gray-50">
+                    <div className="p-6 space-y-6">
+                      <div>
+                        <h4 className="font-medium text-gray-900 mb-4">Members & Their Activities</h4>
+                        {coop.members.length > 0 ? (
+                          <div className="bg-white rounded-lg overflow-hidden border border-gray-200">
+                            <table className="w-full">
+                              <thead className="bg-gray-50">
+                                <tr>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contribution</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Phone</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-200">
+                                {coop.members.map((member) => (
+                                  <tr key={member.id} className="hover:bg-gray-50">
+                                    <td className="px-4 py-3 text-sm font-medium text-gray-900">{member.name}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-700">{member.role}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-700">{member.contribution}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-500">{member.phone}</td>
+                                    <td className="px-4 py-3">
+                                      <span
+                                        className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                          member.status === "Active"
+                                            ? "bg-green-100 text-green-800"
+                                            : "bg-gray-100 text-gray-800"
+                                        }`}
+                                      >
+                                        {member.status}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-700">{member.progress}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <p className="text-gray-500 text-sm">No members yet</p>
+                        )}
+                      </div>
+
+                      <div className="grid gap-6 lg:grid-cols-2">
+                        <div className="bg-white rounded-2xl border border-gray-200 p-6">
+                          <h4 className="text-lg font-semibold text-gray-900 mb-4">Cooperative details</h4>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div>
+                              <p className="text-sm text-gray-500">Registration number</p>
+                              <p className="font-medium text-gray-900">{coop.registrationNumber}</p>
+                            </div>
+                            <div>
+                              <p className="text-sm text-gray-500">Registration date</p>
+                              <p className="font-medium text-gray-900">{coop.registrationDate}</p>
+                            </div>
+                            <div>
+                              <p className="text-sm text-gray-500">Status</p>
+                              <p className="font-medium text-gray-900">{coop.status}</p>
+                            </div>
+                            <div>
+                              <p className="text-sm text-gray-500">Operating area</p>
+                              <p className="font-medium text-gray-900">{coop.operatingArea}</p>
+                            </div>
+                            <div>
+                              <p className="text-sm text-gray-500">Membership size</p>
+                              <p className="font-medium text-gray-900">{coop.membershipSize}</p>
+                            </div>
+                            <div>
+                              <p className="text-sm text-gray-500">Membership composition</p>
+                              <p className="font-medium text-gray-900">{coop.composition}</p>
+                            </div>
+                            <div>
+                              <p className="text-sm text-gray-500">Cooperative type</p>
+                              <p className="font-medium text-gray-900">{coop.type}</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-white rounded-2xl border border-gray-200 p-6">
+                          <h4 className="text-lg font-semibold text-gray-900 mb-4">Leadership & Contact</h4>
+                          <div className="space-y-4 text-sm text-gray-700">
+                            <div className="grid gap-2">
+                              <p className="text-sm text-gray-500">Chairperson</p>
+                              <p className="font-medium text-gray-900">{coop.leadership.chairperson || "—"}</p>
+                              {coop.leadership.chairpersonEmail && <p className="text-gray-500">{coop.leadership.chairpersonEmail}</p>}
+                              {coop.leadership.chairpersonPhone && <p className="text-gray-500">{coop.leadership.chairpersonPhone}</p>}
+                            </div>
+                            <div className="grid gap-2">
+                              <p className="text-sm text-gray-500">Treasurer</p>
+                              <p className="font-medium text-gray-900">{coop.leadership.treasurer || "—"}</p>
+                              {coop.leadership.treasurerEmail && <p className="text-gray-500">{coop.leadership.treasurerEmail}</p>}
+                              {coop.leadership.treasurerPhone && <p className="text-gray-500">{coop.leadership.treasurerPhone}</p>}
+                            </div>
+                            <div className="grid gap-2">
+                              <p className="text-sm text-gray-500">Secretary</p>
+                              <p className="font-medium text-gray-900">{coop.leadership.secretary || "—"}</p>
+                              {coop.leadership.secretaryEmail && <p className="text-gray-500">{coop.leadership.secretaryEmail}</p>}
+                              {coop.leadership.secretaryPhone && <p className="text-gray-500">{coop.leadership.secretaryPhone}</p>}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="bg-white rounded-2xl border border-gray-200 p-6">
+                        <div className="flex items-center justify-between gap-4 mb-4">
+                          <div>
+                            <h4 className="text-lg font-semibold text-gray-900">Document access</h4>
+                            <p className="text-sm text-gray-500">Secure metadata for cooperative bylaws, constitution, licenses and permits.</p>
+                          </div>
+                          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">Restricted view</span>
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="rounded-2xl border border-gray-200 p-4">
+                            <p className="text-sm text-gray-500">Bylaws</p>
+                            <p className="font-medium text-gray-900">{coop.bylawsFileName || "Not uploaded"}</p>
+                          </div>
+                          <div className="rounded-2xl border border-gray-200 p-4">
+                            <p className="text-sm text-gray-500">Constitution</p>
+                            <p className="font-medium text-gray-900">{coop.constitutionFileName || "Not uploaded"}</p>
+                          </div>
+                          <div className="rounded-2xl border border-gray-200 p-4">
+                            <p className="text-sm text-gray-500">Business license</p>
+                            <p className="font-medium text-gray-900">{coop.licenseFileName || "Not uploaded"}</p>
+                          </div>
+                          <div className="rounded-2xl border border-gray-200 p-4">
+                            <p className="text-sm text-gray-500">Permits</p>
+                            <p className="font-medium text-gray-900">{coop.permitsFileName || "Not uploaded"}</p>
+                          </div>
+                        </div>
+                        <p className="text-sm text-gray-500 mt-4">Document files are stored securely; this view shows metadata only.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

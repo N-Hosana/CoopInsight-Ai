@@ -2,34 +2,58 @@ import { useState, useEffect } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useLocation } from "react-router";
 import { Send, Search, MessageSquare, Users, User, Reply, X, Plus } from "lucide-react";
+import { api } from "../services/api";
+
+interface Reply {
+  id: string;
+  body: string;
+  sender_id: string;
+  sender_name: string;
+  created_at: string;
+}
 
 interface Message {
   id: string;
-  from: string;
-  fromRole: string;
-  to: string;
   subject: string;
-  content: string;
-  timestamp: string;
-  read: boolean;
-  type: "personal" | "broadcast";
-  replies?: Message[];
+  body: string;
+  type: string;
+  sender_id: string;
+  sender_name: string;
+  recipient_id: string | null;
+  recipient_name: string | null;
+  created_at: string;
+  read_at: string | null;
+  replies: Reply[];
 }
 
 export function Messages() {
   const { user } = useAuth();
   const location = useLocation();
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(true);
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "personal" | "broadcast">("all");
   const [replyText, setReplyText] = useState("");
   const [showCompose, setShowCompose] = useState(false);
+  const [sendError, setSendError] = useState("");
   const [composeForm, setComposeForm] = useState({
-    to: "",
+    receiver_id: "",
     subject: "",
-    content: "",
+    body: "",
     type: "personal" as "personal" | "broadcast",
   });
+  const [userOptions, setUserOptions] = useState<{ id: string; name: string; email: string }[]>([]);
+
+  // Fetch available recipients (all users except self)
+  useEffect(() => {
+    if (user?.role !== "member") {
+      api.get<any>("/members?page=1&limit=100").then((res: any) => {
+        const list: any[] = (res as any).data ?? [];
+        setUserOptions(list.map((m: any) => ({ id: m.id, name: m.full_name ?? m.name, email: m.email ?? "" })));
+      }).catch(() => {});
+    }
+  }, [user?.role]);
 
   // Handle navigation state from Notifications / SecurityAudit broadcast buttons
   useEffect(() => {
@@ -39,87 +63,109 @@ export function Messages() {
       setComposeForm((f) => ({
         ...f,
         type: (state.type as "personal" | "broadcast") || "broadcast",
-        content: state.prefill || "",
+        body: state.prefill || "",
       }));
     }
   }, [location.state]);
 
-  const [messages] = useState<Message[]>([
-    {
-      id: "1",
-      from: "Manager David Mugisha",
-      fromRole: "manager",
-      to: user?.name || "",
-      subject: "Monthly Meeting Reminder",
-      content: "Dear members, our monthly cooperative meeting is scheduled for May 10, 2026 at 10:00 AM at the cooperative office. Please confirm your attendance.",
-      timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-      read: false,
-      type: "broadcast",
-    },
-    {
-      id: "2",
-      from: "Government Official",
-      fromRole: "government",
-      to: "All Cooperatives",
-      subject: "Compliance Report Due",
-      content: "All cooperatives in Gasabo district must submit their quarterly compliance reports by May 15, 2026. Please ensure all documents are up to date.",
-      timestamp: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
-      read: false,
-      type: "broadcast",
-    },
-    {
-      id: "3",
-      from: "Manager David Mugisha",
-      fromRole: "manager",
-      to: user?.name || "",
-      subject: "Your Loan Application",
-      content: "Your loan application for RWF 500,000 has been approved. Please visit the office to complete the paperwork.",
-      timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-      read: true,
-      type: "personal",
-      replies: [
-        {
-          id: "3-1",
-          from: user?.name || "",
-          fromRole: "member",
-          to: "Manager David Mugisha",
-          subject: "Re: Your Loan Application",
-          content: "Thank you! I will visit the office tomorrow morning.",
-          timestamp: new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString(),
-          read: true,
-          type: "personal",
-        },
-      ],
-    },
-  ]);
+  // Fetch messages from API
+  useEffect(() => {
+    const fetchMessages = async () => {
+      try {
+        setLoading(true);
+        const data = await api.get<any>("/messages?page=1&limit=20");
+        setMessages((data as any).data ?? []);
+      } catch (err) {
+        console.error("Failed to fetch messages:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchMessages();
+  }, []);
+
+  const handleSelectMessage = async (message: Message) => {
+    setSelectedMessage(message);
+    setReplyText("");
+
+    // Mark as read if unread
+    if (!message.read_at) {
+      try {
+        await api.patch(`/messages/${message.id}/read`, {});
+        const now = new Date().toISOString();
+        setMessages((prev) =>
+          prev.map((m) => (m.id === message.id ? { ...m, read_at: now } : m))
+        );
+        setSelectedMessage((prev) => (prev?.id === message.id ? { ...prev, read_at: now } : prev));
+      } catch (err) {
+        console.error("Failed to mark message as read:", err);
+      }
+    }
+  };
+
+  const handleReply = async () => {
+    if (!replyText.trim() || !selectedMessage) return;
+    try {
+      const res = await api.post<any>(`/messages/${selectedMessage.id}/reply`, { body: replyText });
+      const newReply = (res as any).data ?? res;
+      setSelectedMessage((prev) =>
+        prev ? { ...prev, replies: [...(prev.replies || []), newReply] } : prev
+      );
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === selectedMessage.id
+            ? { ...m, replies: [...(m.replies || []), newReply] }
+            : m
+        )
+      );
+      setReplyText("");
+    } catch (err) {
+      console.error("Failed to send reply:", err);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!composeForm.subject.trim() || !composeForm.body.trim()) return;
+    if (composeForm.type === "personal" && !composeForm.receiver_id.trim()) return;
+
+    setSendError("");
+    try {
+      const payload: Record<string, unknown> = {
+        type: composeForm.type,
+        subject: composeForm.subject,
+        body: composeForm.body,
+      };
+      if (composeForm.type === "personal") {
+        payload.recipientId = composeForm.receiver_id;
+      }
+      const res = await api.post<any>("/messages", payload);
+      const newMessage = (res as any).data ?? res;
+      setMessages((prev) => [newMessage, ...prev]);
+      setComposeForm({ receiver_id: "", subject: "", body: "", type: "personal" });
+      setShowCompose(false);
+    } catch (err: any) {
+      setSendError(err?.message ?? "Failed to send message. Please try again.");
+    }
+  };
+
+  // Determine message type for filtering
+  const getMessageType = (msg: Message): "personal" | "broadcast" => {
+    return msg.type === "broadcast" || !msg.recipient_id ? "broadcast" : "personal";
+  };
 
   const filteredMessages = messages.filter((msg) => {
-    const matchesFilter = filter === "all" || msg.type === filter;
+    const type = getMessageType(msg);
+    const matchesFilter = filter === "all" || type === filter;
     const matchesSearch =
       msg.subject.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      msg.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      msg.from.toLowerCase().includes(searchQuery.toLowerCase());
+      msg.body.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      msg.sender_name.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesFilter && matchesSearch;
   });
 
-  const canReply = !!selectedMessage && !(user?.role === "member" && selectedMessage.type === "broadcast");
-
-  const handleReply = () => {
-    if (!replyText.trim()) return;
-    // In a real app, this would send the reply
-    console.log("Sending reply:", replyText);
-    setReplyText("");
-  };
-
-  const handleSendMessage = () => {
-    if (!composeForm.subject.trim() || !composeForm.content.trim()) return;
-    if (composeForm.type === "personal" && !composeForm.to.trim()) return;
-
-    // In a real app, this would send the message
-    console.log("Sending message:", composeForm);
-    setComposeForm({ to: "", subject: "", content: "", type: "personal" });
-    setShowCompose(false);
-  };
+  const canReply =
+    !!selectedMessage &&
+    !(user?.role === "member" && getMessageType(selectedMessage) === "broadcast");
 
   const getRelativeTime = (timestamp: string) => {
     const now = new Date();
@@ -170,6 +216,9 @@ export function Messages() {
             </div>
 
             <div className="p-6 space-y-4">
+              {sendError && (
+                <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">{sendError}</div>
+              )}
               {user?.role !== "member" && (
                 <div>
                   <label className="block text-sm font-medium text-card-foreground mb-2">Message Type</label>
@@ -200,14 +249,27 @@ export function Messages() {
 
               {composeForm.type === "personal" && (
                 <div>
-                  <label className="block text-sm font-medium text-card-foreground mb-2">To</label>
-                  <input
-                    type="text"
-                    value={composeForm.to}
-                    onChange={(e) => setComposeForm({ ...composeForm, to: e.target.value })}
-                    placeholder="Recipient name or select from members"
-                    className="w-full px-4 py-2 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
-                  />
+                  <label className="block text-sm font-medium text-card-foreground mb-2">Recipient</label>
+                  {userOptions.length > 0 ? (
+                    <select
+                      value={composeForm.receiver_id}
+                      onChange={(e) => setComposeForm({ ...composeForm, receiver_id: e.target.value })}
+                      className="w-full px-4 py-2 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
+                    >
+                      <option value="">— Select recipient —</option>
+                      {userOptions.map((u) => (
+                        <option key={u.id} value={u.id}>{u.name}{u.email ? ` (${u.email})` : ""}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={composeForm.receiver_id}
+                      onChange={(e) => setComposeForm({ ...composeForm, receiver_id: e.target.value })}
+                      placeholder="Recipient user ID"
+                      className="w-full px-4 py-2 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
+                    />
+                  )}
                 </div>
               )}
 
@@ -225,8 +287,8 @@ export function Messages() {
               <div>
                 <label className="block text-sm font-medium text-card-foreground mb-2">Message</label>
                 <textarea
-                  value={composeForm.content}
-                  onChange={(e) => setComposeForm({ ...composeForm, content: e.target.value })}
+                  value={composeForm.body}
+                  onChange={(e) => setComposeForm({ ...composeForm, body: e.target.value })}
                   placeholder="Type your message here..."
                   rows={8}
                   className="w-full px-4 py-2 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground resize-none"
@@ -242,7 +304,11 @@ export function Messages() {
                 </button>
                 <button
                   onClick={handleSendMessage}
-                  disabled={!composeForm.subject.trim() || !composeForm.content.trim() || (composeForm.type === "personal" && !composeForm.to.trim())}
+                  disabled={
+                    !composeForm.subject.trim() ||
+                    !composeForm.body.trim() ||
+                    (composeForm.type === "personal" && !composeForm.receiver_id.trim())
+                  }
                   className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Send className="w-4 h-4" />
@@ -304,47 +370,50 @@ export function Messages() {
           </div>
 
           <div className="overflow-y-auto max-h-[600px]">
-            {filteredMessages.length === 0 ? (
+            {loading ? (
+              <div className="p-8 text-center">
+                <p className="text-muted-foreground text-sm">Loading messages...</p>
+              </div>
+            ) : filteredMessages.length === 0 ? (
               <div className="p-8 text-center">
                 <MessageSquare className="w-12 h-12 text-muted-foreground mx-auto mb-3 opacity-50" />
                 <p className="text-muted-foreground text-sm">No messages found</p>
               </div>
             ) : (
               <div className="divide-y divide-border">
-                {filteredMessages.map((message) => (
-                  <div
-                    key={message.id}
-                    onClick={() => setSelectedMessage(message)}
-                    className={`p-4 cursor-pointer transition-colors hover:bg-muted/50 ${
-                      selectedMessage?.id === message.id ? "bg-muted/30" : ""
-                    } ${!message.read ? "bg-primary/5" : ""} ${
-                      message.fromRole === "government" ? "border-l-4 border-accent" : ""
-                    }`}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div
-                        className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium ${
-                          message.fromRole === "government"
-                            ? "bg-accent text-accent-foreground"
-                            : message.type === "broadcast"
-                            ? "bg-secondary text-secondary-foreground"
-                            : "bg-primary text-primary-foreground"
-                        }`}
-                      >
-                        {message.type === "broadcast" ? <Users className="w-5 h-5" /> : <User className="w-5 h-5" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between mb-1">
-                          <p className="font-medium text-card-foreground text-sm truncate">{message.from}</p>
-                          {!message.read && <span className="w-2 h-2 bg-primary rounded-full flex-shrink-0"></span>}
+                {filteredMessages.map((message) => {
+                  const msgType = getMessageType(message);
+                  return (
+                    <div
+                      key={message.id}
+                      onClick={() => handleSelectMessage(message)}
+                      className={`p-4 cursor-pointer transition-colors hover:bg-muted/50 ${
+                        selectedMessage?.id === message.id ? "bg-muted/30" : ""
+                      } ${!message.read_at ? "bg-primary/5" : ""}`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div
+                          className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium ${
+                            msgType === "broadcast"
+                              ? "bg-secondary text-secondary-foreground"
+                              : "bg-primary text-primary-foreground"
+                          }`}
+                        >
+                          {msgType === "broadcast" ? <Users className="w-5 h-5" /> : <User className="w-5 h-5" />}
                         </div>
-                        <p className="text-sm text-card-foreground font-medium truncate mb-1">{message.subject}</p>
-                        <p className="text-xs text-muted-foreground truncate">{message.content}</p>
-                        <p className="text-xs text-muted-foreground mt-2">{getRelativeTime(message.timestamp)}</p>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between mb-1">
+                            <p className="font-medium text-card-foreground text-sm truncate">{message.sender_name}</p>
+                            {!message.read_at && <span className="w-2 h-2 bg-primary rounded-full flex-shrink-0"></span>}
+                          </div>
+                          <p className="text-sm text-card-foreground font-medium truncate mb-1">{message.subject}</p>
+                          <p className="text-xs text-muted-foreground truncate">{message.body}</p>
+                          <p className="text-xs text-muted-foreground mt-2">{getRelativeTime(message.created_at)}</p>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -354,41 +423,38 @@ export function Messages() {
         <div className="md:col-span-2 bg-card rounded-xl border border-border overflow-hidden">
           {selectedMessage ? (
             <div className="flex flex-col h-full">
-              <div className={`p-6 border-b border-border ${selectedMessage.fromRole === "government" ? "bg-accent/5 border-l-4 border-accent" : ""}`}>
+              <div className="p-6 border-b border-border">
                 <div className="flex items-start gap-4">
                   <div
                     className={`w-12 h-12 rounded-full flex items-center justify-center font-medium ${
-                      selectedMessage.fromRole === "government"
-                        ? "bg-accent text-accent-foreground"
-                        : selectedMessage.type === "broadcast"
+                      getMessageType(selectedMessage) === "broadcast"
                         ? "bg-secondary text-secondary-foreground"
                         : "bg-primary text-primary-foreground"
                     }`}
                   >
-                    {selectedMessage.type === "broadcast" ? <Users className="w-6 h-6" /> : <User className="w-6 h-6" />}
+                    {getMessageType(selectedMessage) === "broadcast" ? <Users className="w-6 h-6" /> : <User className="w-6 h-6" />}
                   </div>
                   <div className="flex-1">
                     <h3 className="font-semibold text-card-foreground text-lg">{selectedMessage.subject}</h3>
                     <p className="text-sm text-muted-foreground mt-1">
-                      From: <span className="font-medium">{selectedMessage.from}</span> ({selectedMessage.fromRole})
+                      From: <span className="font-medium">{selectedMessage.sender_name}</span>
                     </p>
-                    <p className="text-sm text-muted-foreground">To: {selectedMessage.to}</p>
-                    <p className="text-xs text-muted-foreground mt-2">{new Date(selectedMessage.timestamp).toLocaleString()}</p>
+                    {selectedMessage.recipient_name && (
+                      <p className="text-sm text-muted-foreground">To: {selectedMessage.recipient_name}</p>
+                    )}
+                    <p className="text-xs text-muted-foreground mt-2">
+                      {new Date(selectedMessage.created_at).toLocaleString()}
+                    </p>
                   </div>
                   <div className="flex gap-2">
-                    {selectedMessage.fromRole === "government" && (
-                      <span className="px-3 py-1 rounded-full text-xs font-medium bg-accent text-accent-foreground">
-                        Government
-                      </span>
-                    )}
                     <span
                       className={`px-3 py-1 rounded-full text-xs font-medium ${
-                        selectedMessage.type === "broadcast"
+                        getMessageType(selectedMessage) === "broadcast"
                           ? "bg-secondary/20 text-secondary-foreground"
                           : "bg-primary/20 text-primary"
                       }`}
                     >
-                      {selectedMessage.type}
+                      {getMessageType(selectedMessage)}
                     </span>
                   </div>
                 </div>
@@ -396,7 +462,7 @@ export function Messages() {
 
               <div className="flex-1 p-6 overflow-y-auto">
                 <div className="prose max-w-none">
-                  <p className="text-card-foreground whitespace-pre-wrap">{selectedMessage.content}</p>
+                  <p className="text-card-foreground whitespace-pre-wrap">{selectedMessage.body}</p>
                 </div>
 
                 {selectedMessage.replies && selectedMessage.replies.length > 0 && (
@@ -409,14 +475,19 @@ export function Messages() {
                       <div key={reply.id} className="ml-6 p-4 bg-muted rounded-lg">
                         <div className="flex items-start gap-3 mb-2">
                           <div className="w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-medium">
-                            {reply.from.split(" ").map((n) => n[0]).join("")}
+                            {reply.sender_name
+                              .split(" ")
+                              .map((n) => n[0])
+                              .join("")}
                           </div>
                           <div className="flex-1">
-                            <p className="font-medium text-sm text-card-foreground">{reply.from}</p>
-                            <p className="text-xs text-muted-foreground">{new Date(reply.timestamp).toLocaleString()}</p>
+                            <p className="font-medium text-sm text-card-foreground">{reply.sender_name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {new Date(reply.created_at).toLocaleString()}
+                            </p>
                           </div>
                         </div>
-                        <p className="text-sm text-card-foreground ml-11">{reply.content}</p>
+                        <p className="text-sm text-card-foreground ml-11">{reply.body}</p>
                       </div>
                     ))}
                   </div>
@@ -442,7 +513,7 @@ export function Messages() {
                       Send
                     </button>
                   </div>
-                  {user?.role === "member" && selectedMessage.type === "broadcast" && (
+                  {user?.role === "member" && getMessageType(selectedMessage) === "broadcast" && (
                     <p className="text-xs text-muted-foreground mt-2">
                       You cannot reply to broadcast messages
                     </p>

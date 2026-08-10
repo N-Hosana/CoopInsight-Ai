@@ -60,9 +60,12 @@ export function Register() {
     return { score, label: "Strong", color: "bg-green-500" };
   }, [formData.password]);
 
+  const [successMessage, setSuccessMessage] = useState("");
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSuccessMessage("");
 
     if (formData.password !== formData.confirmPassword) {
       setError("Passwords do not match");
@@ -94,7 +97,8 @@ export function Register() {
     });
 
     if (result.success) {
-      navigate(`/email-verification?email=${encodeURIComponent(formData.email)}`);
+      setSuccessMessage("Check your email to verify your account");
+      setTimeout(() => navigate(`/email-verification?email=${encodeURIComponent(formData.email)}`), 2000);
     } else {
       setError(result.message);
     }
@@ -119,6 +123,12 @@ export function Register() {
           {error && (
             <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
               <p className="text-sm text-red-800">{error}</p>
+            </div>
+          )}
+
+          {successMessage && (
+            <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+              <p className="text-sm text-green-800">{successMessage}</p>
             </div>
           )}
 
@@ -202,7 +212,7 @@ export function Register() {
                 <option value="member">Cooperative Member</option>
                 <option value="manager">Cooperative Manager</option>
                 <option value="generalManager">Gasabo General Manager</option>
-                <option value="government">Government Official</option>
+                <option value="government">RCA Officer</option>
                 <option value="admin">System Administrator</option>
                 {/* cooperative account removed */}
               </select>

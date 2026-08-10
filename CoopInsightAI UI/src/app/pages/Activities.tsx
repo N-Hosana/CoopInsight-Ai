@@ -1,131 +1,39 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { Plus, Download, Calendar, BarChart3, FileText } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
+import { api } from "../services/api";
 
 interface Activity {
   id: string;
   type: string;
   title: string;
-  cooperative: string;
-  amount: string;
+  cooperative_name: string;
   description: string;
-  date: string;
+  scheduled_date: string;
   status: "Planned" | "Ongoing" | "Completed";
-  resourcesAllocated?: number;
-  resourcesUtilized?: number;
-  outcome?: string;
-  impact?: string;
-  attachments?: { name: string; size: string }[];
-  participantsCount?: number;
+  location?: string;
+  cooperative_id?: string;
+  participant_count?: number;
+  created_by_name?: string;
 }
-
-const initialActivities: Activity[] = [
-  {
-    id: "1",
-    type: "Production",
-    title: "Monthly Cooperative Meeting",
-    cooperative: "Green Valley Farmers",
-    amount: "RWF 2,450",
-    description: "Harvest of organic vegetables",
-    date: "2026-04-14",
-    status: "Completed",
-    resourcesAllocated: 10000000,
-    resourcesUtilized: 8500000,
-    outcome: "Discussed financial performance and member concerns",
-    impact: "Members voted on new cooperative policies",
-    participantsCount: 45,
-    attachments: [
-      { name: "Meeting_Minutes.pdf", size: "245 KB" },
-      { name: "Financial_Summary.xlsx", size: "1.2 MB" },
-    ],
-  },
-  {
-    id: "2",
-    type: "Distribution",
-    cooperative: "Artisan Crafts Collective",
-    title: "Training Workshop",
-    amount: "RWF 1,820",
-    description: "Market distribution to local stores",
-    date: "2026-04-13",
-    status: "Completed",
-    resourcesAllocated: 6000000,
-    resourcesUtilized: 5500000,
-    outcome: "30 members trained on new production techniques",
-    impact: "Expected 25% increase in production yield",
-    participantsCount: 32,
-    attachments: [{ name: "Training_Materials.pdf", size: "3.4 MB" }],
-  },
-  {
-    id: "3",
-    type: "Marketing",
-    cooperative: "Dairy Producers Alliance",
-    title: "Community Outreach Event",
-    amount: "RWF 950",
-    description: "Social media campaign",
-    date: "2026-04-12",
-    status: "Ongoing",
-    resourcesAllocated: 4000000,
-    resourcesUtilized: 3200000,
-    outcome: "Marketing campaign reaching 5000+ people",
-    participantsCount: 25,
-    attachments: [{ name: "Event_Photos.zip", size: "45 MB" }],
-  },
-  {
-    id: "4",
-    type: "Training",
-    cooperative: "Tech Innovation Hub",
-    title: "Skill Development Program",
-    amount: "RWF 3,200",
-    description: "Member skill development workshop",
-    date: "2026-04-11",
-    status: "Planned",
-    resourcesAllocated: 7500000,
-    resourcesUtilized: 0,
-    participantsCount: 50,
-  },
-  {
-    id: "5",
-    type: "Production",
-    cooperative: "Green Valley Farmers",
-    title: "Dairy Production Cycle",
-    amount: "RWF 1,650",
-    description: "Dairy processing",
-    date: "2026-04-10",
-    status: "Completed",
-    resourcesAllocated: 8000000,
-    resourcesUtilized: 7800000,
-    outcome: "Processed 500L of dairy products",
-    impact: "Generated revenue of RWF 2.4M",
-    participantsCount: 15,
-  },
-];
 
 export function Activities() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [activities] = useState<Activity[]>(() => {
-    const saved = localStorage.getItem("coopinsight_activities");
-    return saved ? JSON.parse(saved) : initialActivities;
-  });
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [total, setTotal] = useState(0);
   const [viewMode, setViewMode] = useState<"list" | "calendar">("list");
   const [selectedCooperative, setSelectedCooperative] = useState<string>("All Cooperatives");
   const [selectedStatus, setSelectedStatus] = useState<string>("All Status");
-  const [] = useState<string>("All Types");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [dateRange, setDateRange] = useState<{ start: string; end: string }>({ start: "", end: "" });
-  const [] = useState<string | null>(null);
-
-  useEffect(() => {
-    localStorage.setItem("coopinsight_activities", JSON.stringify(activities));
-  }, [activities]);
 
   const isRestrictedByCooperative = user?.role === "manager" || user?.role === "member";
-  const cooperativeOptions = isRestrictedByCooperative
-    ? [user?.cooperativeName || "My Cooperative"]
-    : ["All Cooperatives", ...Array.from(new Set(activities.map((activity) => activity.cooperative)))];
 
   useEffect(() => {
     if (isRestrictedByCooperative && user?.cooperativeName) {
@@ -133,34 +41,75 @@ export function Activities() {
     }
   }, [isRestrictedByCooperative, user?.cooperativeName]);
 
-  const statusOptions = ["All Status", "Planned", "Ongoing", "Completed"];
+  const fetchActivities = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      params.set("page", "1");
+      params.set("limit", "20");
+      if (selectedStatus !== "All Status") params.set("status", selectedStatus);
+      if (
+        selectedCooperative !== "All Cooperatives" &&
+        user?.cooperativeId
+      ) {
+        params.set("cooperative_id", user.cooperativeId);
+      }
+      const response = await api.get(`/activities?${params.toString()}`);
+      const data = response.data;
+      setActivities(data.activities || []);
+      setTotal(data.total || 0);
+    } catch (err: any) {
+      setError(err?.response?.data?.message || "Failed to load activities.");
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedStatus, selectedCooperative, user?.cooperativeId]);
 
+  useEffect(() => {
+    fetchActivities();
+  }, [fetchActivities]);
+
+  const handleDelete = async (id: string, event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (!window.confirm("Are you sure you want to delete this activity?")) return;
+    try {
+      await api.delete(`/activities/${id}`);
+      fetchActivities();
+    } catch (err: any) {
+      alert(err?.response?.data?.message || "Failed to delete activity.");
+    }
+  };
+
+  const cooperativeOptions = isRestrictedByCooperative
+    ? [user?.cooperativeName || "My Cooperative"]
+    : ["All Cooperatives", ...Array.from(new Set(activities.map((a) => a.cooperative_name).filter(Boolean)))];
+
+  const statusOptions = ["All Status", "Planned", "Ongoing", "Completed"];
 
   const filteredActivities = activities.filter((activity) => {
     if (isRestrictedByCooperative && user?.cooperativeName) {
-      if (activity.cooperative !== user.cooperativeName) return false;
+      if (activity.cooperative_name !== user.cooperativeName) return false;
     }
-    const coopMatch = selectedCooperative === "All Cooperatives" || activity.cooperative === selectedCooperative;
+    const coopMatch =
+      selectedCooperative === "All Cooperatives" || activity.cooperative_name === selectedCooperative;
     const statusMatch = selectedStatus === "All Status" || activity.status === selectedStatus;
     const searchText = searchQuery.trim().toLowerCase();
     const searchMatch =
       !searchText ||
       activity.title.toLowerCase().includes(searchText) ||
-      activity.description.toLowerCase().includes(searchText) ||
-      activity.cooperative.toLowerCase().includes(searchText) ||
-      activity.type.toLowerCase().includes(searchText);
-    const startDateMatch = !dateRange.start || new Date(activity.date) >= new Date(dateRange.start);
-    const endDateMatch = !dateRange.end || new Date(activity.date) <= new Date(dateRange.end);
+      activity.description?.toLowerCase().includes(searchText) ||
+      activity.cooperative_name?.toLowerCase().includes(searchText) ||
+      activity.type?.toLowerCase().includes(searchText);
+    const startDateMatch = !dateRange.start || new Date(activity.scheduled_date) >= new Date(dateRange.start);
+    const endDateMatch = !dateRange.end || new Date(activity.scheduled_date) <= new Date(dateRange.end);
     return coopMatch && statusMatch && searchMatch && startDateMatch && endDateMatch;
   });
 
   const formatDate = (dateString: string) => {
+    if (!dateString) return "N/A";
     const date = new Date(dateString);
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-  };
-
-  const formatCurrency = (value: number) => {
-    return `₣${value.toLocaleString("en-RW")}`;
   };
 
   const handleExportReport = () => {
@@ -169,7 +118,7 @@ ACTIVITIES PERFORMANCE REPORT
 Generated: ${new Date().toLocaleString()}
 
 ACTIVITY SUMMARY
-Total Activities: ${activities.length}
+Total Activities: ${total}
 Completed: ${activities.filter((a) => a.status === "Completed").length}
 Ongoing: ${activities.filter((a) => a.status === "Ongoing").length}
 Planned: ${activities.filter((a) => a.status === "Planned").length}
@@ -179,15 +128,12 @@ ${activities
   .map(
     (activity) => `
 Activity: ${activity.title}
-Cooperative: ${activity.cooperative}
+Cooperative: ${activity.cooperative_name}
 Type: ${activity.type}
-Date: ${activity.date}
+Date: ${activity.scheduled_date}
 Status: ${activity.status}
-Resources Allocated: ${activity.resourcesAllocated ? formatCurrency(activity.resourcesAllocated) : "N/A"}
-Resources Utilized: ${activity.resourcesUtilized ? formatCurrency(activity.resourcesUtilized) : "N/A"}
-Participants: ${activity.participantsCount || "N/A"}
-Outcome: ${activity.outcome || "Pending"}
-Impact: ${activity.impact || "To be determined"}
+Participants: ${activity.participant_count ?? "N/A"}
+Location: ${activity.location || "N/A"}
 `
   )
   .join("\n")}
@@ -215,11 +161,6 @@ Impact: ${activity.impact || "To be determined"}
       default:
         return "bg-gray-100 text-gray-800";
     }
-  };
-
-  const getResourceUtilizationPercent = (utilized?: number, allocated?: number) => {
-    if (!utilized || !allocated) return 0;
-    return Math.round((utilized / allocated) * 100);
   };
 
   return (
@@ -332,7 +273,16 @@ Impact: ${activity.impact || "To be determined"}
       {/* List View */}
       {viewMode === "list" && (
         <div className="space-y-4">
-          {filteredActivities.map((activity) => (
+          {loading && (
+            <div className="text-center py-12 text-gray-500">Loading activities...</div>
+          )}
+          {error && !loading && (
+            <div className="text-center py-12 text-red-600">{error}</div>
+          )}
+          {!loading && !error && filteredActivities.length === 0 && (
+            <div className="text-center py-12 text-gray-500">No activities found.</div>
+          )}
+          {!loading && !error && filteredActivities.map((activity) => (
             <Card
               key={activity.id}
               className="p-6 hover:shadow-md transition-shadow cursor-pointer"
@@ -346,67 +296,42 @@ Impact: ${activity.impact || "To be determined"}
                       {activity.status}
                     </span>
                     <span className="text-sm font-medium px-3 py-1 rounded-full bg-slate-100 text-slate-700">
-                      {activity.cooperative}
+                      {activity.cooperative_name}
                     </span>
-                    <span className="text-lg font-medium text-[#2D6A4F]">{activity.amount}</span>
                   </div>
-                  <p className="text-gray-600 mb-3">{activity.description}</p>
+                  {activity.description && (
+                    <p className="text-gray-600 mb-3">{activity.description}</p>
+                  )}
 
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
                     <div className="bg-gray-50 rounded-lg p-3">
-                      <p className="text-xs text-gray-500 mb-1">Date</p>
-                      <p className="font-medium text-gray-900">{formatDate(activity.date)}</p>
+                      <p className="text-xs text-gray-500 mb-1">Scheduled Date</p>
+                      <p className="font-medium text-gray-900">{formatDate(activity.scheduled_date)}</p>
                     </div>
-                    {activity.resourcesAllocated && (
+                    {activity.location && (
                       <div className="bg-gray-50 rounded-lg p-3">
-                        <p className="text-xs text-gray-500 mb-1">Resources Allocated</p>
-                        <p className="font-medium text-gray-900">{formatCurrency(activity.resourcesAllocated)}</p>
+                        <p className="text-xs text-gray-500 mb-1">Location</p>
+                        <p className="font-medium text-gray-900">{activity.location}</p>
                       </div>
                     )}
-                    {activity.resourcesUtilized !== undefined && (
-                      <div className="bg-gray-50 rounded-lg p-3">
-                        <p className="text-xs text-gray-500 mb-1">Utilized</p>
-                        <div>
-                          <p className="font-medium text-gray-900">
-                            {formatCurrency(activity.resourcesUtilized)}
-                          </p>
-                          {activity.resourcesAllocated && (
-                            <p className="text-xs text-gray-600">
-                              {getResourceUtilizationPercent(activity.resourcesUtilized, activity.resourcesAllocated)}%
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                    {activity.participantsCount && (
+                    {activity.participant_count !== undefined && (
                       <div className="bg-gray-50 rounded-lg p-3">
                         <p className="text-xs text-gray-500 mb-1">Participants</p>
-                        <p className="font-medium text-gray-900">{activity.participantsCount}</p>
+                        <p className="font-medium text-gray-900">{activity.participant_count}</p>
+                      </div>
+                    )}
+                    {activity.created_by_name && (
+                      <div className="bg-gray-50 rounded-lg p-3">
+                        <p className="text-xs text-gray-500 mb-1">Created By</p>
+                        <p className="font-medium text-gray-900">{activity.created_by_name}</p>
                       </div>
                     )}
                   </div>
 
-                  {(activity.outcome || activity.impact) && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                      {activity.outcome && (
-                        <div className="bg-blue-50 rounded-lg p-3 border border-blue-200">
-                          <p className="text-xs font-medium text-blue-900 mb-1">Outcome</p>
-                          <p className="text-sm text-blue-800">{activity.outcome}</p>
-                        </div>
-                      )}
-                      {activity.impact && (
-                        <div className="bg-green-50 rounded-lg p-3 border border-green-200">
-                          <p className="text-xs font-medium text-green-900 mb-1">Impact</p>
-                          <p className="text-sm text-green-800">{activity.impact}</p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {activity.attachments && activity.attachments.length > 0 && (
+                  {activity.status === "Planned" && (
                     <div className="flex items-center gap-2 text-sm text-gray-600">
                       <FileText className="w-4 h-4" />
-                      {activity.attachments.length} attachment{activity.attachments.length !== 1 ? "s" : ""}
+                      <span className="text-gray-500 text-xs">Planned activity</span>
                     </div>
                   )}
                 </div>
@@ -414,9 +339,19 @@ Impact: ${activity.impact || "To be determined"}
 
               <div className="flex items-center justify-between pt-4 border-t border-gray-200">
                 <span className="text-xs text-gray-500">{activity.type}</span>
-                <button className="text-[#2563EB] hover:text-[#1d4ed8] text-sm font-medium">
-                  View Details →
-                </button>
+                <div className="flex items-center gap-3">
+                  {activity.status === "Planned" && (user?.role === "manager" || user?.role === "admin") && (
+                    <button
+                      className="text-red-500 hover:text-red-700 text-sm font-medium"
+                      onClick={(e) => handleDelete(activity.id, e)}
+                    >
+                      Delete
+                    </button>
+                  )}
+                  <button className="text-[#2563EB] hover:text-[#1d4ed8] text-sm font-medium">
+                    View Details →
+                  </button>
+                </div>
               </div>
             </Card>
           ))}
@@ -435,7 +370,7 @@ Impact: ${activity.impact || "To be determined"}
 
             <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
               {["Planned", "Ongoing", "Completed"].map((status) => {
-                const count = activities.filter((a) => a.status === (status as any)).length;
+                const count = activities.filter((a) => a.status === (status as Activity["status"])).length;
                 return (
                   <div key={status} className="bg-white rounded-lg p-4 border border-gray-200">
                     <p className="text-sm text-gray-600">{status}</p>
@@ -458,7 +393,7 @@ Impact: ${activity.impact || "To be determined"}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="bg-gray-50 rounded-lg p-4">
             <p className="text-sm text-gray-600 mb-2">Total Activities</p>
-            <p className="text-2xl font-bold text-gray-900">{activities.length}</p>
+            <p className="text-2xl font-bold text-gray-900">{total}</p>
           </div>
           <div className="bg-green-50 rounded-lg p-4">
             <p className="text-sm text-green-700 font-medium mb-2">Completed</p>
@@ -483,4 +418,3 @@ Impact: ${activity.impact || "To be determined"}
     </div>
   );
 }
-

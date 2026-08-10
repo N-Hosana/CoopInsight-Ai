@@ -4,6 +4,7 @@ import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { Plus, ArrowLeft, Save, X } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
+import { api } from "../services/api";
 
 interface TransactionItem {
   type: "Income" | "Expense" | "Loan" | "Savings" | "Dividend";
@@ -51,6 +52,9 @@ export function RecordTransaction() {
     status: "Pending",
   });
   const [showForm, setShowForm] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const canRecord = user?.role === "manager" || user?.role === "admin";
 
@@ -90,19 +94,46 @@ export function RecordTransaction() {
     setTransactions(transactions.filter((_, i) => i !== idx));
   };
 
-  const handleSubmitAll = () => {
+  const handleSubmitAll = async () => {
     if (transactions.length === 0) {
       alert("Please add at least one transaction");
       return;
     }
 
-    // Save transactions to localStorage
-    const allTransactions = JSON.parse(localStorage.getItem("coopinsight_transactions") || "[]");
-    const updatedTransactions = [...transactions, ...allTransactions];
-    localStorage.setItem("coopinsight_transactions", JSON.stringify(updatedTransactions));
+    setIsSubmitting(true);
+    setSuccessMessage(null);
+    setErrorMessage(null);
 
-    alert(`${transactions.length} transaction(s) recorded successfully!`);
-    navigate("/financials");
+    const cooperativeId = user?.cooperative_id ?? user?.cooperativeId ?? null;
+
+    try {
+      for (const txn of transactions) {
+        await api.post("/transactions", {
+          amount: txn.amount,
+          type: txn.type,
+          category: txn.description,
+          description: txn.description,
+          reference: txn.reference,
+          cooperative_id: cooperativeId,
+          recorded_at: txn.date,
+        });
+      }
+
+      setSuccessMessage(`${transactions.length} transaction(s) recorded successfully!`);
+      setTransactions([]);
+
+      setTimeout(() => {
+        navigate("/financials");
+      }, 1500);
+    } catch (err: any) {
+      const message =
+        err?.response?.data?.message ||
+        err?.message ||
+        "Failed to submit transactions. Please try again.";
+      setErrorMessage(message);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const totalAmount = transactions.reduce((sum, t) => sum + t.amount, 0);
@@ -127,6 +158,18 @@ export function RecordTransaction() {
         </button>
         <h1 className="text-3xl font-bold text-gray-900">Record Transactions</h1>
       </div>
+
+      {successMessage && (
+        <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 text-green-800 text-sm font-medium">
+          {successMessage}
+        </div>
+      )}
+
+      {errorMessage && (
+        <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-red-800 text-sm font-medium">
+          {errorMessage}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
@@ -353,9 +396,13 @@ export function RecordTransaction() {
           </Card>
 
           {transactions.length > 0 && (
-            <Button onClick={handleSubmitAll} className="w-full bg-green-600 hover:bg-green-700">
+            <Button
+              onClick={handleSubmitAll}
+              disabled={isSubmitting}
+              className="w-full bg-green-600 hover:bg-green-700 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
               <Save className="w-4 h-4 mr-2" />
-              Submit All Transactions
+              {isSubmitting ? "Saving..." : "Submit All Transactions"}
             </Button>
           )}
         </div>

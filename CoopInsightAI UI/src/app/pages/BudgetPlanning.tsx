@@ -1,26 +1,92 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Plus, Download } from "lucide-react";
 import { Button } from "../components/Button";
 import { useAuth } from "../contexts/AuthContext";
 import { useNavigate } from "react-router";
 import { formatFrw } from "../data/financialData";
+import { api } from "../services/api";
+
+interface BudgetLine {
+  id: string;
+  category: string;
+  allocated: number;
+  spent: number;
+}
+
+interface Budget {
+  id: string;
+  name: string;
+  total_amount: number;
+  spent: number;
+  period_start: string;
+  period_end: string;
+  status: string;
+  lines: BudgetLine[];
+}
+
+interface LocalBudgetLine {
+  category: string;
+  allocated: number;
+  projected: number;
+  notes: string;
+}
 
 export function BudgetPlanning() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const cooperativeName = user?.cooperativeName || "My Cooperative";
+  const cooperativeId = user?.cooperativeId;
+
+  const [budgets, setBudgets] = useState<Budget[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
   const [planName, setPlanName] = useState(`${cooperativeName} Budget Plan`);
   const [planPeriod, setPlanPeriod] = useState("Q3 2026");
   const [planStatus, setPlanStatus] = useState("Draft");
-  const [budgetLines, setBudgetLines] = useState([
-    { category: "Operations", allocated: 4200000, projected: 3800000, notes: "Facility upkeep and materials" },
-    { category: "Training", allocated: 1500000, projected: 1300000, notes: "Member skills and training events" },
-    { category: "Member Support", allocated: 900000, projected: 760000, notes: "Loan subsidies and savings support" },
-  ]);
+  const [budgetLines, setBudgetLines] = useState<LocalBudgetLine[]>([]);
+
   const [newCategory, setNewCategory] = useState("");
   const [newAllocated, setNewAllocated] = useState("");
   const [newProjected, setNewProjected] = useState("");
   const [newNotes, setNewNotes] = useState("");
+
+  const fetchBudgets = async () => {
+    if (!cooperativeId) return;
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await api.get(`/reports/budgets?cooperative_id=${cooperativeId}`);
+      const data = response.data;
+      const fetched: Budget[] = data.budgets || [];
+      setBudgets(fetched);
+
+      if (fetched.length > 0) {
+        const first = fetched[0];
+        setPlanName(first.name);
+        setPlanStatus(first.status);
+        setPlanPeriod(`${first.period_start} – ${first.period_end}`);
+        setBudgetLines(
+          (first.lines || []).map((line) => ({
+            category: line.category,
+            allocated: line.allocated,
+            projected: line.spent,
+            notes: "",
+          }))
+        );
+      }
+    } catch (err: any) {
+      setError(err?.response?.data?.message || "Failed to load budgets.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchBudgets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cooperativeId]);
 
   const summary = useMemo(() => {
     const totalAllocated = budgetLines.reduce((sum, line) => sum + line.allocated, 0);
@@ -33,21 +99,60 @@ export function BudgetPlanning() {
     };
   }, [budgetLines]);
 
-  const handleAddBudgetLine = () => {
+  const handleAddBudgetLine = async () => {
     if (!newCategory || !newAllocated || !newProjected) return;
-    setBudgetLines((prev) => [
-      ...prev,
-      {
-        category: newCategory,
-        allocated: parseFloat(newAllocated),
-        projected: parseFloat(newProjected),
-        notes: newNotes.trim() || "",
-      },
-    ]);
+
+    const newLine: LocalBudgetLine = {
+      category: newCategory,
+      allocated: parseFloat(newAllocated),
+      projected: parseFloat(newProjected),
+      notes: newNotes.trim() || "",
+    };
+
+    setBudgetLines((prev) => [...prev, newLine]);
     setNewCategory("");
     setNewAllocated("");
     setNewProjected("");
     setNewNotes("");
+
+    if (!cooperativeId) return;
+    try {
+      setSaving(true);
+      const periodParts = planPeriod.split("–").map((s) => s.trim());
+      const periodStart = periodParts[0] || planPeriod;
+      const periodEnd = periodParts[1] || planPeriod;
+
+      if (budgets.length > 0) {
+        await api.put(`/reports/budgets/${budgets[0].id}`, {
+          name: planName,
+          total_amount: summary.totalAllocated + newLine.allocated,
+          period_start: periodStart,
+          period_end: periodEnd,
+        });
+      } else {
+        await api.post("/reports/budgets", {
+          cooperative_id: cooperativeId,
+          name: planName,
+          total_amount: newLine.allocated,
+          period_start: periodStart,
+          period_end: periodEnd,
+        });
+      }
+      await fetchBudgets();
+    } catch {
+      // local state already updated; silently ignore API error for UX
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteBudget = async (budgetId: string) => {
+    try {
+      await api.delete(`/reports/budgets/${budgetId}`);
+      await fetchBudgets();
+    } catch (err: any) {
+      setError(err?.response?.data?.message || "Failed to delete budget.");
+    }
   };
 
   const handleDownloadBudgetPlan = () => {
@@ -74,7 +179,7 @@ export function BudgetPlanning() {
     <div className="space-y-6 max-w-[1440px] mx-auto">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
-          <Button variant="secondary" onClick={() => navigate("/financials")}> 
+          <Button variant="secondary" onClick={() => navigate("/financials")}>
             <ArrowLeft className="w-4 h-4 mr-2" />
             Back to Financials
           </Button>
@@ -86,12 +191,49 @@ export function BudgetPlanning() {
             <Download className="w-4 h-4 mr-2" />
             Export Plan
           </Button>
-          <Button onClick={handleAddBudgetLine}>
+          <Button onClick={handleAddBudgetLine} disabled={saving}>
             <Plus className="w-4 h-4 mr-2" />
             Add Line
           </Button>
         </div>
       </div>
+
+      {loading && (
+        <div className="rounded-3xl border border-gray-200 bg-white p-6">
+          <p className="text-gray-500 text-sm">Loading budgets...</p>
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-3xl border border-red-200 bg-red-50 p-4">
+          <p className="text-red-700 text-sm">{error}</p>
+        </div>
+      )}
+
+      {!loading && budgets.length > 1 && (
+        <div className="rounded-3xl border border-gray-200 bg-white p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">All Budgets</h2>
+          <div className="space-y-3">
+            {budgets.map((budget) => (
+              <div key={budget.id} className="flex items-center justify-between rounded-2xl border border-gray-200 p-4 bg-gray-50">
+                <div>
+                  <p className="font-medium text-gray-900">{budget.name}</p>
+                  <p className="text-sm text-gray-500">{budget.period_start} – {budget.period_end} · {budget.status}</p>
+                </div>
+                <div className="flex items-center gap-4">
+                  <p className="text-sm font-semibold text-gray-900">{formatFrw(budget.total_amount)}</p>
+                  <button
+                    onClick={() => handleDeleteBudget(budget.id)}
+                    className="text-xs text-red-500 hover:text-red-700"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="rounded-3xl border border-gray-200 bg-white p-6">
@@ -163,6 +305,11 @@ export function BudgetPlanning() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
+                {budgetLines.length === 0 && !loading && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-6 text-center text-gray-400 text-sm">No budget lines yet. Add one using the form.</td>
+                  </tr>
+                )}
                 {budgetLines.map((line, index) => (
                   <tr key={`${line.category}-${index}`} className="hover:bg-gray-50">
                     <td className="px-4 py-3">{line.category}</td>
@@ -219,9 +366,9 @@ export function BudgetPlanning() {
                 placeholder="Optional details for this budget line"
               />
             </div>
-            <Button onClick={handleAddBudgetLine} className="w-full">
+            <Button onClick={handleAddBudgetLine} className="w-full" disabled={saving}>
               <Plus className="w-4 h-4 mr-2" />
-              Add Budget Line
+              {saving ? "Saving..." : "Add Budget Line"}
             </Button>
           </div>
         </div>

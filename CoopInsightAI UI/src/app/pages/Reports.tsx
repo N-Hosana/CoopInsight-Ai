@@ -3,16 +3,22 @@ import { Card } from "../components/Card";
 import { FileText, Download, Calendar, Eye } from "lucide-react";
 import { Button } from "../components/Button";
 import { useAuth } from "../contexts/AuthContext";
+import { api } from "../services/api";
 
 interface Report {
   id: string;
   title: string;
-  description: string;
-  date: string;
   type: string;
-  cooperative: string;
   status: string;
-  content: {
+  period: string;
+  generated_at: string;
+  cooperative_name: string;
+  file_url?: string;
+  // local-only fields for custom/template-generated reports
+  description?: string;
+  date?: string;
+  cooperative?: string;
+  content?: {
     summary: string;
     sections: Array<{
       title: string;
@@ -31,159 +37,6 @@ interface ScheduledReport {
   recipients: string[];
 }
 
-const initialReports: Report[] = [
-  {
-    id: "1",
-    title: "Monthly Financial Report",
-    description: "Comprehensive financial overview for April 2026",
-    date: "April 15, 2026",
-    type: "Financial",
-    cooperative: "Green Valley Farmers",
-    status: "Ready",
-    content: {
-      summary: "Total revenue increased by 24% compared to March 2026. All cooperatives showed positive growth with Green Valley Farmers leading at 32% increase.",
-      sections: [
-        {
-          title: "Revenue Breakdown",
-          data: [
-            { label: "Green Valley Farmers", value: "RWF 45,200" },
-            { label: "Tech Innovation Hub", value: "RWF 68,900" },
-            { label: "Artisan Crafts Collective", value: "RWF 32,100" },
-            { label: "Dairy Producers Alliance", value: "RWF 52,800" },
-            { label: "Total Revenue", value: "RWF 199,000" },
-          ],
-        },
-        {
-          title: "Expenses",
-          data: [
-            { label: "Operations", value: "RWF 45,600" },
-            { label: "Training", value: "RWF 12,400" },
-            { label: "Marketing", value: "RWF 8,900" },
-            { label: "Infrastructure", value: "RWF 15,200" },
-            { label: "Total Expenses", value: "RWF 82,100" },
-          ],
-        },
-      ],
-      recommendations: [
-        "Allocate additional resources to Green Valley Farmers for expansion",
-        "Reduce operational costs by 10% through process optimization",
-        "Increase marketing budget for Artisan Crafts Collective to boost sales",
-      ],
-    },
-  },
-  {
-    id: "2",
-    title: "Membership Engagement Report",
-    description: "Detailed member activity and engagement trends",
-    date: "April 10, 2026",
-    type: "Membership",
-    cooperative: "Artisan Crafts Collective",
-    status: "Ready",
-    content: {
-      summary: "Member engagement is at 82%, with 1,248 active members across all cooperatives. Training attendance has increased by 15%.",
-      sections: [
-        {
-          title: "Engagement Metrics",
-          data: [
-            { label: "Active Members", value: "1,248" },
-            { label: "Meeting Attendance", value: "78%" },
-            { label: "Training Participation", value: "65%" },
-            { label: "Contribution Rate", value: "92%" },
-          ],
-        },
-        {
-          title: "Top Contributors",
-          data: [
-            { label: "Michael Chen", value: "RWF 5,000" },
-            { label: "David Kim", value: "RWF 3,200" },
-            { label: "Maria Garcia", value: "RWF 2,800" },
-            { label: "Sarah Johnson", value: "RWF 2,500" },
-          ],
-        },
-      ],
-      recommendations: [
-        "Send SMS reminders to members with attendance below 60%",
-        "Create incentive programs for consistent contributors",
-        "Launch mentorship program pairing high performers with new members",
-      ],
-    },
-  },
-  {
-    id: "3",
-    title: "Activity Performance Summary",
-    description: "Activity-level performance and outcomes across cooperatives",
-    date: "April 5, 2026",
-    type: "Activity",
-    cooperative: "Dairy Producers Alliance",
-    status: "Ready",
-    content: {
-      summary: "Overall cooperative health score is 76/100. All cooperatives are profitable with Green Valley Farmers showing the strongest performance.",
-      sections: [
-        {
-          title: "Health Scores",
-          data: [
-            { label: "Green Valley Farmers", value: "85%" },
-            { label: "Dairy Producers Alliance", value: "79%" },
-            { label: "Tech Innovation Hub", value: "72%" },
-            { label: "Artisan Crafts Collective", value: "68%" },
-          ],
-        },
-        {
-          title: "Key Performance Indicators",
-          data: [
-            { label: "Average Revenue Growth", value: "+18%" },
-            { label: "Member Retention Rate", value: "94%" },
-            { label: "New Member Acquisition", value: "+156" },
-            { label: "Customer Satisfaction", value: "4.6/5" },
-          ],
-        },
-      ],
-      recommendations: [
-        "Focus improvement efforts on Artisan Crafts Collective to raise health score above 75%",
-        "Implement best practices from Green Valley Farmers across other cooperatives",
-        "Increase production capacity for high-performing cooperatives",
-      ],
-    },
-  },
-  {
-    id: "4",
-    title: "Compliance Snapshot",
-    description: "Regulatory compliance and reporting readiness overview",
-    date: "March 31, 2026",
-    type: "Compliance",
-    cooperative: "Green Valley Farmers",
-    status: "Ready",
-    content: {
-      summary: "Compliance reporting readiness remains strong. All high-priority cooperatives have submitted documentation on time.",
-      sections: [
-        {
-          title: "Compliance Summary",
-          data: [
-            { label: "Cooperatives in Good Standing", value: "92%" },
-            { label: "Reports Submitted", value: "18/20" },
-            { label: "Pending Actions", value: "2" },
-          ],
-        },
-        {
-          title: "Risk Areas",
-          data: [
-            { label: "Late Audit Submissions", value: "1" },
-            { label: "Registry Updates", value: "2" },
-            { label: "Safety Certification", value: "0" },
-          ],
-        },
-      ],
-      recommendations: [
-        "Follow up with the remaining cooperatives on registry updates",
-        "Schedule safety certification reviews for at-risk cooperatives",
-        "Ensure quarterly compliance reports are shared with the oversight team",
-      ],
-    },
-  },
-];
-
-// reportStats intentionally omitted — stats shown inline
-
 const templates = [
   { id: "financial", name: "Financial Report", description: "Revenue, expenses, and performance metrics for a selected cooperative." },
   { id: "membership", name: "Membership Report", description: "Member engagement, attendance and retention analysis." },
@@ -197,13 +50,16 @@ const scheduledReports: ScheduledReport[] = [
   { id: "S3", title: "Quarterly Member Engagement Review", frequency: "Quarterly", nextRun: "2026-06-30", status: "Scheduled", recipients: ["membership@gov.rw"] },
 ];
 
-const cooperativeOptions = ["All Cooperatives", "Green Valley Farmers", "Artisan Crafts Collective", "Dairy Producers Alliance", "Tech Innovation Hub"];
 const reportTypes = ["All", "Financial", "Membership", "Activity", "Compliance", "Custom"];
 
 export function Reports() {
   const { user } = useAuth();
-  const [_viewingReport, setViewingReport] = useState<Report | null>(null);
-  const [reportList, setReportList] = useState<Report[]>(initialReports);
+
+  const [reportList, setReportList] = useState<Report[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+
   const [activeType, setActiveType] = useState<string>("All");
   const [selectedCooperative, setSelectedCooperative] = useState<string>("All Cooperatives");
   const [dateRange, setDateRange] = useState({ start: "2026-03-01", end: "2026-04-30" });
@@ -219,6 +75,7 @@ export function Reports() {
   const [customExecutiveSummary, setCustomExecutiveSummary] = useState("");
   const [showReportHistory, setShowReportHistory] = useState(false);
   const [exportFormat, setExportFormat] = useState<"txt" | "pdf" | "xlsx">("txt");
+  const [cooperativeOptions, setCooperativeOptions] = useState<string[]>(["All Cooperatives"]);
 
   const isReportAllAllowed =
     user?.role === "admin" || user?.role === "government" || user?.role === "generalManager";
@@ -236,50 +93,94 @@ export function Reports() {
     }
   }, [isReportAllAllowed, user?.cooperativeName]);
 
+  useEffect(() => {
+    const fetchReports = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const coopParam = effectiveSelectedCooperative === "All Cooperatives" ? "" : effectiveSelectedCooperative;
+        const typeParam = activeType === "All" ? "" : activeType;
+        const data = await api.get<any>(
+          `/reports?page=1&limit=100&type=${encodeURIComponent(typeParam)}&cooperative_id=${encodeURIComponent(coopParam)}`
+        );
+        const fetched = (data as any).data ?? [];
+        setReportList(fetched);
+
+        // Build cooperative options from fetched data for admin/government users
+        if (isReportAllAllowed) {
+          const names = Array.from(new Set(fetched.map((r) => r.cooperative_name).filter(Boolean)));
+          setCooperativeOptions(["All Cooperatives", ...names]);
+        }
+      } catch (err: any) {
+        setError(err?.message ?? "Failed to load reports.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchReports();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Normalise a report record so older local fields and API fields both work
+  const normalise = (r: Report) => ({
+    ...r,
+    displayDate: r.generated_at
+      ? new Date(r.generated_at).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
+      : r.date ?? "",
+    displayCoop: r.cooperative_name || r.cooperative || "",
+  });
+
   const filteredReports = useMemo(() => {
-    return reportList.filter((report) => {
-      const typeMatch = activeType === "All" || report.type === activeType;
-      const coopMatch =
-        effectiveSelectedCooperative === "All Cooperatives"
-          ? isReportAllAllowed
-          : report.cooperative === effectiveSelectedCooperative;
-      const startDate = new Date(dateRange.start);
-      const endDate = new Date(dateRange.end);
-      const reportDate = new Date(report.date);
-      const dateMatch = reportDate >= startDate && reportDate <= endDate;
-      return typeMatch && coopMatch && dateMatch;
-    });
+    return reportList
+      .map(normalise)
+      .filter((report) => {
+        const typeMatch = activeType === "All" || report.type === activeType;
+        const coopMatch =
+          effectiveSelectedCooperative === "All Cooperatives"
+            ? isReportAllAllowed
+            : report.displayCoop === effectiveSelectedCooperative;
+        const rawDate = report.generated_at || report.date || "";
+        const reportDate = rawDate ? new Date(rawDate) : null;
+        const startDate = new Date(dateRange.start);
+        const endDate = new Date(dateRange.end);
+        const dateMatch = !reportDate || (reportDate >= startDate && reportDate <= endDate);
+        return typeMatch && coopMatch && dateMatch;
+      });
   }, [activeType, effectiveSelectedCooperative, dateRange, reportList, isReportAllAllowed]);
 
-  const archivedReports = [
-    { ...initialReports[0], id: "A1", title: "Q1 2026 Audit Summary", date: "2026-03-31", status: "Archived" },
-    { ...initialReports[1], id: "A2", title: "December 2025 Member Review", date: "2025-12-22", status: "Archived" },
-  ];
-
-  const downloadReport = (report: Report, format: "txt" | "pdf" | "xlsx" = "txt") => {
-    const reportText = `
-${report.title}
-Generated: ${report.date}
-Type: ${report.type}
-Cooperative: ${report.cooperative}
-
-EXECUTIVE SUMMARY
-${report.content.summary}
-
-${report.content.sections
-      .map(
-        (section) => `
-${section.title.toUpperCase()}
-${section.data.map((item) => `${item.label}: ${item.value}`).join("\n")}`
-      )
-      .join("\n")}
-
-RECOMMENDATIONS
-${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
-    `.trim();
-
-    const blob = new Blob([reportText], {
-      type: format === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : format === "pdf" ? "application/pdf" : "text/plain",
+  const downloadReport = (report: Report & { displayDate?: string; displayCoop?: string }, format: "txt" | "pdf" | "xlsx" = "txt") => {
+    if (report.file_url) {
+      const a = document.createElement("a");
+      a.href = report.file_url;
+      a.download = `${report.title.replace(/\s+/g, "_")}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+    const lines = [
+      report.title,
+      `Generated: ${report.displayDate || report.generated_at || report.date || ""}`,
+      `Type: ${report.type}`,
+      `Cooperative: ${report.displayCoop || ""}`,
+    ];
+    if (report.content) {
+      lines.push("", "EXECUTIVE SUMMARY", report.content.summary, "");
+      report.content.sections.forEach((section) => {
+        lines.push(section.title.toUpperCase());
+        section.data.forEach((item) => lines.push(`${item.label}: ${item.value}`));
+        lines.push("");
+      });
+      lines.push("RECOMMENDATIONS");
+      report.content.recommendations.forEach((rec, i) => lines.push(`${i + 1}. ${rec}`));
+    }
+    const blob = new Blob([lines.join("\n")], {
+      type:
+        format === "xlsx"
+          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          : format === "pdf"
+          ? "application/pdf"
+          : "text/plain",
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -300,7 +201,6 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
       .filter((section) => section.title && section.value)
       .map((section) => `${section.title}: ${section.value}`)
       .join(" ");
-
     const summary = `${header}. ${overview} ${sectionDetails}`;
     setCustomExecutiveSummary(summary);
     return summary;
@@ -308,17 +208,20 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
 
   const handleCreateCustomReport = () => {
     if (!customTitle) return;
-
-    const reportCooperative = effectiveSelectedCooperative === "All Cooperatives" ? "Portfolio" : effectiveSelectedCooperative;
+    const reportCooperative =
+      effectiveSelectedCooperative === "All Cooperatives" ? "Portfolio" : effectiveSelectedCooperative;
     const summaryText = customExecutiveSummary || generateExecutiveSummary();
     const newReport: Report = {
-      id: `${reportList.length + 1}`,
+      id: `local-${Date.now()}`,
       title: customTitle,
       description: customDescription || "Custom report generated from user inputs.",
       date: new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
+      generated_at: new Date().toISOString(),
       type: "Custom",
-      cooperative: reportCooperative,
       status: "Generated",
+      period: `${dateRange.start} – ${dateRange.end}`,
+      cooperative_name: reportCooperative,
+      cooperative: reportCooperative,
       content: {
         summary: summaryText,
         sections: customSections
@@ -327,7 +230,6 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
         recommendations: ["Review the custom report and refine it with your management team."],
       },
     };
-
     setReportList([newReport, ...reportList]);
     setCustomTitle("");
     setCustomDescription("");
@@ -345,44 +247,76 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
     );
   };
 
-  const handleGenerateReport = () => {
+  const handleGenerateReport = async () => {
     const template = templates.find((item) => item.id === selectedTemplate);
     if (!template) return;
 
     const reportCooperative =
       effectiveSelectedCooperative === "All Cooperatives" ? "Portfolio" : effectiveSelectedCooperative;
 
-    const newReport: Report = {
-      id: `${reportList.length + 1}`,
-      title: `${template.name} - ${reportCooperative}`,
-      description: template.description,
-      date: new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
-      type: template.name === "Financial Report" ? "Financial" : template.name === "Membership Report" ? "Membership" : template.name === "Activity Outcomes Report" ? "Activity" : "Compliance",
-      cooperative: reportCooperative,
-      status: "Generated",
-      content: {
-        summary: includeExecutiveSummary
-          ? `Generated executive summary for ${template.name.toLowerCase()} with optional chart and chat content.`
-          : "Executive summary not included.",
-        sections: [
-          {
-            title: "Template Overview",
-            data: [
-              { label: "Template", value: template.name },
-              { label: "Cooperative", value: reportCooperative },
-              { label: "Charts Included", value: includeGraphs ? "Yes" : "No" },
-              { label: "Chat Summary", value: includeChatSummary ? "Enabled" : "Disabled" },
-            ],
-          },
-        ],
-        recommendations: [
-          `Use the ${template.name.toLowerCase()} to brief management and regulators.`,
-          "Share the report in PDF or Excel format for executive review.",
-        ],
-      },
-    };
-
-    setReportList([newReport, ...reportList]);
+    setGenerating(true);
+    try {
+      const typeMap: Record<string, string> = {
+        "Financial Report": "financial_summary",
+        "Membership Report": "member_activity",
+        "Activity Outcomes Report": "member_activity",
+        "Compliance Report": "compliance",
+      };
+      const data = await api.post<any>("/reports/generate", {
+        type: typeMap[template.name] ?? "financial_summary",
+        title: `${template.name} - ${reportCooperative}`,
+        from: dateRange.start,
+        to: dateRange.end,
+        format: exportFormat === "txt" ? "pdf" : exportFormat,
+      });
+      if ((data as any).data) {
+        setReportList((prev) => [(data as any).data, ...prev]);
+      }
+    } catch (err: any) {
+      // Fallback: add a local placeholder so the user sees something
+      const newReport: Report = {
+        id: `local-${Date.now()}`,
+        title: `${template.name} - ${reportCooperative}`,
+        description: template.description,
+        date: new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
+        generated_at: new Date().toISOString(),
+        type:
+          template.name === "Financial Report"
+            ? "Financial"
+            : template.name === "Membership Report"
+            ? "Membership"
+            : template.name === "Activity Outcomes Report"
+            ? "Activity"
+            : "Compliance",
+        status: "Generated",
+        period: `${dateRange.start} – ${dateRange.end}`,
+        cooperative_name: reportCooperative,
+        cooperative: reportCooperative,
+        content: {
+          summary: includeExecutiveSummary
+            ? `Generated executive summary for ${template.name.toLowerCase()} with optional chart and chat content.`
+            : "Executive summary not included.",
+          sections: [
+            {
+              title: "Template Overview",
+              data: [
+                { label: "Template", value: template.name },
+                { label: "Cooperative", value: reportCooperative },
+                { label: "Charts Included", value: includeGraphs ? "Yes" : "No" },
+                { label: "Chat Summary", value: includeChatSummary ? "Enabled" : "Disabled" },
+              ],
+            },
+          ],
+          recommendations: [
+            `Use the ${template.name.toLowerCase()} to brief management and regulators.`,
+            "Share the report in PDF or Excel format for executive review.",
+          ],
+        },
+      };
+      setReportList((prev) => [newReport, ...prev]);
+    } finally {
+      setGenerating(false);
+    }
   };
 
   return (
@@ -393,12 +327,18 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
           <p className="text-gray-600 mt-2">Generate, filter, export, and schedule cooperative reports.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={() => handleGenerateReport()}>
+          <Button onClick={handleGenerateReport} disabled={generating}>
             <FileText className="w-4 h-4 mr-2" />
-            Generate Report
+            {generating ? "Generating…" : "Generate Report"}
           </Button>
         </div>
       </div>
+
+      {error && (
+        <div className="mb-6 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       <Card className="p-6 mb-8">
         <div className="grid gap-4 xl:grid-cols-4">
@@ -482,7 +422,7 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
               className="h-4 w-4 text-[#2D6A4F] border-gray-300 rounded"
             />
             <label htmlFor="graphs" className="text-sm text-gray-700">
-              Include charts & graphs
+              Include charts &amp; graphs
             </label>
           </div>
           <div className="flex items-center gap-3">
@@ -505,7 +445,7 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">Charts & Graphs</h2>
+                <h2 className="text-lg font-semibold text-gray-900">Charts &amp; Graphs</h2>
                 <p className="text-sm text-gray-600">Visual report summaries for the selected cooperative.</p>
               </div>
               <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700">
@@ -546,9 +486,9 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
         <Card className="p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-3">Template Generator</h2>
           <p className="text-sm text-gray-600 mb-4">Use the selected template to generate a new report with optional charts and executive summary.</p>
-          <Button onClick={handleGenerateReport} className="w-full">
+          <Button onClick={handleGenerateReport} disabled={generating} className="w-full">
             <FileText className="w-4 h-4 mr-2" />
-            Generate New Report
+            {generating ? "Generating…" : "Generate New Report"}
           </Button>
         </Card>
         <Card className="p-6">
@@ -669,7 +609,11 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-xl font-semibold text-gray-900">Report Library</h2>
-          <p className="text-sm text-gray-500">Showing {filteredReports.length} report(s) based on current filters.</p>
+          <p className="text-sm text-gray-500">
+            {loading
+              ? "Loading reports…"
+              : `Showing ${filteredReports.length} report(s) based on current filters.`}
+          </p>
         </div>
         <button
           type="button"
@@ -685,46 +629,59 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
           <h3 className="text-lg font-semibold text-gray-900">Available Reports</h3>
         </div>
         <div className="divide-y divide-gray-200">
-          {filteredReports.map((report) => (
-            <div key={report.id} className="p-6 hover:bg-gray-50 transition-colors">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                <div className="flex gap-4 flex-1">
-                  <div className="w-12 h-12 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
-                    <FileText className="w-6 h-6 text-gray-600" />
-                  </div>
-                  <div className="flex-1">
-                    <h3 className="font-semibold text-gray-900 mb-1">{report.title}</h3>
-                    <p className="text-sm text-gray-600 mb-2">{report.description}</p>
-                    <div className="flex flex-wrap items-center gap-3 text-sm text-gray-500">
-                      <span className="flex items-center gap-1">
-                        <Calendar className="w-4 h-4" />
-                        {report.date}
-                      </span>
-                      <span className="px-2 py-1 bg-[#2D6A4F]/10 text-[#2D6A4F] rounded-md text-xs font-medium">
-                        {report.type}
-                      </span>
-                      <span className="px-2 py-1 bg-gray-100 text-gray-800 rounded-md text-xs font-medium">
-                        {report.cooperative}
-                      </span>
-                      <span className="px-2 py-1 bg-green-100 text-green-800 rounded-md text-xs font-medium">
-                        {report.status}
-                      </span>
+          {loading ? (
+            <div className="p-6 text-center text-gray-500">Loading…</div>
+          ) : filteredReports.length === 0 ? (
+            <div className="p-6 text-center text-gray-500">No reports match the current filters.</div>
+          ) : (
+            filteredReports.map((report) => {
+              const n = normalise(report);
+              return (
+                <div key={report.id} className="p-6 hover:bg-gray-50 transition-colors">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="flex gap-4 flex-1">
+                      <div className="w-12 h-12 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
+                        <FileText className="w-6 h-6 text-gray-600" />
+                      </div>
+                      <div className="flex-1">
+                        <h3 className="font-semibold text-gray-900 mb-1">{report.title}</h3>
+                        {report.description && (
+                          <p className="text-sm text-gray-600 mb-2">{report.description}</p>
+                        )}
+                        <div className="flex flex-wrap items-center gap-3 text-sm text-gray-500">
+                          <span className="flex items-center gap-1">
+                            <Calendar className="w-4 h-4" />
+                            {n.displayDate}
+                          </span>
+                          <span className="px-2 py-1 bg-[#2D6A4F]/10 text-[#2D6A4F] rounded-md text-xs font-medium">
+                            {report.type}
+                          </span>
+                          <span className="px-2 py-1 bg-gray-100 text-gray-800 rounded-md text-xs font-medium">
+                            {n.displayCoop}
+                          </span>
+                          <span className="px-2 py-1 bg-green-100 text-green-800 rounded-md text-xs font-medium">
+                            {report.status}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {report.file_url && (
+                        <Button variant="secondary" onClick={() => window.open(report.file_url, "_blank")}>
+                          <Eye className="w-4 h-4 mr-2" />
+                          View
+                        </Button>
+                      )}
+                      <Button onClick={() => downloadReport(n as any, exportFormat)}>
+                        <Download className="w-4 h-4 mr-2" />
+                        Export {exportFormat.toUpperCase()}
+                      </Button>
                     </div>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="secondary" onClick={() => setViewingReport(report)}>
-                    <Eye className="w-4 h-4 mr-2" />
-                    View
-                  </Button>
-                  <Button onClick={() => downloadReport(report, exportFormat)}>
-                    <Download className="w-4 h-4 mr-2" />
-                    Export {exportFormat.toUpperCase()}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          ))}
+              );
+            })
+          )}
         </div>
       </Card>
 
@@ -732,27 +689,39 @@ ${report.content.recommendations.map((rec, i) => `${i + 1}. ${rec}`).join("\n")}
         <Card className="p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-gray-900">Report History Archive</h3>
-            <span className="text-sm text-gray-500">Last updated: April 5, 2026</span>
+            <span className="text-sm text-gray-500">Archived reports</span>
           </div>
           <div className="grid gap-4 lg:grid-cols-2">
-            {archivedReports.map((history) => (
-              <div key={history.id} className="rounded-xl border border-gray-200 p-5 bg-white">
-                <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <p className="text-sm text-gray-500">{history.date}</p>
-                    <h4 className="text-lg font-semibold text-gray-900">{history.title}</h4>
+            {reportList
+              .filter((r) => r.status === "Archived")
+              .map((history) => {
+                const n = normalise(history);
+                return (
+                  <div key={history.id} className="rounded-xl border border-gray-200 p-5 bg-white">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <p className="text-sm text-gray-500">{n.displayDate}</p>
+                        <h4 className="text-lg font-semibold text-gray-900">{history.title}</h4>
+                      </div>
+                      <span className="px-2 py-1 bg-gray-100 text-gray-800 rounded-md text-xs font-medium">
+                        {history.status}
+                      </span>
+                    </div>
+                    {history.description && (
+                      <p className="text-sm text-gray-600 mb-4">{history.description}</p>
+                    )}
+                    {history.file_url && (
+                      <Button variant="secondary" onClick={() => window.open(history.file_url, "_blank")}>
+                        <Eye className="w-4 h-4 mr-2" />
+                        View Archive
+                      </Button>
+                    )}
                   </div>
-                  <span className="px-2 py-1 bg-gray-100 text-gray-800 rounded-md text-xs font-medium">
-                    {history.status}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-600 mb-4">{history.description}</p>
-                <Button variant="secondary" onClick={() => setViewingReport(history)}>
-                  <Eye className="w-4 h-4 mr-2" />
-                  View Archive
-                </Button>
-              </div>
-            ))}
+                );
+              })}
+            {reportList.filter((r) => r.status === "Archived").length === 0 && (
+              <p className="text-sm text-gray-500 col-span-2">No archived reports found.</p>
+            )}
           </div>
         </Card>
       )}

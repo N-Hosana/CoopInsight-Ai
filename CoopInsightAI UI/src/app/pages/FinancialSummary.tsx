@@ -1,35 +1,80 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { ArrowLeft, PieChart, TrendingUp, TrendingDown, ShieldCheck, Users, MessageCircle, BarChart3, Layers } from "lucide-react";
-import { transactions, members, formatFrw, getFinancialStats } from "../data/financialData";
+import { formatFrw } from "../data/financialData";
+import { api } from "../services/api";
+
+interface CategoryTotal {
+  category: string;
+  total: number;
+}
+
+interface Summary {
+  totalIncome: number;
+  totalExpenses: number;
+  netBalance: number;
+  byCategory: CategoryTotal[];
+}
+
+interface RecentTransaction {
+  id: string;
+  amount: number;
+  type: string;
+  category: string;
+  description: string;
+  reference: string;
+  recorded_by_name: string;
+  recorded_at: string;
+  cooperative_name: string;
+  status: string;
+}
 
 export function FinancialSummary() {
   const navigate = useNavigate();
-  const stats = useMemo(() => getFinancialStats(), []);
-  const incomeTransactions = transactions.filter((transaction) => transaction.type === "Income");
-  const expenseTransactions = transactions.filter((transaction) => transaction.type === "Expense");
 
-  const categoryTotals = useMemo(() => {
-    return transactions.reduce<Record<string, number>>((totals, transaction) => {
-      totals[transaction.category] = (totals[transaction.category] || 0) + transaction.amount;
-      return totals;
-    }, {});
+  const [summary, setSummary] = useState<Summary>({
+    totalIncome: 0,
+    totalExpenses: 0,
+    netBalance: 0,
+    byCategory: [],
+  });
+  const [recentTransactions, setRecentTransactions] = useState<RecentTransaction[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const [summaryRes, txRes] = await Promise.all([
+          api.get("/transactions/summary"),
+          api.get("/transactions?limit=10"),
+        ]);
+        setSummary(summaryRes.data);
+        setRecentTransactions(txRes.data?.transactions || txRes.data || []);
+      } catch (err: any) {
+        setError(err?.response?.data?.message || "Failed to load financial data.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
   }, []);
 
-  const lowContributors = members
-    .filter((member) => member.contribution < 2200000)
-    .sort((a, b) => a.contribution - b.contribution)
-    .slice(0, 3);
-
-  const contributionCoverage = useMemo(() => {
-    const contributed = members.filter((member) => member.contribution > 0).length;
-    return Math.round((contributed / members.length) * 100);
-  }, []);
+  const incomeTransactions = useMemo(
+    () => recentTransactions.filter((t) => t.type === "income" || t.type === "Income"),
+    [recentTransactions]
+  );
+  const expenseTransactions = useMemo(
+    () => recentTransactions.filter((t) => t.type === "expense" || t.type === "Expense"),
+    [recentTransactions]
+  );
 
   const suggestions = [
     {
       title: "Reminder for inactive members",
-      message: `Send a friendly payment reminder to ${lowContributors.map((member) => member.name).join(", ")}.`,
+      message: "Send a friendly payment reminder to members with low contribution activity.",
     },
     {
       title: "Share performance highlights",
@@ -40,6 +85,14 @@ export function FinancialSummary() {
       message: "Review training and outreach costs to ensure they stay on budget and adjust spending if needed.",
     },
   ];
+
+  if (loading) {
+    return (
+      <div className="max-w-6xl mx-auto py-12">
+        <p className="text-gray-500 text-sm">Loading financial data...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
@@ -52,11 +105,17 @@ export function FinancialSummary() {
         <p className="text-gray-600 mt-1">A deeper view into income sources, expense allocations, member contributions, and suggested outreach.</p>
       </div>
 
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+          <p className="text-red-700 text-sm">{error}</p>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
-          { label: "Total Income", value: formatFrw(stats.totalIncome), icon: TrendingUp, color: "text-[#2563EB]", detail: `From ${incomeTransactions.length} income transactions` },
-          { label: "Total Expenses", value: formatFrw(stats.totalExpenses), icon: TrendingDown, color: "text-[#dc2626]", detail: `From ${expenseTransactions.length} spending items` },
-          { label: "Net Profit", value: formatFrw(stats.totalIncome - stats.totalExpenses), icon: ShieldCheck, color: "text-[#2D6A4F]", detail: `Income minus expenses` },
+          { label: "Total Income", value: formatFrw(summary.totalIncome), icon: TrendingUp, color: "text-[#2563EB]", detail: `From ${incomeTransactions.length} income transactions` },
+          { label: "Total Expenses", value: formatFrw(summary.totalExpenses), icon: TrendingDown, color: "text-[#dc2626]", detail: `From ${expenseTransactions.length} spending items` },
+          { label: "Net Profit", value: formatFrw(summary.netBalance ?? (summary.totalIncome - summary.totalExpenses)), icon: ShieldCheck, color: "text-[#2D6A4F]", detail: "Income minus expenses" },
         ].map((item) => {
           const Icon = item.icon;
           return (
@@ -86,14 +145,18 @@ export function FinancialSummary() {
               </div>
               <PieChart className="w-6 h-6 text-[#2D6A4F]" />
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {Object.entries(categoryTotals).map(([category, amount]) => (
-                <div key={category} className="rounded-2xl border border-gray-200 p-4 bg-gray-50">
-                  <p className="text-sm text-gray-500">{category}</p>
-                  <p className="mt-2 text-lg font-semibold text-gray-900">{formatFrw(amount)}</p>
-                </div>
-              ))}
-            </div>
+            {summary.byCategory.length === 0 ? (
+              <p className="text-sm text-gray-400">No category data available.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {summary.byCategory.map(({ category, total }) => (
+                  <div key={category} className="rounded-2xl border border-gray-200 p-4 bg-gray-50">
+                    <p className="text-sm text-gray-500">{category}</p>
+                    <p className="mt-2 text-lg font-semibold text-gray-900">{formatFrw(total)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
@@ -106,19 +169,12 @@ export function FinancialSummary() {
             </div>
             <div className="space-y-4">
               <div className="rounded-2xl border border-gray-200 p-4 bg-gray-50">
-                <p className="text-sm text-gray-600">Members contributing</p>
-                <p className="mt-2 text-lg font-semibold text-gray-900">{contributionCoverage}%</p>
+                <p className="text-sm text-gray-600">Income transactions recorded</p>
+                <p className="mt-2 text-lg font-semibold text-gray-900">{incomeTransactions.length}</p>
               </div>
-              <div className="space-y-3">
-                {lowContributors.map((member) => (
-                  <div key={member.id} className="flex items-center justify-between p-4 rounded-2xl border border-gray-200">
-                    <div>
-                      <p className="font-medium text-gray-900">{member.name}</p>
-                      <p className="text-sm text-gray-500">Last paid {member.lastContribution}</p>
-                    </div>
-                    <p className="text-sm font-semibold text-[#dc2626]">{formatFrw(member.contribution)}</p>
-                  </div>
-                ))}
+              <div className="rounded-2xl border border-gray-200 p-4 bg-gray-50">
+                <p className="text-sm text-gray-600">Expense transactions recorded</p>
+                <p className="mt-2 text-lg font-semibold text-gray-900">{expenseTransactions.length}</p>
               </div>
             </div>
           </div>
@@ -152,20 +208,24 @@ export function FinancialSummary() {
               <BarChart3 className="w-6 h-6 text-[#2D6A4F]" />
             </div>
             <div className="space-y-3">
-              {transactions.slice(0, 4).map((transaction) => (
-                <div key={transaction.id} className="rounded-2xl border border-gray-200 p-4 bg-gray-50">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <p className="font-medium text-gray-900">{transaction.description}</p>
-                      <p className="text-xs text-gray-500">{transaction.date} • {transaction.category}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-semibold text-gray-900">{formatFrw(transaction.amount)}</p>
-                      <p className="text-xs text-gray-500">{transaction.status}</p>
+              {recentTransactions.length === 0 ? (
+                <p className="text-sm text-gray-400">No recent transactions.</p>
+              ) : (
+                recentTransactions.slice(0, 4).map((transaction) => (
+                  <div key={transaction.id} className="rounded-2xl border border-gray-200 p-4 bg-gray-50">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <p className="font-medium text-gray-900">{transaction.description}</p>
+                        <p className="text-xs text-gray-500">{transaction.recorded_at} • {transaction.category}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-semibold text-gray-900">{formatFrw(transaction.amount)}</p>
+                        <p className="text-xs text-gray-500">{transaction.status}</p>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         </div>

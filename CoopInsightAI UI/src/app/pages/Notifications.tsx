@@ -1,7 +1,16 @@
-import { Bell, Send, Clock, Check, X, AlertTriangle, Mail, History, Eye, Plus } from "lucide-react";
+import { Bell, Send, Clock, Check, X, AlertTriangle, Mail, History, Eye, Plus, Trash2 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
-import { useNotifications } from "../contexts/NotificationContext";
+import { api } from "../services/api";
+
+interface ApiNotification {
+  id: string;
+  title: string;
+  message: string;
+  type: "info" | "warning" | "success" | "alert";
+  read: boolean;
+  created_at: string;
+}
 
 const getRelativeTime = (timestamp: string) => {
   const diffMs = Date.now() - new Date(timestamp).getTime();
@@ -46,14 +55,74 @@ export function Notifications() {
   const [activeTab, setActiveTab] = useState<"inbox" | "compliance" | "sms-status" | "broadcast" | "history">("inbox");
   const [selectedBroadcast, setSelectedBroadcast] = useState<typeof broadcastHistory[0] | null>(null);
   const [popupQueue, setPopupQueue] = useState<{ id: string; title: string; message: string; type: string }[]>([]);
-  const { notifications, unreadCount, markAsRead, markAllAsRead, addNotification } = useNotifications();
+
+  // API-driven notifications state
+  const [notifications, setNotifications] = useState<ApiNotification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [loadingNotifications, setLoadingNotifications] = useState(true);
+
+  // Fetch notifications from backend
+  useEffect(() => {
+    const fetchNotifications = async () => {
+      try {
+        setLoadingNotifications(true);
+        const data = await api.get<any>("/notifications?page=1&limit=30");
+        setNotifications((data as any).data ?? []);
+        setUnreadCount((data as any).unreadCount ?? 0);
+      } catch (err) {
+        console.error("Failed to fetch notifications:", err);
+      } finally {
+        setLoadingNotifications(false);
+      }
+    };
+    fetchNotifications();
+  }, []);
+
+  const markAsRead = async (id: string) => {
+    try {
+      await api.patch(`/notifications/${id}/read`, {});
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, read: true } : n))
+      );
+      setUnreadCount((prev) => Math.max(0, prev - 1));
+    } catch (err) {
+      console.error("Failed to mark notification as read:", err);
+    }
+  };
+
+  const markAllAsRead = async () => {
+    try {
+      await api.patch("/notifications/read-all", {});
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      setUnreadCount(0);
+    } catch (err) {
+      console.error("Failed to mark all notifications as read:", err);
+    }
+  };
+
+  const deleteNotification = async (id: string) => {
+    try {
+      await api.delete(`/notifications/${id}`);
+      const deleted = notifications.find((n) => n.id === id);
+      setNotifications((prev) => prev.filter((n) => n.id !== id));
+      if (deleted && !deleted.read) {
+        setUnreadCount((prev) => Math.max(0, prev - 1));
+      }
+    } catch (err) {
+      console.error("Failed to delete notification:", err);
+    }
+  };
 
   // Simulate real-time alert pop-ups
   useEffect(() => {
     const timer = setTimeout(() => {
-      const alert = { id: `rt-${Date.now()}`, title: "Real-Time Alert", message: "Compliance deadline in 2 days: Q2 Financial Audit Report", type: "warning" };
+      const alert = {
+        id: `rt-${Date.now()}`,
+        title: "Real-Time Alert",
+        message: "Compliance deadline in 2 days: Q2 Financial Audit Report",
+        type: "warning",
+      };
       setPopupQueue((q) => [...q, alert]);
-      addNotification({ type: "warning", title: alert.title, message: alert.message, from: "System" });
     }, 3000);
     return () => clearTimeout(timer);
   }, []);
@@ -73,8 +142,19 @@ export function Notifications() {
       {/* Real-time popup alerts */}
       <div className="fixed top-4 right-4 z-50 space-y-2 max-w-sm">
         {popupQueue.map((popup) => (
-          <div key={popup.id} className={`flex items-start gap-3 p-4 rounded-xl shadow-lg border animate-in slide-in-from-right ${popup.type === "warning" ? "bg-yellow-50 border-yellow-200" : popup.type === "alert" ? "bg-red-50 border-red-200" : "bg-blue-50 border-blue-200"}`}>
-            <AlertTriangle className={`w-5 h-5 mt-0.5 flex-shrink-0 ${popup.type === "warning" ? "text-yellow-600" : "text-red-600"}`} />
+          <div
+            key={popup.id}
+            className={`flex items-start gap-3 p-4 rounded-xl shadow-lg border animate-in slide-in-from-right ${
+              popup.type === "warning"
+                ? "bg-yellow-50 border-yellow-200"
+                : popup.type === "alert"
+                ? "bg-red-50 border-red-200"
+                : "bg-blue-50 border-blue-200"
+            }`}
+          >
+            <AlertTriangle
+              className={`w-5 h-5 mt-0.5 flex-shrink-0 ${popup.type === "warning" ? "text-yellow-600" : "text-red-600"}`}
+            />
             <div className="flex-1 min-w-0">
               <p className="font-semibold text-gray-900 text-sm">{popup.title}</p>
               <p className="text-xs text-gray-600 mt-0.5">{popup.message}</p>
@@ -100,12 +180,18 @@ export function Notifications() {
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id as any)}
-                  className={`px-5 py-4 font-medium transition-colors flex items-center gap-2 whitespace-nowrap ${activeTab === tab.id ? "text-[#2D6A4F] border-b-2 border-[#2D6A4F]" : "text-gray-600 hover:text-gray-900"}`}
+                  className={`px-5 py-4 font-medium transition-colors flex items-center gap-2 whitespace-nowrap ${
+                    activeTab === tab.id
+                      ? "text-[#2D6A4F] border-b-2 border-[#2D6A4F]"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
                 >
                   <Icon className="w-4 h-4" />
                   {tab.label}
                   {"badge" in tab && tab.badge! > 0 && (
-                    <span className="px-2 py-0.5 bg-red-100 text-red-800 rounded-full text-xs font-medium">{tab.badge}</span>
+                    <span className="px-2 py-0.5 bg-red-100 text-red-800 rounded-full text-xs font-medium">
+                      {tab.badge}
+                    </span>
                   )}
                 </button>
               );
@@ -119,36 +205,86 @@ export function Notifications() {
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Inbox</h2>
-                <p className="text-sm text-gray-500">{unreadCount} unread notification{unreadCount !== 1 ? "s" : ""}</p>
+                <p className="text-sm text-gray-500">
+                  {unreadCount} unread notification{unreadCount !== 1 ? "s" : ""}
+                </p>
               </div>
-              <button onClick={markAllAsRead} className="text-[#2563EB] text-sm font-medium hover:text-[#1d4ed8]">Mark all read</button>
+              <button
+                onClick={markAllAsRead}
+                className="text-[#2563EB] text-sm font-medium hover:text-[#1d4ed8]"
+              >
+                Mark all read
+              </button>
             </div>
-            <div className="space-y-3">
-              {notifications.map((n) => (
-                <div key={n.id} className={`p-4 rounded-lg border ${n.read ? "bg-white border-gray-200" : "bg-blue-50 border-blue-200"}`}>
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <div className={`p-2 rounded-lg ${n.type === "alert" ? "bg-red-100" : n.type === "success" ? "bg-green-100" : n.type === "warning" ? "bg-yellow-100" : "bg-blue-100"}`}>
-                          <Bell className={`w-4 h-4 ${n.type === "alert" ? "text-red-600" : n.type === "success" ? "text-green-600" : n.type === "warning" ? "text-yellow-600" : "text-blue-600"}`} />
+
+            {loadingNotifications ? (
+              <div className="text-center py-8 text-gray-500 text-sm">Loading notifications...</div>
+            ) : notifications.length === 0 ? (
+              <div className="text-center py-8 text-gray-500 text-sm">No notifications</div>
+            ) : (
+              <div className="space-y-3">
+                {notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    className={`p-4 rounded-lg border ${n.read ? "bg-white border-gray-200" : "bg-blue-50 border-blue-200"}`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-2">
+                          <div
+                            className={`p-2 rounded-lg ${
+                              n.type === "alert"
+                                ? "bg-red-100"
+                                : n.type === "success"
+                                ? "bg-green-100"
+                                : n.type === "warning"
+                                ? "bg-yellow-100"
+                                : "bg-blue-100"
+                            }`}
+                          >
+                            <Bell
+                              className={`w-4 h-4 ${
+                                n.type === "alert"
+                                  ? "text-red-600"
+                                  : n.type === "success"
+                                  ? "text-green-600"
+                                  : n.type === "warning"
+                                  ? "text-yellow-600"
+                                  : "text-blue-600"
+                              }`}
+                            />
+                          </div>
+                          <h3 className="font-medium text-gray-900">{n.title}</h3>
+                          {!n.read && <span className="w-2 h-2 bg-blue-500 rounded-full" />}
                         </div>
-                        <h3 className="font-medium text-gray-900">{n.title}</h3>
-                        {!n.read && <span className="w-2 h-2 bg-blue-500 rounded-full" />}
+                        <p className="text-sm text-gray-600 ml-14">{n.message}</p>
+                        <p className="text-xs text-gray-500 ml-14 mt-2 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {getRelativeTime(n.created_at)}
+                        </p>
                       </div>
-                      <p className="text-sm text-gray-600 ml-14">{n.message}</p>
-                      <p className="text-xs text-gray-500 ml-14 mt-2 flex items-center gap-1">
-                        <Clock className="w-3 h-3" />{getRelativeTime(n.timestamp)}
-                      </p>
+                      <div className="flex items-center gap-2 ml-4">
+                        {!n.read && (
+                          <button
+                            onClick={() => markAsRead(n.id)}
+                            className="text-[#2563EB] text-sm font-medium hover:text-[#1d4ed8]"
+                          >
+                            Mark read
+                          </button>
+                        )}
+                        <button
+                          onClick={() => deleteNotification(n.id)}
+                          className="text-gray-400 hover:text-red-500 transition-colors"
+                          title="Delete"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
-                    {!n.read && (
-                      <button onClick={() => markAsRead(String(n.id))} className="text-[#2563EB] text-sm font-medium hover:text-[#1d4ed8] ml-4">
-                        Mark read
-                      </button>
-                    )}
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -158,20 +294,42 @@ export function Notifications() {
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Compliance Deadline Reminders</h2>
             <div className="space-y-3">
               {complianceDeadlines.map((item) => (
-                <div key={item.id} className={`p-4 rounded-lg border-2 ${item.priority === "high" ? "border-red-200 bg-red-50" : item.priority === "medium" ? "border-yellow-200 bg-yellow-50" : "border-gray-200 bg-gray-50"}`}>
+                <div
+                  key={item.id}
+                  className={`p-4 rounded-lg border-2 ${
+                    item.priority === "high"
+                      ? "border-red-200 bg-red-50"
+                      : item.priority === "medium"
+                      ? "border-yellow-200 bg-yellow-50"
+                      : "border-gray-200 bg-gray-50"
+                  }`}
+                >
                   <div className="flex items-start justify-between">
                     <div>
                       <h3 className="font-semibold text-gray-900">{item.title}</h3>
                       <p className="text-sm text-gray-600 mt-1">Due: {item.dueDate}</p>
                     </div>
                     <div className="text-right">
-                      <span className={`px-3 py-1 rounded-full text-xs font-bold ${item.daysLeft <= 3 ? "bg-red-100 text-red-800" : item.daysLeft <= 14 ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800"}`}>
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-bold ${
+                          item.daysLeft <= 3
+                            ? "bg-red-100 text-red-800"
+                            : item.daysLeft <= 14
+                            ? "bg-yellow-100 text-yellow-800"
+                            : "bg-green-100 text-green-800"
+                        }`}
+                      >
                         {item.daysLeft} days left
                       </span>
                     </div>
                   </div>
                   <div className="mt-3 w-full bg-gray-200 rounded-full h-1.5">
-                    <div className={`h-1.5 rounded-full ${item.daysLeft <= 3 ? "bg-red-500" : item.daysLeft <= 14 ? "bg-yellow-500" : "bg-green-500"}`} style={{ width: `${Math.max(5, 100 - (item.daysLeft / 60) * 100)}%` }} />
+                    <div
+                      className={`h-1.5 rounded-full ${
+                        item.daysLeft <= 3 ? "bg-red-500" : item.daysLeft <= 14 ? "bg-yellow-500" : "bg-green-500"
+                      }`}
+                      style={{ width: `${Math.max(5, 100 - (item.daysLeft / 60) * 100)}%` }}
+                    />
                   </div>
                 </div>
               ))}
@@ -191,7 +349,11 @@ export function Notifications() {
                       <h3 className="font-semibold text-gray-900">{s.channel}</h3>
                       <p className="text-xs text-gray-500 mt-0.5">Last sent: {s.lastSent}</p>
                     </div>
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${s.status === "operational" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"}`}>
+                    <span
+                      className={`px-3 py-1 rounded-full text-xs font-medium ${
+                        s.status === "operational" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"
+                      }`}
+                    >
                       {s.status}
                     </span>
                   </div>
@@ -202,7 +364,9 @@ export function Notifications() {
                     </div>
                     <div className="bg-white rounded-lg p-3 border border-gray-200">
                       <p className="text-xs text-gray-500">Failed</p>
-                      <p className={`font-bold text-lg ${s.failed > 5 ? "text-red-700" : "text-gray-700"}`}>{s.failed}</p>
+                      <p className={`font-bold text-lg ${s.failed > 5 ? "text-red-700" : "text-gray-700"}`}>
+                        {s.failed}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -245,17 +409,25 @@ export function Notifications() {
                       <td className="px-4 py-3 text-sm text-gray-600">{b.recipients}</td>
                       <td className="px-4 py-3 text-sm">
                         <span className="flex items-center gap-1 text-green-700">
-                          <Eye className="w-3 h-3" />{b.readCount}/{b.recipients}
+                          <Eye className="w-3 h-3" />
+                          {b.readCount}/{b.recipients}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-sm text-gray-600">{b.sent}</td>
                       <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${b.status === "Delivered" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"}`}>
+                        <span
+                          className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            b.status === "Delivered" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"
+                          }`}
+                        >
                           {b.status}
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <button onClick={() => setSelectedBroadcast(b)} className="text-[#2D6A4F] hover:text-[#1B4332] text-sm font-medium flex items-center gap-1">
+                        <button
+                          onClick={() => setSelectedBroadcast(b)}
+                          className="text-[#2D6A4F] hover:text-[#1B4332] text-sm font-medium flex items-center gap-1"
+                        >
                           <Eye className="w-3 h-3" /> View
                         </button>
                       </td>
@@ -273,19 +445,43 @@ export function Notifications() {
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Alert History Log</h2>
             <div className="space-y-3">
               {alertHistoryLog.map((log) => (
-                <div key={log.id} className={`p-4 rounded-lg border ${log.type === "alert" ? "border-red-200 bg-red-50" : log.type === "warning" ? "border-yellow-200 bg-yellow-50" : "border-green-200 bg-green-50"}`}>
+                <div
+                  key={log.id}
+                  className={`p-4 rounded-lg border ${
+                    log.type === "alert"
+                      ? "border-red-200 bg-red-50"
+                      : log.type === "warning"
+                      ? "border-yellow-200 bg-yellow-50"
+                      : "border-green-200 bg-green-50"
+                  }`}
+                >
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-1">
                         <h3 className="font-semibold text-gray-900">{log.title}</h3>
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${log.type === "alert" ? "bg-red-100 text-red-800" : log.type === "warning" ? "bg-yellow-100 text-yellow-800" : "bg-green-100 text-green-800"}`}>
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-medium ${
+                            log.type === "alert"
+                              ? "bg-red-100 text-red-800"
+                              : log.type === "warning"
+                              ? "bg-yellow-100 text-yellow-800"
+                              : "bg-green-100 text-green-800"
+                          }`}
+                        >
                           {log.type}
                         </span>
                       </div>
                       <p className="text-sm text-gray-700">{log.message}</p>
-                      <p className="text-xs text-gray-500 mt-1 flex items-center gap-1"><Clock className="w-3 h-3" />{log.time}</p>
+                      <p className="text-xs text-gray-500 mt-1 flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {log.time}
+                      </p>
                     </div>
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium ml-4 ${log.resolved ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-700"}`}>
+                    <span
+                      className={`px-3 py-1 rounded-full text-xs font-medium ml-4 ${
+                        log.resolved ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-700"
+                      }`}
+                    >
                       {log.resolved ? "Resolved" : "Active"}
                     </span>
                   </div>
@@ -308,24 +504,65 @@ export function Notifications() {
             </div>
             <div className="p-6 space-y-4">
               <div className="grid grid-cols-2 gap-4 text-sm">
-                <div><p className="text-xs text-gray-500 uppercase">Subject</p><p className="font-semibold text-gray-900 mt-1">{selectedBroadcast.subject}</p></div>
-                <div><p className="text-xs text-gray-500 uppercase">Channel</p><p className="font-semibold text-gray-900 mt-1">{selectedBroadcast.channel}</p></div>
-                <div><p className="text-xs text-gray-500 uppercase">Recipients</p><p className="font-semibold text-gray-900 mt-1">{selectedBroadcast.recipients}</p></div>
-                <div><p className="text-xs text-gray-500 uppercase">Sent Date</p><p className="font-semibold text-gray-900 mt-1">{selectedBroadcast.sent}</p></div>
-                <div><p className="text-xs text-gray-500 uppercase">Read Receipts</p><p className="font-semibold text-green-700 mt-1 flex items-center gap-1"><Check className="w-4 h-4" />{selectedBroadcast.readCount} / {selectedBroadcast.recipients} read</p></div>
-                <div><p className="text-xs text-gray-500 uppercase">Status</p><span className={`inline-block mt-1 px-3 py-1 rounded-full text-xs font-medium ${selectedBroadcast.status === "Delivered" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"}`}>{selectedBroadcast.status}</span></div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase">Subject</p>
+                  <p className="font-semibold text-gray-900 mt-1">{selectedBroadcast.subject}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase">Channel</p>
+                  <p className="font-semibold text-gray-900 mt-1">{selectedBroadcast.channel}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase">Recipients</p>
+                  <p className="font-semibold text-gray-900 mt-1">{selectedBroadcast.recipients}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase">Sent Date</p>
+                  <p className="font-semibold text-gray-900 mt-1">{selectedBroadcast.sent}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase">Read Receipts</p>
+                  <p className="font-semibold text-green-700 mt-1 flex items-center gap-1">
+                    <Check className="w-4 h-4" />
+                    {selectedBroadcast.readCount} / {selectedBroadcast.recipients} read
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase">Status</p>
+                  <span
+                    className={`inline-block mt-1 px-3 py-1 rounded-full text-xs font-medium ${
+                      selectedBroadcast.status === "Delivered"
+                        ? "bg-green-100 text-green-800"
+                        : "bg-yellow-100 text-yellow-800"
+                    }`}
+                  >
+                    {selectedBroadcast.status}
+                  </span>
+                </div>
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
                 <p className="text-xs text-gray-500 mb-1">Read Receipt Rate</p>
                 <div className="flex items-center gap-3">
                   <div className="flex-1 bg-gray-200 rounded-full h-2">
-                    <div className="bg-green-500 h-2 rounded-full" style={{ width: `${Math.round((selectedBroadcast.readCount / selectedBroadcast.recipients) * 100)}%` }} />
+                    <div
+                      className="bg-green-500 h-2 rounded-full"
+                      style={{
+                        width: `${Math.round((selectedBroadcast.readCount / selectedBroadcast.recipients) * 100)}%`,
+                      }}
+                    />
                   </div>
-                  <span className="text-sm font-bold text-gray-900">{Math.round((selectedBroadcast.readCount / selectedBroadcast.recipients) * 100)}%</span>
+                  <span className="text-sm font-bold text-gray-900">
+                    {Math.round((selectedBroadcast.readCount / selectedBroadcast.recipients) * 100)}%
+                  </span>
                 </div>
               </div>
               <div className="flex justify-end">
-                <button onClick={() => setSelectedBroadcast(null)} className="px-5 py-2 bg-[#2D6A4F] text-white rounded-lg hover:bg-[#1B4332] transition-colors">Close</button>
+                <button
+                  onClick={() => setSelectedBroadcast(null)}
+                  className="px-5 py-2 bg-[#2D6A4F] text-white rounded-lg hover:bg-[#1B4332] transition-colors"
+                >
+                  Close
+                </button>
               </div>
             </div>
           </div>

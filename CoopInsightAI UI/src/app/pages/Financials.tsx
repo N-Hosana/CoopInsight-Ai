@@ -10,8 +10,8 @@ import {
 import { Button } from "../components/Button";
 import { useAuth } from "../contexts/AuthContext";
 import { useNavigate } from "react-router";
+import { api } from "../services/api";
 import {
-  transactions,
   formatFrw,
   loanRecords,
   dividendRecords,
@@ -20,12 +20,39 @@ import {
   members,
 } from "../data/financialData";
 
+interface Transaction {
+  id: string;
+  amount: number;
+  type: string;
+  category: string;
+  description: string;
+  reference?: string;
+  recorded_by_name?: string;
+  recorded_at: string;
+  cooperative_id?: string;
+  cooperative_name?: string;
+  status: string;
+}
+
+interface Summary {
+  totalIncome: number;
+  totalExpenses: number;
+  netBalance: number;
+}
+
 export function Financials() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [selectedPeriod, setSelectedPeriod] = useState("Q2 2026 (Current)");
   const [selectedDetailView, setSelectedDetailView] = useState("Transactions");
   const [selectedCooperativeId, setSelectedCooperativeId] = useState("all");
+
+  // Real data state
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [summary, setSummary] = useState<Summary>({ totalIncome: 0, totalExpenses: 0, netBalance: 0 });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   const isAllCooperativesView =
     user?.role === "generalManager" ||
     user?.role === "government" ||
@@ -43,18 +70,6 @@ export function Financials() {
   const canOpenBudgetPlanner =
     user?.role === "manager" || user?.role === "admin" || user?.role === "generalManager";
 
-  const cooperativeOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const options = transactions.reduce<{ id: string; name: string }[]>((acc, tx) => {
-      if (tx.cooperativeId && tx.cooperative && !seen.has(tx.cooperativeId)) {
-        seen.add(tx.cooperativeId);
-        acc.push({ id: tx.cooperativeId, name: tx.cooperative });
-      }
-      return acc;
-    }, []);
-    return [{ id: "all", name: "All Cooperatives" }, ...options];
-  }, []);
-
   useEffect(() => {
     if (isAllCooperativesView) {
       setSelectedCooperativeId("all");
@@ -63,7 +78,58 @@ export function Financials() {
     }
   }, [isAllCooperativesView, user?.cooperativeId]);
 
-  const selectedCooperativeName = cooperativeOptions.find((item) => item.id === selectedCooperativeId)?.name || "All Cooperatives";
+  // Fetch transactions from backend
+  useEffect(() => {
+    const fetchTransactions = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const params = new URLSearchParams({
+          page: "1",
+          limit: "50",
+          type: "",
+          category: "",
+          cooperative_id:
+            selectedCooperativeId === "all"
+              ? ""
+              : selectedCooperativeId,
+          start_date: "",
+          end_date: "",
+        });
+        const data = await api.get<{
+          transactions: Transaction[];
+          total: number;
+          page: number;
+          totalPages: number;
+          summary: Summary;
+        }>(`/transactions?${params.toString()}`);
+        setTransactions(data.transactions ?? []);
+        if (data.summary) {
+          setSummary(data.summary);
+        }
+      } catch (err: any) {
+        setError(err?.message || "Failed to load transactions");
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchTransactions();
+  }, [selectedCooperativeId]);
+
+  const cooperativeOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options = transactions.reduce<{ id: string; name: string }[]>((acc, tx) => {
+      if (tx.cooperative_id && tx.cooperative_name && !seen.has(tx.cooperative_id)) {
+        seen.add(tx.cooperative_id);
+        acc.push({ id: tx.cooperative_id, name: tx.cooperative_name });
+      }
+      return acc;
+    }, []);
+    return [{ id: "all", name: "All Cooperatives" }, ...options];
+  }, [transactions]);
+
+  const selectedCooperativeName =
+    cooperativeOptions.find((item) => item.id === selectedCooperativeId)?.name || "All Cooperatives";
   const cooperativeScope = isAllCooperativesView
     ? selectedCooperativeName
     : user?.cooperativeName || "My Cooperative";
@@ -72,13 +138,13 @@ export function Financials() {
     if (isAllCooperativesView) {
       return selectedCooperativeId === "all"
         ? transactions
-        : transactions.filter((t) => t.cooperativeId === selectedCooperativeId);
+        : transactions.filter((t) => t.cooperative_id === selectedCooperativeId);
     }
     if (user?.cooperativeId) {
-      return transactions.filter((t) => t.cooperativeId === user.cooperativeId);
+      return transactions.filter((t) => t.cooperative_id === user.cooperativeId);
     }
     return transactions;
-  }, [selectedCooperativeId, user, isAllCooperativesView]);
+  }, [transactions, selectedCooperativeId, user, isAllCooperativesView]);
 
   const visibleLoanRecords = useMemo(() => {
     if (isAllCooperativesView) {
@@ -118,17 +184,18 @@ export function Financials() {
   );
 
   const selectedDetailBalanceSheet = useMemo(() => {
-    const income = visibleTransactions.filter((item) => item.type === "Income").reduce((sum, item) => sum + item.amount, 0);
-    const expenses = visibleTransactions.filter((item) => item.type === "Expense").reduce((sum, item) => sum + item.amount, 0);
+    const income = summary.totalIncome ?? 0;
+    const expenses = summary.totalExpenses ?? 0;
     const assets = income + 1200000;
     const liabilities = Math.max(0, expenses - 300000);
     const equity = assets - liabilities;
     const netProfit = income - expenses;
     return { assets, liabilities, equity, totalIncome: income, totalExpenses: expenses, netProfit };
-  }, [visibleTransactions]);
+  }, [summary]);
 
   const roleSpecificDescription = useMemo(() => {
-    const coopText = selectedCooperativeName === "All Cooperatives" ? "the portfolio" : selectedCooperativeName;
+    const coopText =
+      selectedCooperativeName === "All Cooperatives" ? "the portfolio" : selectedCooperativeName;
     switch (user?.role) {
       case "admin":
         return `Admin view for ${coopText}: oversight of governance, audit readiness, and financial control.`;
@@ -142,12 +209,8 @@ export function Financials() {
   }, [selectedCooperativeName, user?.role]);
 
   const stats = useMemo(() => {
-    const totalIncome = visibleTransactions
-      .filter((item) => item.type === "Income")
-      .reduce((sum, item) => sum + item.amount, 0);
-    const totalExpenses = visibleTransactions
-      .filter((item) => item.type === "Expense")
-      .reduce((sum, item) => sum + item.amount, 0);
+    const totalIncome = summary.totalIncome ?? 0;
+    const totalExpenses = summary.totalExpenses ?? 0;
     const totalLoans = visibleTransactions
       .filter((item) => item.type === "Loan")
       .reduce((sum, item) => sum + item.amount, 0);
@@ -158,7 +221,7 @@ export function Financials() {
       .filter((item) => item.type === "Savings")
       .reduce((sum, item) => sum + item.amount, 0);
     return { totalIncome, totalExpenses, totalLoans, totalDividends, totalSavings };
-  }, [visibleTransactions]);
+  }, [summary, visibleTransactions]);
 
   const financialStats = [
     { label: "Total Income", value: formatFrw(stats.totalIncome), change: "+12.5%", trend: "up", icon: TrendingUp },
@@ -205,18 +268,18 @@ Role: ${user?.role}
 
   const handleExportTransactions = () => {
     const csv = [
-      ["Transaction ID", "Type", "Description", "Cooperative", "Amount", "Date", "Status", "Member", "Reference", "Audit Trail"],
+      ["Transaction ID", "Type", "Category", "Description", "Cooperative", "Amount", "Date", "Status", "Recorded By", "Reference"],
       ...visibleTransactions.map((t) => [
         t.id,
         t.type,
+        t.category || "N/A",
         t.description,
-        t.cooperative || "N/A",
+        t.cooperative_name || "N/A",
         t.amount,
-        t.date,
+        t.recorded_at,
         t.status,
-        t.memberName || "N/A",
+        t.recorded_by_name || "N/A",
         t.reference || "N/A",
-        t.auditTrail || "N/A",
       ]),
     ]
       .map((row) => row.join(","))
@@ -264,6 +327,13 @@ Role: ${user?.role}
           </Button>
         </div>
       </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
       {showDetailSelector && (
         <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
           <div className="grid gap-4 md:grid-cols-[1.6fr_1.4fr]">
@@ -316,6 +386,10 @@ Role: ${user?.role}
             </div>
           </div>
         </div>
+      )}
+
+      {loading && (
+        <div className="text-center py-6 text-gray-500 text-sm">Loading financial data...</div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
@@ -443,7 +517,7 @@ Role: ${user?.role}
                     <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Amount</th>
                     <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Date</th>
                     <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Status</th>
-                    <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Audit Trail</th>
+                    <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Recorded By</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
@@ -452,9 +526,9 @@ Role: ${user?.role}
                       <td className="px-6 py-4">
                         <span
                           className={`px-3 py-1 rounded-full text-xs font-medium ${
-                            transaction.type === "Income"
+                            transaction.type === "income"
                               ? "bg-green-100 text-green-800"
-                              : transaction.type === "Expense"
+                              : transaction.type === "expense"
                               ? "bg-red-100 text-red-800"
                               : transaction.type === "Dividend"
                               ? "bg-orange-100 text-orange-800"
@@ -467,15 +541,17 @@ Role: ${user?.role}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-900">{transaction.description}</td>
-                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.cooperative || "N/A"}</td>
+                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.cooperative_name || "N/A"}</td>
                       <td className="px-6 py-4 text-sm font-medium text-gray-900">{formatFrw(transaction.amount)}</td>
-                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.date}</td>
+                      <td className="px-6 py-4 text-sm text-gray-600">
+                        {transaction.recorded_at ? new Date(transaction.recorded_at).toLocaleDateString() : "N/A"}
+                      </td>
                       <td className="px-6 py-4">
                         <span
                           className={`px-3 py-1 rounded-full text-xs font-medium ${
-                            transaction.status === "Completed"
+                            transaction.status === "completed"
                               ? "bg-green-100 text-green-800"
-                              : transaction.status === "Pending"
+                              : transaction.status === "pending"
                               ? "bg-yellow-100 text-yellow-800"
                               : "bg-red-100 text-red-800"
                           }`}
@@ -483,7 +559,7 @@ Role: ${user?.role}
                           {transaction.status}
                         </span>
                       </td>
-                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.auditTrail || "System"}</td>
+                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.recorded_by_name || "System"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -585,12 +661,14 @@ Role: ${user?.role}
                 <tbody className="divide-y divide-gray-200">
                   {visibleLoanDisbursements.map((loan) => (
                     <tr key={loan.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-3">{loan.memberName || "Unknown"}</td>
+                      <td className="px-4 py-3">{loan.recorded_by_name || "Unknown"}</td>
                       <td className="px-4 py-3 text-gray-600">{loan.description}</td>
                       <td className="px-4 py-3 font-medium">{formatFrw(loan.amount)}</td>
-                      <td className="px-4 py-3">{loan.date}</td>
                       <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${loan.status === "Completed" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
+                        {loan.recorded_at ? new Date(loan.recorded_at).toLocaleDateString() : "N/A"}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${loan.status === "completed" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
                           {loan.status}
                         </span>
                       </td>
@@ -696,7 +774,7 @@ Role: ${user?.role}
                     <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Amount</th>
                     <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Date</th>
                     <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Status</th>
-                    <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Audit Trail</th>
+                    <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase">Recorded By</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
@@ -705,9 +783,9 @@ Role: ${user?.role}
                       <td className="px-6 py-4">
                         <span
                           className={`px-3 py-1 rounded-full text-xs font-medium ${
-                            transaction.type === "Income"
+                            transaction.type === "income"
                               ? "bg-green-100 text-green-800"
-                              : transaction.type === "Expense"
+                              : transaction.type === "expense"
                               ? "bg-red-100 text-red-800"
                               : transaction.type === "Dividend"
                               ? "bg-orange-100 text-orange-800"
@@ -720,15 +798,17 @@ Role: ${user?.role}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-900">{transaction.description}</td>
-                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.cooperative || "N/A"}</td>
+                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.cooperative_name || "N/A"}</td>
                       <td className="px-6 py-4 text-sm font-medium text-gray-900">{formatFrw(transaction.amount)}</td>
-                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.date}</td>
+                      <td className="px-6 py-4 text-sm text-gray-600">
+                        {transaction.recorded_at ? new Date(transaction.recorded_at).toLocaleDateString() : "N/A"}
+                      </td>
                       <td className="px-6 py-4">
                         <span
                           className={`px-3 py-1 rounded-full text-xs font-medium ${
-                            transaction.status === "Completed"
+                            transaction.status === "completed"
                               ? "bg-green-100 text-green-800"
-                              : transaction.status === "Pending"
+                              : transaction.status === "pending"
                               ? "bg-yellow-100 text-yellow-800"
                               : "bg-red-100 text-red-800"
                           }`}
@@ -736,7 +816,7 @@ Role: ${user?.role}
                           {transaction.status}
                         </span>
                       </td>
-                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.auditTrail || "System"}</td>
+                      <td className="px-6 py-4 text-sm text-gray-600">{transaction.recorded_by_name || "System"}</td>
                     </tr>
                   ))}
                 </tbody>

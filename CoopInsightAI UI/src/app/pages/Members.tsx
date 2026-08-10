@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
@@ -6,6 +6,7 @@ import { Input } from "../components/Input";
 import { Select } from "../components/Select";
 import { useAuth } from "../contexts/AuthContext";
 import { Plus, UserCircle, Search, Download } from "lucide-react";
+import { api } from "../services/api";
 
 interface Member {
   id: string;
@@ -21,93 +22,8 @@ interface Member {
   status?: "Active" | "Probation" | "Inactive";
 }
 
-const initialMembers: Member[] = [
-  {
-    id: "member-1",
-    name: "Sarah Johnson",
-    role: "Producer",
-    contribution: "RWF 2,500",
-    cooperative: "Green Valley Farmers",
-    cooperativeId: "coop-1",
-    phone: "+250788123456",
-    email: "sarah@greenvalley.coop",
-    nationalId: "1199212345678904",
-    joinDate: "2024-02-15",
-    status: "Active",
-  },
-  {
-    id: "member-2",
-    name: "Michael Chen",
-    role: "Manager",
-    contribution: "RWF 5,000",
-    cooperative: "Tech Innovation Hub",
-    cooperativeId: "coop-2",
-    phone: "+250788234567",
-    email: "michael@sunrise.coop",
-    nationalId: "1199312345678905",
-    joinDate: "2024-01-10",
-    status: "Active",
-  },
-  {
-    id: "member-3",
-    name: "Emily Rodriguez",
-    role: "Artisan",
-    contribution: "RWF 1,800",
-    cooperative: "Artisan Crafts Collective",
-    cooperativeId: "coop-3",
-    phone: "+250788345678",
-    email: "emily@oceanview.coop",
-    nationalId: "1199412345678906",
-    joinDate: "2023-08-20",
-    status: "Active",
-  },
-  {
-    id: "member-4",
-    name: "David Kim",
-    role: "Producer",
-    contribution: "RWF 3,200",
-    cooperative: "Dairy Producers Alliance",
-    cooperativeId: "coop-4",
-    phone: "+250788456789",
-    email: "david@dairyalliance.coop",
-    nationalId: "1199512345678907",
-    joinDate: "2023-05-12",
-    status: "Active",
-  },
-  {
-    id: "member-5",
-    name: "Lisa Thompson",
-    role: "Coordinator",
-    contribution: "RWF 2,100",
-    cooperative: "Green Valley Farmers",
-    cooperativeId: "coop-1",
-    phone: "+250788567890",
-    email: "lisa@greenvalley.coop",
-    nationalId: "1199612345678908",
-    joinDate: "2023-05-10",
-    status: "Active",
-  },
-  {
-    id: "member-6",
-    name: "James Wilson",
-    role: "Developer",
-    contribution: "RWF 4,500",
-    cooperative: "Tech Innovation Hub",
-    cooperativeId: "coop-2",
-    phone: "+250788678901",
-    email: "james@techhub.coop",
-    nationalId: "1199712345678909",
-    joinDate: "2023-03-15",
-    status: "Probation",
-  },
-];
-
 const cooperativeOptions = [
   { value: "", label: "All cooperatives" },
-  { value: "Green Valley Farmers", label: "Green Valley Farmers" },
-  { value: "Tech Innovation Hub", label: "Tech Innovation Hub" },
-  { value: "Artisan Crafts Collective", label: "Artisan Crafts Collective" },
-  { value: "Dairy Producers Alliance", label: "Dairy Producers Alliance" },
 ];
 
 const statusOptions = [
@@ -120,10 +36,9 @@ const statusOptions = [
 export function Members() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [members, setMembers] = useState<Member[]>(() => {
-    const saved = localStorage.getItem("coopinsight_members");
-    return saved ? JSON.parse(saved) : initialMembers;
-  });
+  const [members, setMembers] = useState<Member[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [totalCount, setTotalCount] = useState(0);
   const [showForm, setShowForm] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterCooperative, setFilterCooperative] = useState("");
@@ -141,67 +56,53 @@ export function Members() {
     status: "Active" as "Active" | "Probation" | "Inactive",
   });
 
-  const visibleMembers = useMemo(() => {
-    let filtered = [...members];
+  const fetchMembers = async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("page", "1");
+      params.set("limit", "100");
+      if (searchTerm) params.set("search", searchTerm);
+      if (filterCooperative) params.set("cooperative_id", filterCooperative);
+      if (filterStatus) params.set("status", filterStatus);
 
-    if (user?.role === "member") {
-      filtered = filtered.filter((member) => member.id === user.id);
-    } else if (user?.role === "manager") {
-      filtered = filtered.filter((member) => member.cooperativeId === user.cooperativeId);
+      const response = await api.get<any>(`/members?${params.toString()}`);
+      const data = response?.data ?? [];
+      const list = Array.isArray(data) ? data : response?.data ?? [];
+
+      const mapped: Member[] = (list as any[]).map((m: any) => ({
+        id: String(m.id),
+        name: m.full_name || m.name || "",
+        role: m.role || "member",
+        contribution: m.total_contributions != null
+          ? `RWF ${Number(m.total_contributions).toLocaleString()}`
+          : "RWF 0",
+        cooperative: m.cooperative_name || "",
+        cooperativeId: m.cooperative_id ? String(m.cooperative_id) : "",
+        phone: m.phone || "",
+        email: m.email || "",
+        nationalId: m.national_id || "",
+        joinDate: m.membership_date || m.join_date || undefined,
+        status: (m.status === "active" ? "Active" : m.status) as "Active" | "Probation" | "Inactive" | undefined,
+      }));
+
+      setMembers(mapped);
+      setTotalCount(response?.pagination?.total ?? mapped.length);
+    } catch (error) {
+      console.error("Failed to fetch members:", error);
+    } finally {
+      setLoading(false);
     }
-
-    if (searchTerm) {
-      filtered = filtered.filter(
-        (member) =>
-          member.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          member.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          member.phone.includes(searchTerm) ||
-          member.nationalId.includes(searchTerm)
-      );
-    }
-
-    if (filterCooperative) {
-      filtered = filtered.filter((member) => member.cooperative === filterCooperative);
-    }
-
-    if (filterStatus) {
-      filtered = filtered.filter((member) => member.status === filterStatus);
-    }
-
-    return filtered;
-  }, [members, user, searchTerm, filterCooperative, filterStatus]);
+  };
 
   useEffect(() => {
-    localStorage.setItem("coopinsight_members", JSON.stringify(members));
-  }, [members]);
+    fetchMembers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchTerm, filterCooperative, filterStatus]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-
-    const newMember: Member = {
-      id: `member-${Date.now()}`,
-      name: formData.name,
-      role: formData.role,
-      contribution: `RWF ${formData.contribution.replace(/[^0-9]/g, "")}`,
-      cooperative: formData.cooperative,
-      cooperativeId:
-        formData.cooperative === "Green Valley Farmers"
-          ? "coop-1"
-          : formData.cooperative === "Tech Innovation Hub"
-          ? "coop-2"
-          : formData.cooperative === "Artisan Crafts Collective"
-          ? "coop-3"
-          : formData.cooperative === "Dairy Producers Alliance"
-          ? "coop-4"
-          : "",
-      phone: formData.phone,
-      email: formData.email,
-      nationalId: formData.nationalId,
-      joinDate: formData.joinDate,
-      status: formData.status,
-    };
-
-    setMembers([newMember, ...members]);
+    setShowForm(false);
     setFormData({
       name: "",
       role: "",
@@ -214,13 +115,13 @@ export function Members() {
       joinDate: new Date().toISOString().split("T")[0],
       status: "Active",
     });
-    setShowForm(false);
+    fetchMembers();
   };
 
   const handleBulkExport = () => {
     const csv = [
       ["Member ID", "Name", "Role", "Email", "Phone", "Cooperative", "Status", "Join Date", "Contribution"],
-      ...visibleMembers.map((m) => [
+      ...members.map((m) => [
         m.id,
         m.name,
         m.role,
@@ -376,80 +277,90 @@ export function Members() {
         </div>
 
         <p className="text-sm text-gray-600 mb-4">
-          Showing {visibleMembers.length} of {members.length} members
+          Showing {members.length} of {totalCount} members
         </p>
 
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Member
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Role
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Contact
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Join Date
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Contribution
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {visibleMembers.map((member) => (
-                <tr
-                  key={member.id}
-                  className="hover:bg-gray-50 transition-colors cursor-pointer"
-                  onClick={() => navigate(`/members/${member.id}`)}
-                >
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center">
-                        <UserCircle className="w-6 h-6 text-gray-500" />
-                      </div>
-                      <div>
-                        <span className="text-sm font-medium text-gray-900">{member.name}</span>
-                        <p className="text-xs text-gray-500">{member.nationalId}</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{member.role}</td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm text-gray-700">{member.phone}</div>
-                    <div className="text-xs text-gray-500">{member.email}</div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
-                    {member.joinDate ? new Date(member.joinDate).toLocaleDateString() : "N/A"}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span
-                      className={`inline-flex px-3 py-1 text-xs font-medium rounded-full ${
-                        member.status === "Active"
-                          ? "bg-green-100 text-green-800"
-                          : member.status === "Probation"
-                          ? "bg-yellow-100 text-yellow-800"
-                          : "bg-gray-100 text-gray-800"
-                      }`}
-                    >
-                      {member.status || "Active"}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{member.contribution}</td>
+        {loading ? (
+          <div className="text-center py-12 text-gray-500">Loading members...</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Member
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Role
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Contact
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Join Date
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Contribution
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {members.map((member) => (
+                  <tr
+                    key={member.id}
+                    className="hover:bg-gray-50 transition-colors cursor-pointer"
+                    onClick={() => navigate(`/members/${member.id}`)}
+                  >
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center">
+                          <UserCircle className="w-6 h-6 text-gray-500" />
+                        </div>
+                        <div>
+                          <span className="text-sm font-medium text-gray-900">{member.name}</span>
+                          <p className="text-xs text-gray-500">{member.nationalId}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{member.role}</td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm text-gray-700">{member.phone}</div>
+                      <div className="text-xs text-gray-500">{member.email}</div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                      {member.joinDate ? new Date(member.joinDate).toLocaleDateString() : "N/A"}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span
+                        className={`inline-flex px-3 py-1 text-xs font-medium rounded-full ${
+                          member.status === "Active"
+                            ? "bg-green-100 text-green-800"
+                            : member.status === "Probation"
+                            ? "bg-yellow-100 text-yellow-800"
+                            : "bg-gray-100 text-gray-800"
+                        }`}
+                      >
+                        {member.status || "Active"}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{member.contribution}</td>
+                  </tr>
+                ))}
+                {members.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                      No members found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Card>
     </div>
   );
 }
-

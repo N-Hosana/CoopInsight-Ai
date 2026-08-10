@@ -15,9 +15,10 @@ import {
   Paperclip,
   AlertCircle,
   TrendingUp,
+  UserPlus,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
-
+import { api } from "../services/api";
 
 interface ActivityAttachment {
   id: string;
@@ -27,130 +28,112 @@ interface ActivityAttachment {
   uploadedAt: string;
 }
 
+interface Participant {
+  id: string;
+  member_id: string;
+  member_name: string;
+  joined_at: string;
+}
+
 interface ActivityDetail {
   id: string;
   title: string;
   type: string;
-  date: string;
+  // Backend field names
+  scheduled_date?: string;
+  location?: string;
+  cooperative_name?: string;
+  participant_count?: number;
+  created_by_name?: string;
+  // Legacy / UI-enriched fields
+  date?: string;
   status: "Planned" | "Ongoing" | "Completed";
   description: string;
-  resourcesAllocated: number;
-  resourcesUtilized: number;
-  participantsCount: number;
+  resourcesAllocated?: number;
+  resourcesUtilized?: number;
+  participantsCount?: number;
   outcome?: string;
   impact?: string;
-  attachments: ActivityAttachment[];
-  history: {
+  attachments?: ActivityAttachment[];
+  history?: {
     date: string;
     status: "Planned" | "Ongoing" | "Completed";
     notes: string;
   }[];
-  createdBy: string;
-  lastModifiedBy: string;
-  lastModifiedDate: string;
+  createdBy?: string;
+  lastModifiedBy?: string;
+  lastModifiedDate?: string;
 }
 
-const mockActivities: Record<string, ActivityDetail> = {
-  "1": {
-    id: "1",
-    title: "Monthly Cooperative Meeting",
-    type: "Production",
-    date: "2026-04-14",
-    status: "Completed",
-    description: "Harvest of organic vegetables for market distribution",
-    resourcesAllocated: 10000000,
-    resourcesUtilized: 8500000,
-    participantsCount: 45,
-    outcome: "Discussed financial performance Q1, approved new member fee structure, elected audit committee",
-    impact: "Members voted on cooperative policies affecting 320+ members. Established quarterly review process for financial transparency.",
-    attachments: [
-      { id: "a1", name: "Meeting_Minutes.pdf", type: "document", size: "245 KB", uploadedAt: "2026-04-14" },
-      { id: "a2", name: "Financial_Summary.xlsx", type: "document", size: "1.2 MB", uploadedAt: "2026-04-14" },
-      { id: "a3", name: "Meeting_Photos.zip", type: "photo", size: "45 MB", uploadedAt: "2026-04-14" },
-    ],
-    history: [
-      {
-        date: "2026-04-14",
-        status: "Completed",
-        notes: "Meeting concluded successfully. All agenda items covered.",
-      },
-      {
-        date: "2026-04-10",
-        status: "Ongoing",
-        notes: "Meeting in progress at Kigali office",
-      },
-      {
-        date: "2026-04-05",
-        status: "Planned",
-        notes: "Activity scheduled and invitations sent to members",
-      },
-    ],
-    createdBy: "David Mugisha (Chairperson)",
-    lastModifiedBy: "Sarah Johnson (Treasurer)",
-    lastModifiedDate: "2026-04-14",
-  },
-  "2": {
-    id: "2",
-    title: "Training Workshop",
-    type: "Training",
-    date: "2026-04-13",
-    status: "Completed",
-    description: "Member skill development workshop on production techniques",
-    resourcesAllocated: 6000000,
-    resourcesUtilized: 5500000,
-    participantsCount: 32,
-    outcome: "30 members trained on improved production techniques. Certification issued.",
-    impact: "Expected 25% increase in production yield and improved product quality standards.",
-    attachments: [
-      { id: "b1", name: "Training_Materials.pdf", type: "document", size: "3.4 MB", uploadedAt: "2026-04-13" },
-      { id: "b2", name: "Certificates.pdf", type: "document", size: "2.1 MB", uploadedAt: "2026-04-13" },
-      { id: "b3", name: "Training_Photos.zip", type: "photo", size: "32 MB", uploadedAt: "2026-04-13" },
-    ],
-    history: [
-      {
-        date: "2026-04-13",
-        status: "Completed",
-        notes: "Workshop successfully concluded. 32 members certified.",
-      },
-      {
-        date: "2026-04-12",
-        status: "Ongoing",
-        notes: "Training day 2: Practical sessions ongoing",
-      },
-      {
-        date: "2026-04-11",
-        status: "Ongoing",
-        notes: "Training day 1: Theory and introduction to new techniques",
-      },
-    ],
-    createdBy: "Aline Uwase (Secretary)",
-    lastModifiedBy: "David Mugisha (Chairperson)",
-    lastModifiedDate: "2026-04-13",
-  },
-};
-
 export function ActivityDetails() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
+
   const [activity, setActivity] = useState<ActivityDetail | null>(null);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   const [isEditing, setIsEditing] = useState(false);
   const [formData, setFormData] = useState<ActivityDetail | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const [newAttachment, setNewAttachment] = useState({ name: "", type: "document" as "photo" | "document" });
 
+  // Register participant
+  const [registerMemberId, setRegisterMemberId] = useState("");
+  const [registering, setRegistering] = useState(false);
+  const [registerError, setRegisterError] = useState<string | null>(null);
+  const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
+
+  const fetchActivity = async () => {
+    if (!id) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const [actRes, partRes] = await Promise.allSettled([
+        api.get<{ activity: ActivityDetail } | ActivityDetail>(`/activities/${id}`),
+        api.get<{ participants: Participant[] }>(`/activities/${id}/participants`),
+      ]);
+
+      if (actRes.status === "fulfilled") {
+        const data = (actRes.value as any).activity ?? actRes.value;
+        // Normalise date field
+        const normalised: ActivityDetail = {
+          ...data,
+          date: data.date || data.scheduled_date || "",
+          participantsCount: data.participantsCount ?? data.participant_count ?? 0,
+          createdBy: data.createdBy || data.created_by_name || "",
+          attachments: data.attachments || [],
+          history: data.history || [],
+        };
+        setActivity(normalised);
+        setFormData(normalised);
+      } else {
+        setError("Failed to load activity details.");
+      }
+
+      if (partRes.status === "fulfilled") {
+        setParticipants((partRes.value as any).participants ?? []);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const data = mockActivities[id || "1"] || mockActivities["1"];
-    setActivity(data);
-    setFormData(data);
+    fetchActivity();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const canEdit = user?.role === "manager" || user?.role === "admin";
 
-  const formatCurrency = (value: number) => {
-    return `₣${value.toLocaleString("en-RW")}`;
-  };
+  const formatCurrency = (value: number) => `₣${value.toLocaleString("en-RW")}`;
 
   const formatDate = (dateString: string) => {
+    if (!dateString) return "—";
     return new Date(dateString).toLocaleDateString("en-US", {
       month: "short",
       day: "numeric",
@@ -158,15 +141,59 @@ export function ActivityDetails() {
     });
   };
 
-  const utilizationPercent = formData ? Math.round((formData.resourcesUtilized / formData.resourcesAllocated) * 100) : 0;
+  const resourcesAllocated = formData?.resourcesAllocated ?? 0;
+  const resourcesUtilized = formData?.resourcesUtilized ?? 0;
+  const utilizationPercent = resourcesAllocated > 0 ? Math.round((resourcesUtilized / resourcesAllocated) * 100) : 0;
 
-  const handleSave = () => {
-    if (formData) {
-      setActivity(formData);
+  const handleSave = async () => {
+    if (!formData || !id) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await api.patch<{ activity: ActivityDetail } | ActivityDetail>(`/activities/${id}`, {
+        title: formData.title,
+        description: formData.description,
+        status: formData.status,
+        participant_count: formData.participantsCount,
+        outcome: formData.outcome,
+        impact: formData.impact,
+      });
+      const updated = (res as any).activity ?? res;
+      const normalised: ActivityDetail = {
+        ...formData,
+        ...updated,
+        date: updated.date || updated.scheduled_date || formData.date || "",
+        participantsCount: updated.participantsCount ?? updated.participant_count ?? formData.participantsCount,
+        attachments: formData.attachments,
+        history: formData.history,
+      };
+      setActivity(normalised);
+      setFormData(normalised);
       setIsEditing(false);
-      const activities = JSON.parse(localStorage.getItem("coopinsight_activities") || "[]");
-      const updated = activities.map((a: any) => (a.id === formData.id ? formData : a));
-      localStorage.setItem("coopinsight_activities", JSON.stringify(updated));
+    } catch (err: any) {
+      setSaveError(err?.message || "Failed to save changes. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRegisterParticipant = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!id || !registerMemberId.trim()) return;
+    setRegistering(true);
+    setRegisterError(null);
+    setRegisterSuccess(null);
+    try {
+      await api.post(`/activities/${id}/participants`, { member_id: registerMemberId.trim() });
+      setRegisterSuccess("Participant registered successfully.");
+      setRegisterMemberId("");
+      // Refresh participants list
+      const res = await api.get<{ participants: Participant[] }>(`/activities/${id}/participants`);
+      setParticipants((res as any).participants ?? []);
+    } catch (err: any) {
+      setRegisterError(err?.message || "Failed to register participant.");
+    } finally {
+      setRegistering(false);
     }
   };
 
@@ -177,14 +204,14 @@ export function ActivityDetails() {
     const attachment: ActivityAttachment = {
       id: `att-${Date.now()}`,
       name: newAttachment.name,
-      type: newAttachment.type as "photo" | "document",
+      type: newAttachment.type,
       size: "0 KB",
       uploadedAt: formatDate(new Date().toISOString()),
     };
 
     setFormData({
       ...formData,
-      attachments: [...formData.attachments, attachment],
+      attachments: [...(formData.attachments || []), attachment],
     });
 
     setNewAttachment({ name: "", type: "document" });
@@ -194,7 +221,7 @@ export function ActivityDetails() {
     if (!formData) return;
     setFormData({
       ...formData,
-      attachments: formData.attachments.filter((a) => a.id !== attId),
+      attachments: (formData.attachments || []).filter((a) => a.id !== attId),
     });
   };
 
@@ -208,18 +235,18 @@ Generated: ${new Date().toLocaleString()}
 ACTIVITY INFORMATION
 Title: ${activity.title}
 Type: ${activity.type}
-Date: ${formatDate(activity.date)}
+Date: ${formatDate(activity.date || activity.scheduled_date || "")}
 Status: ${activity.status}
 Description: ${activity.description}
 
 RESOURCE UTILIZATION
-Resources Allocated: ${formatCurrency(activity.resourcesAllocated)}
-Resources Utilized: ${formatCurrency(activity.resourcesUtilized)}
+Resources Allocated: ${formatCurrency(resourcesAllocated)}
+Resources Utilized: ${formatCurrency(resourcesUtilized)}
 Utilization Rate: ${utilizationPercent}%
-Remaining: ${formatCurrency(activity.resourcesAllocated - activity.resourcesUtilized)}
+Remaining: ${formatCurrency(resourcesAllocated - resourcesUtilized)}
 
 PARTICIPATION
-Total Participants: ${activity.participantsCount}
+Total Participants: ${activity.participantsCount ?? activity.participant_count ?? 0}
 
 OUTCOMES & IMPACT
 Outcome:
@@ -228,18 +255,16 @@ ${activity.outcome || "Not specified"}
 Impact:
 ${activity.impact || "Not specified"}
 
-ATTACHMENTS (${activity.attachments.length})
-${activity.attachments.map((a) => `- ${a.name} (${a.type}) - ${a.size} - ${a.uploadedAt}`).join("\n")}
+ATTACHMENTS (${(activity.attachments || []).length})
+${(activity.attachments || []).map((a) => `- ${a.name} (${a.type}) - ${a.size} - ${a.uploadedAt}`).join("\n")}
 
 ACTIVITY HISTORY
-${activity.history
-  .map((h) => `${formatDate(h.date)}: ${h.status} - ${h.notes}`)
-  .join("\n")}
+${(activity.history || []).map((h) => `${formatDate(h.date)}: ${h.status} - ${h.notes}`).join("\n")}
 
 AUDIT INFORMATION
-Created by: ${activity.createdBy}
-Last Modified by: ${activity.lastModifiedBy}
-Last Modified Date: ${formatDate(activity.lastModifiedDate)}
+Created by: ${activity.createdBy || activity.created_by_name || "—"}
+Last Modified by: ${activity.lastModifiedBy || "—"}
+Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
     `.trim();
 
     const blob = new Blob([report], { type: "text/plain" });
@@ -253,22 +278,34 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
     URL.revokeObjectURL(url);
   };
 
-  if (!activity || !formData) {
-    return <div className="text-center py-10">Loading...</div>;
+  if (loading) {
+    return <div className="text-center py-10 text-gray-500">Loading activity details…</div>;
+  }
+
+  if (error || !activity || !formData) {
+    return (
+      <div className="max-w-5xl mx-auto py-10">
+        <Card className="p-6">
+          <p className="text-gray-600">{error || "Activity not found."}</p>
+          <button onClick={() => navigate("/activities")} className="mt-4 text-[#2563EB] hover:underline text-sm">
+            ← Back to Activities
+          </button>
+        </Card>
+      </div>
+    );
   }
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case "Completed":
-        return "bg-green-100 text-green-800";
-      case "Ongoing":
-        return "bg-blue-100 text-blue-800";
-      case "Planned":
-        return "bg-gray-100 text-gray-800";
-      default:
-        return "bg-gray-100 text-gray-800";
+      case "Completed": return "bg-green-100 text-green-800";
+      case "Ongoing": return "bg-blue-100 text-blue-800";
+      case "Planned": return "bg-gray-100 text-gray-800";
+      default: return "bg-gray-100 text-gray-800";
     }
   };
+
+  const activityDate = formData.date || formData.scheduled_date || "";
+  const participantsCount = formData.participantsCount ?? formData.participant_count ?? 0;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 py-8">
@@ -283,7 +320,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
             Export Report
           </Button>
           {canEdit && (
-            <Button variant="secondary" onClick={() => setIsEditing(!isEditing)}>
+            <Button variant="secondary" onClick={() => { setIsEditing(!isEditing); setSaveError(null); }}>
               {isEditing ? "Cancel" : (
                 <>
                   <Edit2 className="w-4 h-4 mr-2" />
@@ -295,6 +332,12 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
         </div>
       </div>
 
+      {saveError && (
+        <div className="bg-red-50 border border-red-200 text-red-800 rounded-lg px-4 py-3 text-sm">
+          {saveError}
+        </div>
+      )}
+
       <Card className="p-8 space-y-6">
         <div className="flex items-start justify-between">
           <div>
@@ -304,7 +347,11 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
                 {formData.status}
               </span>
             </div>
-            <p className="text-gray-600">{formData.type} • {formatDate(formData.date)}</p>
+            <p className="text-gray-600">
+              {formData.type} • {formatDate(activityDate)}
+              {formData.location ? ` • ${formData.location}` : ""}
+              {formData.cooperative_name ? ` • ${formData.cooperative_name}` : ""}
+            </p>
           </div>
         </div>
 
@@ -345,7 +392,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
                 <label className="block text-sm font-medium text-gray-700 mb-2">Participants</label>
                 <input
                   type="number"
-                  value={formData.participantsCount}
+                  value={participantsCount}
                   onChange={(e) => setFormData({ ...formData, participantsCount: parseInt(e.target.value) })}
                   className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
                 />
@@ -358,7 +405,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
                 onChange={(e) => setFormData({ ...formData, outcome: e.target.value })}
                 className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
                 rows={3}
-                placeholder="Describe the activity outcomes..."
+                placeholder="Describe the activity outcomes…"
               />
             </div>
             <div>
@@ -368,12 +415,12 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
                 onChange={(e) => setFormData({ ...formData, impact: e.target.value })}
                 className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
                 rows={3}
-                placeholder="Describe the expected impact..."
+                placeholder="Describe the expected impact…"
               />
             </div>
-            <Button onClick={handleSave}>
+            <Button onClick={handleSave} disabled={saving}>
               <Save className="w-4 h-4 mr-2" />
-              Save Changes
+              {saving ? "Saving…" : "Save Changes"}
             </Button>
           </div>
         ) : (
@@ -382,42 +429,44 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
       </Card>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2 text-gray-700">
-              <Zap className="w-5 h-5" />
-              <span className="font-medium">Resource Utilization</span>
-            </div>
-          </div>
-          <div className="space-y-3">
-            <div>
-              <p className="text-xs text-gray-500 mb-1">Allocated</p>
-              <p className="text-lg font-semibold text-gray-900">{formatCurrency(formData.resourcesAllocated)}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-500 mb-1">Utilized</p>
-              <p className="text-lg font-semibold text-[#2563EB]">{formatCurrency(formData.resourcesUtilized)}</p>
-            </div>
-            <div>
-              <div className="flex justify-between mb-2">
-                <p className="text-xs text-gray-500">Utilization Rate</p>
-                <p className="text-sm font-semibold text-gray-900">{utilizationPercent}%</p>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div
-                  className={`h-2 rounded-full transition-all ${
-                    utilizationPercent > 90
-                      ? "bg-green-600"
-                      : utilizationPercent > 70
-                      ? "bg-blue-600"
-                      : "bg-orange-600"
-                  }`}
-                  style={{ width: `${utilizationPercent}%` }}
-                ></div>
+        {resourcesAllocated > 0 && (
+          <Card className="p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 text-gray-700">
+                <Zap className="w-5 h-5" />
+                <span className="font-medium">Resource Utilization</span>
               </div>
             </div>
-          </div>
-        </Card>
+            <div className="space-y-3">
+              <div>
+                <p className="text-xs text-gray-500 mb-1">Allocated</p>
+                <p className="text-lg font-semibold text-gray-900">{formatCurrency(resourcesAllocated)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 mb-1">Utilized</p>
+                <p className="text-lg font-semibold text-[#2563EB]">{formatCurrency(resourcesUtilized)}</p>
+              </div>
+              <div>
+                <div className="flex justify-between mb-2">
+                  <p className="text-xs text-gray-500">Utilization Rate</p>
+                  <p className="text-sm font-semibold text-gray-900">{utilizationPercent}%</p>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div
+                    className={`h-2 rounded-full transition-all ${
+                      utilizationPercent > 90
+                        ? "bg-green-600"
+                        : utilizationPercent > 70
+                        ? "bg-blue-600"
+                        : "bg-orange-600"
+                    }`}
+                    style={{ width: `${utilizationPercent}%` }}
+                  ></div>
+                </div>
+              </div>
+            </div>
+          </Card>
+        )}
 
         <Card className="p-6">
           <div className="flex items-center justify-between mb-4">
@@ -429,7 +478,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
           <div className="space-y-3">
             <div>
               <p className="text-xs text-gray-500 mb-1">Total Participants</p>
-              <p className="text-2xl font-bold text-gray-900">{formData.participantsCount}</p>
+              <p className="text-2xl font-bold text-gray-900">{participants.length > 0 ? participants.length : participantsCount}</p>
             </div>
             <p className="text-xs text-gray-600">Members actively involved in this activity</p>
           </div>
@@ -445,7 +494,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
           <div className="space-y-3">
             <div>
               <p className="text-xs text-gray-500 mb-1">Activity Date</p>
-              <p className="font-semibold text-gray-900">{formatDate(formData.date)}</p>
+              <p className="font-semibold text-gray-900">{formatDate(activityDate)}</p>
             </div>
             <div>
               <p className="text-xs text-gray-500 mb-1">Status</p>
@@ -456,6 +505,61 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
           </div>
         </Card>
       </div>
+
+      {/* Register Participant */}
+      {canEdit && (
+        <Card className="p-6 space-y-4">
+          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+            <UserPlus className="w-5 h-5" />
+            Register Participant
+          </h2>
+          <form onSubmit={handleRegisterParticipant} className="flex gap-3">
+            <input
+              type="text"
+              value={registerMemberId}
+              onChange={(e) => setRegisterMemberId(e.target.value)}
+              placeholder="Member ID"
+              className="flex-1 rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+              required
+            />
+            <Button type="submit" disabled={registering}>
+              {registering ? "Registering…" : "Register"}
+            </Button>
+          </form>
+          {registerError && <p className="text-sm text-red-600">{registerError}</p>}
+          {registerSuccess && <p className="text-sm text-green-600">{registerSuccess}</p>}
+        </Card>
+      )}
+
+      {/* Participants list */}
+      {participants.length > 0 && (
+        <Card className="p-6 space-y-4">
+          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+            <Users className="w-5 h-5" />
+            Registered Participants ({participants.length})
+          </h2>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 bg-gray-50">
+                  <th className="px-4 py-3 text-left font-medium text-gray-700">Member Name</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-700">Member ID</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-700">Joined At</th>
+                </tr>
+              </thead>
+              <tbody>
+                {participants.map((p) => (
+                  <tr key={p.id} className="border-b border-gray-200 hover:bg-gray-50">
+                    <td className="px-4 py-3 font-medium text-gray-900">{p.member_name}</td>
+                    <td className="px-4 py-3 text-gray-600">{p.member_id}</td>
+                    <td className="px-4 py-3 text-gray-600">{formatDate(p.joined_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {(formData.outcome || formData.impact) && (
         <Card className="p-6 space-y-4">
@@ -480,108 +584,112 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
         </Card>
       )}
 
-      <Card className="p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-            <Paperclip className="w-5 h-5" />
-            Attachments ({formData.attachments.length})
-          </h2>
+      {((formData.attachments && formData.attachments.length > 0) || (canEdit && isEditing)) && (
+        <Card className="p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+              <Paperclip className="w-5 h-5" />
+              Attachments ({(formData.attachments || []).length})
+            </h2>
+            {canEdit && isEditing && (
+              <Button size="sm" variant="secondary" onClick={() => document.getElementById("attachment-form")?.scrollIntoView()}>
+                Add Attachment
+              </Button>
+            )}
+          </div>
+
           {canEdit && isEditing && (
-            <Button size="sm" variant="secondary" onClick={() => document.getElementById("attachment-form")?.scrollIntoView()}>
-              Add Attachment
-            </Button>
-          )}
-        </div>
-
-        {canEdit && isEditing && (
-          <form id="attachment-form" onSubmit={handleAddAttachment} className="p-4 bg-gray-50 rounded-lg border border-gray-200 space-y-3">
-            <div className="grid grid-cols-3 gap-3">
-              <input
-                type="text"
-                value={newAttachment.name}
-                onChange={(e) => setNewAttachment({ ...newAttachment, name: e.target.value })}
-                placeholder="Document name"
-                className="col-span-2 rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
-                required
-              />
-              <select
-                value={newAttachment.type}
-                onChange={(e) => setNewAttachment({ ...newAttachment, type: e.target.value as any })}
-                className="rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
-              >
-                <option value="document">Document</option>
-                <option value="photo">Photo</option>
-              </select>
-            </div>
-            <Button type="submit" size="sm">
-              Add Attachment
-            </Button>
-          </form>
-        )}
-
-        <div className="space-y-2">
-          {formData.attachments.map((att) => (
-            <div key={att.id} className="flex items-center justify-between p-3 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100">
-              <div className="flex items-center gap-3 flex-1">
-                {att.type === "photo" ? (
-                  <span className="text-blue-600">📷</span>
-                ) : (
-                  <FileText className="w-4 h-4 text-gray-400" />
-                )}
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium text-gray-900 truncate">{att.name}</p>
-                  <p className="text-xs text-gray-500">
-                    {att.type === "photo" ? "Photo" : "Document"} • {att.size} • {att.uploadedAt}
-                  </p>
-                </div>
-              </div>
-              {canEdit && isEditing && (
-                <button
-                  type="button"
-                  onClick={() => handleRemoveAttachment(att.id)}
-                  className="text-red-600 hover:text-red-700 p-2"
+            <form id="attachment-form" onSubmit={handleAddAttachment} className="p-4 bg-gray-50 rounded-lg border border-gray-200 space-y-3">
+              <div className="grid grid-cols-3 gap-3">
+                <input
+                  type="text"
+                  value={newAttachment.name}
+                  onChange={(e) => setNewAttachment({ ...newAttachment, name: e.target.value })}
+                  placeholder="Document name"
+                  className="col-span-2 rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  required
+                />
+                <select
+                  value={newAttachment.type}
+                  onChange={(e) => setNewAttachment({ ...newAttachment, type: e.target.value as any })}
+                  className="rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
                 >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      </Card>
+                  <option value="document">Document</option>
+                  <option value="photo">Photo</option>
+                </select>
+              </div>
+              <Button type="submit" size="sm">
+                Add Attachment
+              </Button>
+            </form>
+          )}
 
-      <Card className="p-6 space-y-4">
-        <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-          <Calendar className="w-5 h-5" />
-          Activity History
-        </h2>
-        <div className="space-y-3">
-          {formData.history.map((entry, idx) => (
-            <div key={idx} className="flex gap-4 pb-4 border-b border-gray-200 last:border-b-0">
-              <div className="flex flex-col items-center">
-                <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-white ${
-                  entry.status === "Completed"
-                    ? "bg-green-600"
-                    : entry.status === "Ongoing"
-                    ? "bg-blue-600"
-                    : "bg-gray-400"
-                }`}>
-                  {idx + 1}
+          <div className="space-y-2">
+            {(formData.attachments || []).map((att) => (
+              <div key={att.id} className="flex items-center justify-between p-3 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100">
+                <div className="flex items-center gap-3 flex-1">
+                  {att.type === "photo" ? (
+                    <span className="text-blue-600">📷</span>
+                  ) : (
+                    <FileText className="w-4 h-4 text-gray-400" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-gray-900 truncate">{att.name}</p>
+                    <p className="text-xs text-gray-500">
+                      {att.type === "photo" ? "Photo" : "Document"} • {att.size} • {att.uploadedAt}
+                    </p>
+                  </div>
                 </div>
-                {idx < formData.history.length - 1 && <div className="w-0.5 h-12 bg-gray-300 mt-2"></div>}
+                {canEdit && isEditing && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveAttachment(att.id)}
+                    className="text-red-600 hover:text-red-700 p-2"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
-              <div className="flex-1 pt-2">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className={`text-sm font-medium px-2 py-1 rounded ${getStatusColor(entry.status)}`}>
-                    {entry.status}
-                  </span>
-                  <span className="text-sm text-gray-500">{formatDate(entry.date)}</span>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {formData.history && formData.history.length > 0 && (
+        <Card className="p-6 space-y-4">
+          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+            <Calendar className="w-5 h-5" />
+            Activity History
+          </h2>
+          <div className="space-y-3">
+            {formData.history.map((entry, idx) => (
+              <div key={idx} className="flex gap-4 pb-4 border-b border-gray-200 last:border-b-0">
+                <div className="flex flex-col items-center">
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-white ${
+                    entry.status === "Completed"
+                      ? "bg-green-600"
+                      : entry.status === "Ongoing"
+                      ? "bg-blue-600"
+                      : "bg-gray-400"
+                  }`}>
+                    {idx + 1}
+                  </div>
+                  {idx < formData.history!.length - 1 && <div className="w-0.5 h-12 bg-gray-300 mt-2"></div>}
                 </div>
-                <p className="text-gray-700">{entry.notes}</p>
+                <div className="flex-1 pt-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`text-sm font-medium px-2 py-1 rounded ${getStatusColor(entry.status)}`}>
+                      {entry.status}
+                    </span>
+                    <span className="text-sm text-gray-500">{formatDate(entry.date)}</span>
+                  </div>
+                  <p className="text-gray-700">{entry.notes}</p>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-      </Card>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <Card className="p-6 space-y-3 bg-gray-50">
         <h3 className="font-semibold text-gray-900 flex items-center gap-2">
@@ -591,15 +699,15 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate)}
         <div className="grid md:grid-cols-3 gap-4 text-sm">
           <div>
             <p className="text-gray-600">Created by</p>
-            <p className="font-medium text-gray-900">{formData.createdBy}</p>
+            <p className="font-medium text-gray-900">{formData.createdBy || formData.created_by_name || "—"}</p>
           </div>
           <div>
             <p className="text-gray-600">Last Modified by</p>
-            <p className="font-medium text-gray-900">{formData.lastModifiedBy}</p>
+            <p className="font-medium text-gray-900">{formData.lastModifiedBy || "—"}</p>
           </div>
           <div>
             <p className="text-gray-600">Last Modified</p>
-            <p className="font-medium text-gray-900">{formatDate(formData.lastModifiedDate)}</p>
+            <p className="font-medium text-gray-900">{formatDate(formData.lastModifiedDate || "")}</p>
           </div>
         </div>
       </Card>

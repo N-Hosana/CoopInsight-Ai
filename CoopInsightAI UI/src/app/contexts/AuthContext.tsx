@@ -1,31 +1,16 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useRef, ReactNode } from "react";
+
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 interface User {
   id: string;
   name: string;
   email: string;
   role: "admin" | "manager" | "generalManager" | "member" | "government" | "cooperative";
-  cooperativeId?: string; // For members, managers, and cooperative accounts
+  cooperativeId?: string;
   cooperativeName?: string;
   phone?: string;
   nationalId?: string;
-}
-
-interface CooperativeRegistrationInfo {
-  registrationNumber?: string;
-  district?: string;
-  sector?: string;
-  cooperativeType?: string;
-  chairperson?: string;
-  treasurer?: string;
-  secretary?: string;
-  registrationDate?: string;
-  status?: string;
-  bylawsFileName?: string;
-  licenseFileName?: string;
-  permitsFileName?: string;
-  operatingArea?: string;
-  membershipSize?: string;
 }
 
 interface AuthContextType {
@@ -40,6 +25,7 @@ interface AuthContextType {
   loginWithOTP: (email: string, role: User["role"]) => Promise<boolean>;
   loginAttempts: { [email: string]: number };
   lastLoginAttempt: { [email: string]: number };
+  devOtp: string | null;
 }
 
 interface RegisterData {
@@ -50,348 +36,156 @@ interface RegisterData {
   cooperativeId?: string;
   phone?: string;
   nationalId?: string;
-  cooperativeInfo?: CooperativeRegistrationInfo;
+  cooperativeInfo?: Record<string, string>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-interface CooperativeProfileData {
-  id: string;
-  name: string;
-  registrationNumber: string;
-  district: string;
-  sector: string;
-  type: string;
-  chairperson: string;
-  treasurer: string;
-  secretary: string;
-  registrationDate: string;
-  status: string;
-  bylawsFileName: string;
-  licenseFileName: string;
-  permitsFileName: string;
-  operatingArea: string;
-  membershipSize: string;
-  description: string;
-  documents: { id: string; name: string; type: string; uploadedAt: string }[];
-}
-
-function getStoredCooperatives(): CooperativeProfileData[] {
-  try {
-    const stored = localStorage.getItem("coopinsight_cooperatives");
-    if (stored) return JSON.parse(stored);
-  } catch {
-    // ignore
+const authPost = async (endpoint: string, body: object): Promise<any> => {
+  const res = await fetch(`${API_URL}${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const err: any = new Error(data.message || "Request failed");
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
-  return [];
-}
+  return data;
+};
 
-function saveStoredCooperatives(cooperatives: CooperativeProfileData[]) {
-  localStorage.setItem("coopinsight_cooperatives", JSON.stringify(cooperatives));
-}
-
-// Mock users database (in real app, this would be in backend)
-const MOCK_USERS: User[] = [
-  {
-    id: "admin-1",
-    name: "John Anderson",
-    email: "admin@coopinsight.ai",
-    role: "admin",
-    phone: "+250788123456",
-    nationalId: "1198712345678901",
-  },
-  {
-    id: "manager-1",
-    name: "David Mugisha",
-    email: "manager@greenvalley.coop",
-    role: "manager",
-    cooperativeId: "coop-1",
-    cooperativeName: "Green Valley Farmers",
-    phone: "+250788234567",
-    nationalId: "1199012345678902",
-  },
-  {
-    id: "gm-1",
-    name: "Gasabo General Manager",
-    email: "gm@gasabo.coop",
-    role: "generalManager",
-    phone: "+250788765432",
-    nationalId: "1999912345678907",
-  },
-  {
-    id: "government-1",
-    name: "Dr. Alice Uwase",
-    email: "gov@rca.gov.rw",
-    role: "government",
-    phone: "+250788345678",
-    nationalId: "1198512345678903",
-  },
-  {
-    id: "member-1",
-    name: "Sarah Johnson",
-    email: "sarah@greenvalley.coop",
-    role: "member",
-    cooperativeId: "coop-1",
-    cooperativeName: "Green Valley Farmers",
-    phone: "+250788456789",
-    nationalId: "1199212345678904",
-  },
-  {
-    id: "member-2",
-    name: "Michael Chen",
-    email: "michael@sunrise.coop",
-    role: "member",
-    cooperativeId: "coop-2",
-    cooperativeName: "Sunrise Dairy Cooperative",
-    phone: "+250788567890",
-    nationalId: "1199312345678905",
-  },
-  {
-    id: "member-3",
-    name: "Emily Rodriguez",
-    email: "emily@oceanview.coop",
-    role: "member",
-    cooperativeId: "coop-3",
-    cooperativeName: "Ocean View Fisheries",
-    phone: "+250788678901",
-    nationalId: "1199412345678906",
-  },
-  {
-    id: "cooperative-1",
-    name: "Green Valley Farmers",
-    email: "cooperative@greenvalley.coop",
-    role: "cooperative",
-    cooperativeId: "coop-1",
-    cooperativeName: "Green Valley Farmers",
-    phone: "+250788000111",
-    nationalId: "0000000000000000",
-  },
-];
+const mapApiUser = (apiUser: any): User => ({
+  id: apiUser.id,
+  name: apiUser.name,
+  email: apiUser.email,
+  role: apiUser.role,
+  cooperativeId: apiUser.cooperativeId ?? apiUser.cooperative_id ?? undefined,
+  cooperativeName: apiUser.cooperativeName ?? apiUser.cooperative_name ?? undefined,
+  phone: apiUser.phone ?? undefined,
+});
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loginAttempts, setLoginAttempts] = useState<{ [email: string]: number }>({});
   const [lastLoginAttempt, setLastLoginAttempt] = useState<{ [email: string]: number }>({});
-  const [pendingVerifications, setPendingVerifications] = useState<{ [email: string]: { token: string; data: RegisterData; expires: number } }>({});
-  const [activeOTPs, setActiveOTPs] = useState<{ [email: string]: { otp: string; expires: number } }>({});
-  const [sessionTimeout, setSessionTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
+
+  // Transient state shared across the 3-step login flow
+  const [pendingUserId, setPendingUserId] = useState<string | null>(null);
+  const [pendingUser, setPendingUser] = useState<User | null>(null);
+  // Ref mirrors pendingUser so loginWithOTP reads the latest value synchronously
+  const pendingUserRef = useRef<User | null>(null);
+  // Dev-mode OTP hint (backend returns this when NODE_ENV !== production)
+  const [devOtp, setDevOtp] = useState<string | null>(null);
 
   useEffect(() => {
-    // Check if user is already logged in (from localStorage)
-    const storedUser = localStorage.getItem("coopinsight_user");
-    if (storedUser) {
-      setUser(JSON.parse(storedUser));
+    const stored = localStorage.getItem("coopinsight_user");
+    if (stored) {
+      try { setUser(JSON.parse(stored)); } catch { /* ignore */ }
     }
   }, []);
 
-  const login = async (email: string, _password: string, role?: User["role"]): Promise<boolean> => {
-    // Check login attempts
-    const now = Date.now();
-    const attempts = loginAttempts[email] || 0;
-    const lastAttempt = lastLoginAttempt[email] || 0;
-
-    // Lockout for 15 minutes after 5 failed attempts
-    if (attempts >= 5 && now - lastAttempt < 15 * 60 * 1000) {
+  // ─── Step 1: validate credentials, dispatch OTP ───────────────────────────
+  const sendOTP = async (email: string, password: string, _role: User["role"]): Promise<boolean> => {
+    try {
+      const data = await authPost("/auth/login", { email, password });
+      setPendingUserId(data.userId);
+      if (data.devOtp) setDevOtp(data.devOtp);
+      setLoginAttempts(prev => ({ ...prev, [email]: 0 }));
+      return true;
+    } catch (err: any) {
+      setLastLoginAttempt(prev => ({ ...prev, [email]: Date.now() }));
+      if (err.status === 423) {
+        // Account locked — max out the counter so Login.tsx shows lockout UI
+        setLoginAttempts(prev => ({ ...prev, [email]: 5 }));
+      } else {
+        setLoginAttempts(prev => ({ ...prev, [email]: (prev[email] || 0) + 1 }));
+      }
       return false;
     }
-
-    // Reset attempts if more than 15 minutes have passed
-    if (now - lastAttempt > 15 * 60 * 1000) {
-      setLoginAttempts(prev => ({ ...prev, [email]: 0 }));
-    }
-
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    // For demo purposes, any password works
-    const foundUser = MOCK_USERS.find((u) => u.email === email);
-
-    if (foundUser && (!role || foundUser.role === role)) {
-      setUser(foundUser);
-      localStorage.setItem("coopinsight_user", JSON.stringify(foundUser));
-      // Reset login attempts on success
-      setLoginAttempts(prev => ({ ...prev, [email]: 0 }));
-      // Set session timeout (30 minutes)
-      if (sessionTimeout) clearTimeout(sessionTimeout);
-      const timeout = setTimeout(() => {
-        logout();
-      }, 30 * 60 * 1000);
-      setSessionTimeout(timeout);
-      return true;
-    }
-
-    // Increment failed attempts
-    setLoginAttempts(prev => ({ ...prev, [email]: attempts + 1 }));
-    setLastLoginAttempt(prev => ({ ...prev, [email]: now }));
-
-    return false;
   };
 
+  // ─── Step 2: verify OTP, receive tokens ───────────────────────────────────
+  const verifyOTP = async (_email: string, otp: string): Promise<boolean> => {
+    if (!pendingUserId) return false;
+    try {
+      const data = await authPost("/auth/verify-otp", { userId: pendingUserId, otp });
+      localStorage.setItem("coopinsight_access_token", data.accessToken);
+      localStorage.setItem("coopinsight_refresh_token", data.refreshToken);
+      const mapped = mapApiUser(data.user);
+      pendingUserRef.current = mapped;
+      setPendingUser(mapped);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // ─── Step 3: commit the verified user to state ───────────────────────────
+  const loginWithOTP = async (_email: string, _role: User["role"]): Promise<boolean> => {
+    const userToCommit = pendingUserRef.current;
+    if (!userToCommit) return false;
+    setUser(userToCommit);
+    localStorage.setItem("coopinsight_user", JSON.stringify(userToCommit));
+    pendingUserRef.current = null;
+    setPendingUser(null);
+    setPendingUserId(null);
+    setDevOtp(null);
+    return true;
+  };
+
+  // ─── Single-step login (not used by Login.tsx but kept for completeness) ──
+  const login = async (email: string, password: string, _role?: User["role"]): Promise<boolean> => {
+    const ok = await sendOTP(email, password, "member");
+    return ok;
+  };
+
+  // ─── Register ─────────────────────────────────────────────────────────────
   const register = async (data: RegisterData): Promise<{ success: boolean; message: string }> => {
-    // Check if email already exists
-    const existingUser = MOCK_USERS.find(u => u.email === data.email);
-    if (existingUser) {
-      return { success: false, message: "Email already registered" };
+    try {
+      const res = await authPost("/auth/register", {
+        name: data.name,
+        email: data.email,
+        password: data.password,
+        role: data.role,
+        cooperativeId: data.cooperativeId,
+        phone: data.phone,
+        nationalId: data.nationalId,
+      });
+      return { success: true, message: res.message || "Verification email sent. Please check your inbox." };
+    } catch (err: any) {
+      if (err.status === 409) return { success: false, message: "Email already registered." };
+      return { success: false, message: err.message || "Registration failed. Please try again." };
     }
-
-    // Generate verification token
-    const token = Math.random().toString(36).substring(2) + Date.now().toString(36);
-    const expires = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
-
-    // Store pending verification
-    setPendingVerifications(prev => ({
-      ...prev,
-      [data.email]: { token, data, expires }
-    }));
-
-    // Simulate sending email
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    // In a real app, send email with verification link
-    console.log(`Verification link: /email-verification?email=${encodeURIComponent(data.email)}&token=${token}`);
-
-    return { success: true, message: "Verification email sent. Please check your inbox." };
   };
 
+  // ─── Verify email ─────────────────────────────────────────────────────────
   const verifyEmail = async (email: string, token: string): Promise<boolean> => {
-    const pending = pendingVerifications[email];
-    if (!pending || pending.token !== token || Date.now() > pending.expires) {
-      return false;
-    }
-
-    // Create the user
-    const newUser: User = {
-      id: `user-${Date.now()}`,
-      name: pending.data.name,
-      email: pending.data.email,
-      role: pending.data.role,
-      cooperativeId: pending.data.cooperativeId,
-      cooperativeName: pending.data.role === "cooperative" ? pending.data.name : undefined,
-      phone: pending.data.phone,
-      nationalId: pending.data.nationalId,
-    };
-
-    MOCK_USERS.push(newUser);
-
-    if (pending.data.role === "cooperative" && pending.data.cooperativeInfo) {
-      const existing = getStoredCooperatives();
-      const cooperativeProfile: CooperativeProfileData = {
-        id: pending.data.cooperativeId || `coop-${Date.now()}`,
-        name: pending.data.name,
-        registrationNumber: pending.data.cooperativeInfo.registrationNumber || "",
-        district: pending.data.cooperativeInfo.district || "",
-        sector: pending.data.cooperativeInfo.sector || "",
-        type: pending.data.cooperativeInfo.cooperativeType || "",
-        chairperson: pending.data.cooperativeInfo.chairperson || "",
-        treasurer: pending.data.cooperativeInfo.treasurer || "",
-        secretary: pending.data.cooperativeInfo.secretary || "",
-        registrationDate: pending.data.cooperativeInfo.registrationDate || "",
-        status: pending.data.cooperativeInfo.status || "Pending",
-        bylawsFileName: pending.data.cooperativeInfo.bylawsFileName || "Not uploaded",
-        licenseFileName: pending.data.cooperativeInfo.licenseFileName || "Not uploaded",
-        permitsFileName: pending.data.cooperativeInfo.permitsFileName || "Not uploaded",
-        operatingArea: pending.data.cooperativeInfo.operatingArea || "",
-        membershipSize: pending.data.cooperativeInfo.membershipSize || "",
-        description: `Profile generated for ${pending.data.name}.`, 
-        documents: [
-          {
-            id: `doc-${Date.now()}-bylaws`,
-            name: pending.data.cooperativeInfo.bylawsFileName || "Cooperative Bylaws",
-            type: "Bylaws",
-            uploadedAt: new Date().toLocaleDateString(),
-          },
-          {
-            id: `doc-${Date.now()}-license`,
-            name: pending.data.cooperativeInfo.licenseFileName || "Business License",
-            type: "License",
-            uploadedAt: new Date().toLocaleDateString(),
-          },
-          {
-            id: `doc-${Date.now()}-permit`,
-            name: pending.data.cooperativeInfo.permitsFileName || "Operating Permit",
-            type: "Permit",
-            uploadedAt: new Date().toLocaleDateString(),
-          },
-        ],
-      };
-      saveStoredCooperatives([...existing, cooperativeProfile]);
-    }
-
-    setPendingVerifications(prev => {
-      const updated = { ...prev };
-      delete updated[email];
-      return updated;
-    });
-
-    return true;
-  };
-
-  const sendOTP = async (email: string, _password: string, role: User["role"]): Promise<boolean> => {
-    // First validate credentials
-    const foundUser = MOCK_USERS.find((u) => u.email === email);
-
-    if (!foundUser || foundUser.role !== role) {
-      return false; // Invalid credentials
-    }
-
-    // Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = Date.now() + 5 * 60 * 1000; // 5 minutes
-
-    setActiveOTPs(prev => ({
-      ...prev,
-      [email]: { otp, expires }
-    }));
-
-    // Simulate sending OTP
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    // In a real app, send SMS/email with OTP
-    console.log(`OTP for ${email}: ${otp}`);
-
-    return true;
-  };
-
-  const verifyOTP = async (email: string, otp: string): Promise<boolean> => {
-    const activeOTP = activeOTPs[email];
-    if (!activeOTP || activeOTP.otp !== otp || Date.now() > activeOTP.expires) {
-      return false;
-    }
-
-    setActiveOTPs(prev => {
-      const updated = { ...prev };
-      delete updated[email];
-      return updated;
-    });
-
-    return true;
-  };
-
-  const loginWithOTP = async (email: string, role: User["role"]): Promise<boolean> => {
-    const foundUser = MOCK_USERS.find((u) => u.email === email && u.role === role);
-
-    if (foundUser) {
-      setUser(foundUser);
-      localStorage.setItem("coopinsight_user", JSON.stringify(foundUser));
-      setLoginAttempts(prev => ({ ...prev, [email]: 0 }));
-      if (sessionTimeout) clearTimeout(sessionTimeout);
-      const timeout = setTimeout(() => {
-        logout();
-      }, 30 * 60 * 1000);
-      setSessionTimeout(timeout);
+    try {
+      await authPost("/auth/verify-email", { email, token });
       return true;
+    } catch {
+      return false;
     }
-
-    return false;
   };
 
-  const logout = () => {
+  // ─── Logout ───────────────────────────────────────────────────────────────
+  const logout = async () => {
+    const token = localStorage.getItem("coopinsight_access_token");
+    if (token) {
+      try {
+        await fetch(`${API_URL}/auth/logout`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        });
+      } catch { /* fire-and-forget */ }
+    }
     setUser(null);
     localStorage.removeItem("coopinsight_user");
-    if (sessionTimeout) {
-      clearTimeout(sessionTimeout);
-      setSessionTimeout(null);
-    }
+    localStorage.removeItem("coopinsight_access_token");
+    localStorage.removeItem("coopinsight_refresh_token");
   };
 
   return (
@@ -408,6 +202,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loginWithOTP,
         loginAttempts,
         lastLoginAttempt,
+        devOtp,
       }}
     >
       {children}
@@ -417,8 +212,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
+  if (context === undefined) throw new Error("useAuth must be used within an AuthProvider");
   return context;
 }

@@ -5,7 +5,7 @@ import { LogIn, Mail, Lock, AlertCircle, ArrowLeft } from "lucide-react";
 
 export function Login() {
   const navigate = useNavigate();
-  const {sendOTP, verifyOTP, loginWithOTP, loginAttempts, lastLoginAttempt } = useAuth();
+  const { sendOTP, verifyOTP, loginWithOTP, loginAttempts, lastLoginAttempt, devOtp } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<"admin" | "manager" | "generalManager" | "member" | "government">("member");
@@ -122,7 +122,7 @@ export function Login() {
                   <option value="member">Cooperative Member</option>
                   <option value="manager">Cooperative Manager</option>
                   <option value="generalManager">Gasabo General Manager</option>
-                  <option value="government">Government Official</option>
+                  <option value="government">RCA Officer</option>
                   <option value="admin">System Administrator</option>
                   {/* cooperative account removed */}
                 </select>
@@ -179,12 +179,23 @@ export function Login() {
                 <p className="text-xs text-muted-foreground mt-1">
                   Code sent to: {email}
                 </p>
-                {import.meta.env.DEV && (
-                  <p className="text-xs text-red-500 mt-2">
-                    DEV MODE: Check console for OTP
-                  </p>
-                )}
               </div>
+
+              {devOtp && (
+                <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-lg">
+                  <p className="text-xs font-semibold text-amber-800 mb-1">Dev mode — OTP code:</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xl font-mono font-bold tracking-widest text-amber-900">{devOtp}</span>
+                    <button
+                      type="button"
+                      onClick={() => setOtp(devOtp.split(""))}
+                      className="text-xs px-2 py-1 bg-amber-200 text-amber-900 rounded hover:bg-amber-300 transition-colors"
+                    >
+                      Auto-fill
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="flex gap-2 justify-center">
                 {otp.map((digit, index) => (
                   <input
@@ -227,26 +238,35 @@ export function Login() {
             </p>
           </div>
 
-          {/* Demo Credentials */}
+          {/* Seeded Credentials */}
           <div className="mt-8 p-4 bg-muted rounded-lg border border-border">
-            <p className="text-xs font-semibold text-card-foreground mb-3">Demo Credentials:</p>
-            <div className="text-xs text-muted-foreground space-y-2">
-              <p>
-                <strong>Admin:</strong> admin@coopinsight.ai
-              </p>
-              <p>
-                <strong>Manager:</strong> manager@greenvalley.coop
-              </p>
-              <p>
-                <strong>Government:</strong> gov@rca.gov.rw
-              </p>
-              <p>
-                <strong>Member:</strong> sarah@greenvalley.coop
-              </p>
-              <p>
-                <strong>Gasabo General Manager:</strong> gm@gasabo.coop
-              </p>
-              <p className="text-muted-foreground mt-3">(Any password works for demo)</p>
+            <p className="text-xs font-semibold text-card-foreground mb-3">Test Accounts (seeded):</p>
+            <div className="text-xs text-muted-foreground space-y-1.5 font-mono">
+              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2">
+                <span className="text-[10px] font-sans font-semibold text-muted-foreground uppercase tracking-wide">Role</span>
+                <span className="text-[10px] font-sans font-semibold text-muted-foreground uppercase tracking-wide">Email</span>
+                <span className="text-[10px] font-sans font-semibold text-muted-foreground uppercase tracking-wide">Password</span>
+              </div>
+              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2 text-card-foreground">
+                <span>Admin</span>
+                <span>admin@coopinsight.rw</span>
+                <span>Admin@1234</span>
+              </div>
+              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2 text-card-foreground">
+                <span>Manager</span>
+                <span>manager@coopinsight.rw</span>
+                <span>Manager@1234</span>
+              </div>
+              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2 text-card-foreground">
+                <span>Member</span>
+                <span>member@coopinsight.rw</span>
+                <span>Member@1234</span>
+              </div>
+              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2 text-card-foreground">
+                <span>RCA</span>
+                <span>gov@coopinsight.rw</span>
+                <span>Gov@1234!</span>
+              </div>
             </div>
           </div>
         </div>

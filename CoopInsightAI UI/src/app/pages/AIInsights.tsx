@@ -1,7 +1,9 @@
-import { Brain, TrendingUp, AlertTriangle, Target, Users, Download, BarChart3, Layers, Zap } from "lucide-react";
-import { useState } from "react";
+import { Brain, TrendingUp, AlertTriangle, Target, Users, Download, BarChart3, Layers, Zap, RefreshCw } from "lucide-react";
+import { useState, useEffect } from "react";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
+import { api } from "../services/api";
+import { useAuth } from "../contexts/AuthContext";
 
 interface AnomalyDetection {
   transactionId: string;
@@ -29,102 +31,141 @@ interface BenchmarkMetric {
   trend: "up" | "down" | "stable";
 }
 
+interface ApiInsight {
+  id: string;
+  title: string;
+  type: string;
+  summary: string;
+  confidence: number;
+  cooperative_id: string;
+  cooperative_name: string;
+  created_at: string;
+  data: any;
+}
+
+// Static fallback data (kept for tabs that don't yet have dedicated endpoints)
+const staticAnomalies: AnomalyDetection[] = [
+  {
+    transactionId: "TXN-2026-001",
+    date: "2026-04-18",
+    amount: 15000000,
+    type: "outlier",
+    reason: "Transaction amount is 3.2x above normal transaction average",
+    riskLevel: "high",
+  },
+  {
+    transactionId: "TXN-2026-002",
+    date: "2026-04-17",
+    amount: 500000,
+    type: "unusual-pattern",
+    reason: "Member who typically pays on 1st of month paid on 17th",
+    riskLevel: "low",
+  },
+  {
+    transactionId: "TXN-2026-003",
+    date: "2026-04-16",
+    amount: 8500000,
+    type: "anomaly",
+    reason: "Unusual spike in expense transactions - pattern suggests potential fraud",
+    riskLevel: "high",
+  },
+  {
+    transactionId: "TXN-2026-004",
+    date: "2026-04-15",
+    amount: 2000000,
+    type: "unusual-pattern",
+    reason: "Missing expected savings contribution from member",
+    riskLevel: "medium",
+  },
+];
+
+const staticMemberEngagement: MemberEngagementScore[] = [
+  { memberId: "M001", memberName: "Jean Uwimana", activityFrequency: 92, contributionConsistency: 95, trainingParticipation: 88, overallScore: 91 },
+  { memberId: "M002", memberName: "Marie Mukamana", activityFrequency: 85, contributionConsistency: 78, trainingParticipation: 82, overallScore: 81 },
+  { memberId: "M003", memberName: "Peter Habimana", activityFrequency: 45, contributionConsistency: 52, trainingParticipation: 38, overallScore: 45 },
+  { memberId: "M004", memberName: "Grace Uwase", activityFrequency: 88, contributionConsistency: 92, trainingParticipation: 95, overallScore: 91 },
+  { memberId: "M005", memberName: "Eric Niyonzima", activityFrequency: 72, contributionConsistency: 68, trainingParticipation: 75, overallScore: 71 },
+];
+
+const staticBenchmarks: BenchmarkMetric[] = [
+  { metric: "Member Contribution Rate", yourValue: 94, averageCooperative: 82, topPerformer: 98, trend: "up" },
+  { metric: "Loan Recovery Rate", yourValue: 94, averageCooperative: 87, topPerformer: 99, trend: "stable" },
+  { metric: "Member Retention Rate", yourValue: 89, averageCooperative: 81, topPerformer: 96, trend: "up" },
+  { metric: "Training Participation", yourValue: 78, averageCooperative: 65, topPerformer: 92, trend: "up" },
+  { metric: "Financial Transparency Score", yourValue: 91, averageCooperative: 75, topPerformer: 98, trend: "stable" },
+  { metric: "Activity Completion Rate", yourValue: 86, averageCooperative: 74, topPerformer: 95, trend: "down" },
+];
+
+const staticModelPerformance = {
+  anomalyDetection: { accuracy: 94, precision: 92, recall: 96, f1Score: 94 },
+  engagementPrediction: { accuracy: 88, precision: 85, recall: 91, f1Score: 88 },
+  riskAssessment: { accuracy: 91, precision: 93, recall: 89, f1Score: 91 },
+  recommendationEngine: { accuracy: 84, precision: 82, recall: 87, f1Score: 84 },
+};
+
+const staticPredictions = [
+  { metric: "Revenue (Next Quarter)", current: "RWF 12.5M", predicted: "RWF 14.2M", confidence: "92%" },
+  { metric: "New Members", current: "145", predicted: "168", confidence: "85%" },
+  { metric: "Loan Recovery Rate", current: "94%", predicted: "96%", confidence: "88%" },
+];
+
 export function AIInsights() {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<"overview" | "anomalies" | "engagement" | "benchmarks" | "performance">("overview");
 
+  // API state
+  const [apiInsights, setApiInsights] = useState<ApiInsight[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [analyzeSuccess, setAnalyzeSuccess] = useState<string | null>(null);
+
+  // Derived performance score — use API data if available, else static
   const performanceScore = 87;
   const [showScoreDetail, setShowScoreDetail] = useState(false);
   const dashArray = (performanceScore / 100) * 351.86 + " 351.86";
 
-  // Anomaly Detection Data
-  const anomalies: AnomalyDetection[] = [
-    {
-      transactionId: "TXN-2026-001",
-      date: "2026-04-18",
-      amount: 15000000,
-      type: "outlier",
-      reason: "Transaction amount is 3.2x above normal transaction average",
-      riskLevel: "high",
-    },
-    {
-      transactionId: "TXN-2026-002",
-      date: "2026-04-17",
-      amount: 500000,
-      type: "unusual-pattern",
-      reason: "Member who typically pays on 1st of month paid on 17th",
-      riskLevel: "low",
-    },
-    {
-      transactionId: "TXN-2026-003",
-      date: "2026-04-16",
-      amount: 8500000,
-      type: "anomaly",
-      reason: "Unusual spike in expense transactions - pattern suggests potential fraud",
-      riskLevel: "high",
-    },
-    {
-      transactionId: "TXN-2026-004",
-      date: "2026-04-15",
-      amount: 2000000,
-      type: "unusual-pattern",
-      reason: "Missing expected savings contribution from member",
-      riskLevel: "medium",
-    },
-  ];
+  // Build overview insight cards — prefer live API data when available
+  // Derived slices from live API data
+  const apiRecommendations = apiInsights.filter((i) => i.type === "recommendation");
+  const apiAnomalies       = apiInsights.filter((i) => i.type === "anomaly");
+  const apiForecasts       = apiInsights.filter((i) => i.type === "forecast");
 
-  // Member Engagement Analysis
-  const memberEngagement: MemberEngagementScore[] = [
-    { memberId: "M001", memberName: "Jean Uwimana", activityFrequency: 92, contributionConsistency: 95, trainingParticipation: 88, overallScore: 91 },
-    { memberId: "M002", memberName: "Marie Mukamana", activityFrequency: 85, contributionConsistency: 78, trainingParticipation: 82, overallScore: 81 },
-    { memberId: "M003", memberName: "Peter Habimana", activityFrequency: 45, contributionConsistency: 52, trainingParticipation: 38, overallScore: 45 },
-    { memberId: "M004", memberName: "Grace Uwase", activityFrequency: 88, contributionConsistency: 92, trainingParticipation: 95, overallScore: 91 },
-    { memberId: "M005", memberName: "Eric Niyonzima", activityFrequency: 72, contributionConsistency: 68, trainingParticipation: 75, overallScore: 71 },
-  ];
-
-  // Benchmarking Data
-  const benchmarks: BenchmarkMetric[] = [
-    { metric: "Member Contribution Rate", yourValue: 94, averageCooperative: 82, topPerformer: 98, trend: "up" },
-    { metric: "Loan Recovery Rate", yourValue: 94, averageCooperative: 87, topPerformer: 99, trend: "stable" },
-    { metric: "Member Retention Rate", yourValue: 89, averageCooperative: 81, topPerformer: 96, trend: "up" },
-    { metric: "Training Participation", yourValue: 78, averageCooperative: 65, topPerformer: 92, trend: "up" },
-    { metric: "Financial Transparency Score", yourValue: 91, averageCooperative: 75, topPerformer: 98, trend: "stable" },
-    { metric: "Activity Completion Rate", yourValue: 86, averageCooperative: 74, topPerformer: 95, trend: "down" },
-  ];
-
-  // Model Performance Metrics
-  const modelPerformance = {
-    anomalyDetection: { accuracy: 94, precision: 92, recall: 96, f1Score: 94 },
-    engagementPrediction: { accuracy: 88, precision: 85, recall: 91, f1Score: 88 },
-    riskAssessment: { accuracy: 91, precision: 93, recall: 89, f1Score: 91 },
-    recommendationEngine: { accuracy: 84, precision: 82, recall: 87, f1Score: 84 },
-  };
-
-  const insights = [
-    {
-      id: "member-engagement",
-      type: "success",
-      icon: TrendingUp,
-      title: "Strong Member Engagement",
-      description: "Member engagement is 23% above average. Keep up the good work with monthly training programs.",
-      metric: "91/100",
-    },
-    {
-      id: "loan-default-risk",
-      type: "warning",
-      icon: AlertTriangle,
-      title: "Anomalies Detected",
-      description: "4 anomalies detected in recent transactions. 2 are flagged as high-risk for review.",
-      metric: "4 found",
-    },
-    {
-      id: "benchmarking",
-      type: "info",
-      icon: BarChart3,
-      title: "Benchmark Analysis",
-      description: "Your cooperative outperforms 78% of similar cooperatives in key metrics.",
-      metric: "78th %ile",
-    },
-  ];
+  const overviewInsights = apiInsights.length > 0
+    ? apiInsights.slice(0, 3).map((ins) => ({
+        id: ins.id,
+        type: ins.type === "anomaly" ? "warning" : ins.type === "insight" ? "success" : "info",
+        icon: ins.type === "anomaly" ? AlertTriangle : ins.type === "recommendation" ? Zap : ins.type === "forecast" ? TrendingUp : BarChart3,
+        title: ins.title,
+        description: ins.summary,
+        metric: ins.confidence ? `${Math.round(Number(ins.confidence) * 100)}% conf.` : "—",
+      }))
+    : [
+        {
+          id: "member-engagement",
+          type: "success",
+          icon: TrendingUp,
+          title: "Strong Member Engagement",
+          description: "Member engagement is 23% above average. Keep up the good work with monthly training programs.",
+          metric: "91/100",
+        },
+        {
+          id: "loan-default-risk",
+          type: "warning",
+          icon: AlertTriangle,
+          title: "Anomalies Detected",
+          description: "4 anomalies detected in recent transactions. 2 are flagged as high-risk for review.",
+          metric: "4 found",
+        },
+        {
+          id: "benchmarking",
+          type: "info",
+          icon: BarChart3,
+          title: "Benchmark Analysis",
+          description: "Your cooperative outperforms 78% of similar cooperatives in key metrics.",
+          metric: "78th %ile",
+        },
+      ];
 
   const recommendations = [
     {
@@ -147,11 +188,42 @@ export function AIInsights() {
     },
   ];
 
-  const predictions = [
-    { metric: "Revenue (Next Quarter)", current: "RWF 12.5M", predicted: "RWF 14.2M", confidence: "92%" },
-    { metric: "New Members", current: "145", predicted: "168", confidence: "85%" },
-    { metric: "Loan Recovery Rate", current: "94%", predicted: "96%", confidence: "88%" },
-  ];
+  const fetchInsights = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.get<any>("/ai/insights?page=1&limit=50");
+      setApiInsights((res as any).data || []);
+    } catch (err: any) {
+      const msg = err?.message || "AI service is currently unavailable. Showing cached data.";
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchInsights();
+  }, []);
+
+  const handleRunAnalysis = async () => {
+    if (!user?.cooperativeId) return;
+    setAnalyzing(true);
+    setAnalyzeSuccess(null);
+    setError(null);
+    try {
+      await api.post("/ai/analyze", {
+        cooperativeId: user.cooperativeId,
+        analysisType: "full",
+      });
+      setAnalyzeSuccess("Analysis complete. Refreshing insights…");
+      await fetchInsights();
+    } catch (err: any) {
+      setError(err?.message || "Analysis failed. The AI service may be temporarily unavailable.");
+    } finally {
+      setAnalyzing(false);
+    }
+  };
 
   const handleExportInsights = () => {
     const timestamp = new Date().toISOString().split("T")[0];
@@ -162,11 +234,11 @@ Generated by CoopInsightAI
 EXECUTIVE SUMMARY
 Performance Score: ${performanceScore}/100 (Excellent)
 Overall Member Engagement: 91/100
-Anomalies Detected: ${anomalies.length}
+Anomalies Detected: ${staticAnomalies.length}
 Benchmarking Position: 78th percentile
 
-ANOMALY DETECTION RESULTS (${anomalies.length} Found)
-${anomalies
+ANOMALY DETECTION RESULTS (${staticAnomalies.length} Found)
+${staticAnomalies
   .map(
     (a) =>
       `- ${a.transactionId} (${a.date}): ${a.reason} [Risk: ${a.riskLevel.toUpperCase()}]`
@@ -175,33 +247,33 @@ ${anomalies
 
 MEMBER ENGAGEMENT ANALYSIS
 Top Performers:
-${memberEngagement
+${staticMemberEngagement
   .slice(0, 3)
   .map((m) => `- ${m.memberName}: ${m.overallScore}/100`)
   .join("\n")}
 
 At-Risk Members:
-${memberEngagement
+${staticMemberEngagement
   .filter((m) => m.overallScore < 60)
   .map((m) => `- ${m.memberName}: ${m.overallScore}/100`)
   .join("\n")}
 
 BENCHMARKING COMPARISON
 Your cooperative vs. Industry Average:
-${benchmarks
+${staticBenchmarks
   .map((b) => `- ${b.metric}: You (${b.yourValue}%) vs Average (${b.averageCooperative}%)`)
   .join("\n")}
 
 MODEL PERFORMANCE METRICS
-- Anomaly Detection: ${modelPerformance.anomalyDetection.accuracy}% Accuracy
-- Engagement Prediction: ${modelPerformance.engagementPrediction.accuracy}% Accuracy
-- Risk Assessment: ${modelPerformance.riskAssessment.accuracy}% Accuracy
+- Anomaly Detection: ${staticModelPerformance.anomalyDetection.accuracy}% Accuracy
+- Engagement Prediction: ${staticModelPerformance.engagementPrediction.accuracy}% Accuracy
+- Risk Assessment: ${staticModelPerformance.riskAssessment.accuracy}% Accuracy
 
 AI RECOMMENDATIONS
 ${recommendations.map((r) => `- ${r.title} (${r.impact} Impact): ${r.description}`).join("\n")}
 
 PREDICTIONS (Next Quarter)
-${predictions
+${staticPredictions
   .map(
     (p) =>
       `- ${p.metric}: ${p.current} → ${p.predicted} (${p.confidence} confidence)`
@@ -227,11 +299,34 @@ ${predictions
           <h1 className="text-3xl font-bold text-gray-900">AI Analytics & Insights</h1>
           <p className="text-gray-600 mt-1">Data-driven insights, anomaly detection, and performance analysis</p>
         </div>
-        <Button onClick={handleExportInsights}>
-          <Download className="w-4 h-4 mr-2" />
-          Export Insights
-        </Button>
+        <div className="flex gap-3">
+          {user?.cooperativeId && (
+            <Button onClick={handleRunAnalysis} disabled={analyzing} variant="secondary">
+              <RefreshCw className={`w-4 h-4 mr-2 ${analyzing ? "animate-spin" : ""}`} />
+              {analyzing ? "Analyzing…" : "Run Analysis"}
+            </Button>
+          )}
+          <Button onClick={handleExportInsights}>
+            <Download className="w-4 h-4 mr-2" />
+            Export Insights
+          </Button>
+        </div>
       </div>
+
+      {/* Status banners */}
+      {error && (
+        <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-lg px-4 py-3 text-sm">
+          {error}
+        </div>
+      )}
+      {analyzeSuccess && (
+        <div className="bg-green-50 border border-green-200 text-green-800 rounded-lg px-4 py-3 text-sm">
+          {analyzeSuccess}
+        </div>
+      )}
+      {loading && (
+        <div className="text-sm text-gray-500 text-center py-2">Loading AI insights…</div>
+      )}
 
       <div className="bg-gradient-to-r from-[#2563EB] via-blue-600 to-blue-700 rounded-xl p-8 text-white">
         <div className="flex items-center justify-between">
@@ -325,7 +420,7 @@ ${predictions
       {activeTab === "overview" && (
         <div className="space-y-6">
           <div className="grid grid-cols-3 gap-6">
-            {insights.map((insight, index) => {
+            {overviewInsights.map((insight, index) => {
               const Icon = insight.icon;
               const bgColor =
                 insight.type === "success"
@@ -341,7 +436,7 @@ ${predictions
                   : "text-[#2563EB]";
 
               return (
-                <Card key={index} className="p-6">
+                <Card key={insight.id ?? index} className="p-6">
                   <div className={`p-3 rounded-lg ${bgColor} inline-block mb-4`}>
                     <Icon className={`w-6 h-6 ${iconColor}`} />
                   </div>
@@ -363,23 +458,28 @@ ${predictions
                 AI Recommendations
               </h2>
               <div className="space-y-4">
-                {recommendations.map((rec, index) => (
-                  <div key={index} className="p-4 bg-gray-50 rounded-lg">
-                    <div className="flex items-start justify-between mb-2">
-                      <h3 className="font-medium text-gray-900">{rec.title}</h3>
-                      <span
-                        className={`px-2 py-1 rounded text-xs font-medium ${
-                          rec.impact === "High"
-                            ? "bg-red-100 text-red-800"
-                            : "bg-yellow-100 text-yellow-800"
-                        }`}
-                      >
-                        {rec.impact} Impact
-                      </span>
+                {(apiRecommendations.length > 0 ? apiRecommendations : []).slice(0, 4).map((rec: any, index: number) => {
+                  const sev = rec.severity ?? "info";
+                  const impact = sev === "critical" ? "Critical" : sev === "warning" ? "High" : "Medium";
+                  const impactCls = sev === "critical" ? "bg-red-100 text-red-800" : sev === "warning" ? "bg-orange-100 text-orange-800" : "bg-yellow-100 text-yellow-800";
+                  return (
+                    <div key={rec.id ?? index} className="p-4 bg-gray-50 rounded-lg">
+                      <div className="flex items-start justify-between mb-2">
+                        <h3 className="font-medium text-gray-900 text-sm">{rec.title}</h3>
+                        <span className={`px-2 py-1 rounded text-xs font-medium whitespace-nowrap ml-2 ${impactCls}`}>
+                          {impact} Impact
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-600">{rec.summary}</p>
+                      {rec.cooperative_name && (
+                        <p className="text-xs text-gray-400 mt-1">{rec.cooperative_name}</p>
+                      )}
                     </div>
-                    <p className="text-sm text-gray-600">{rec.description}</p>
-                  </div>
-                ))}
+                  );
+                })}
+                {apiRecommendations.length === 0 && !loading && (
+                  <p className="text-sm text-gray-400 text-center py-4">No recommendations yet — run analysis to generate.</p>
+                )}
               </div>
             </Card>
 
@@ -389,27 +489,36 @@ ${predictions
                 Predictive Analytics
               </h2>
               <div className="space-y-4">
-                {predictions.map((pred, index) => (
-                  <div key={index} className="p-4 bg-gray-50 rounded-lg">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium text-gray-700">{pred.metric}</span>
-                      <span className="text-xs px-2 py-1 bg-green-100 text-green-900 rounded font-medium">
-                        {pred.confidence} confidence
-                      </span>
-                    </div>
-                    <div className="flex items-baseline gap-3">
-                      <div>
-                        <p className="text-xs text-gray-500">Current</p>
-                        <p className="text-lg font-semibold text-gray-900">{pred.current}</p>
+                {(apiForecasts.length > 0 ? apiForecasts : []).slice(0, 4).map((pred: any, index: number) => {
+                  const confPct = pred.confidence ? `${Math.round(Number(pred.confidence) * 100)}%` : "—";
+                  const current = pred.current_value != null ? String(pred.current_value) : "—";
+                  const expected = pred.expected_value != null ? String(pred.expected_value) : "—";
+                  return (
+                    <div key={pred.id ?? index} className="p-4 bg-gray-50 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-gray-700">{pred.affected_metric ?? pred.title}</span>
+                        <span className="text-xs px-2 py-1 bg-green-100 text-green-900 rounded font-medium">
+                          {confPct} confidence
+                        </span>
                       </div>
-                      <TrendingUp className="w-4 h-4 text-green-600 mt-4" />
-                      <div>
-                        <p className="text-xs text-gray-500">Predicted</p>
-                        <p className="text-lg font-semibold text-[#2563EB]">{pred.predicted}</p>
+                      <p className="text-xs text-gray-500 mb-2">{pred.summary}</p>
+                      <div className="flex items-baseline gap-3">
+                        <div>
+                          <p className="text-xs text-gray-500">Current</p>
+                          <p className="text-lg font-semibold text-gray-900">{current}</p>
+                        </div>
+                        <TrendingUp className="w-4 h-4 text-green-600 mt-4" />
+                        <div>
+                          <p className="text-xs text-gray-500">Predicted</p>
+                          <p className="text-lg font-semibold text-[#2563EB]">{expected}</p>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
+                {apiForecasts.length === 0 && !loading && (
+                  <p className="text-sm text-gray-400 text-center py-4">No forecast data yet.</p>
+                )}
               </div>
             </Card>
           </div>
@@ -420,53 +529,62 @@ ${predictions
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
             <AlertTriangle className="w-6 h-6 text-[#2563EB]" />
-            Anomaly Detection Results ({anomalies.length} Found)
+            Anomaly Detection Results ({apiAnomalies.length} Found)
           </h2>
           <div className="space-y-4">
-            {anomalies.map((anomaly, idx) => (
-              <div
-                key={idx}
-                className={`p-4 rounded-lg border-2 ${
-                  anomaly.riskLevel === "high"
-                    ? "border-red-200 bg-red-50"
-                    : anomaly.riskLevel === "medium"
-                    ? "border-yellow-200 bg-yellow-50"
-                    : "border-blue-200 bg-blue-50"
-                }`}
-              >
-                <div className="flex items-start justify-between mb-2">
-                  <div>
-                    <h3 className="font-semibold text-gray-900">{anomaly.transactionId}</h3>
-                    <p className="text-sm text-gray-600 mt-1">{anomaly.reason}</p>
+            {apiAnomalies.map((anomaly: any, idx: number) => {
+              const sev = anomaly.severity ?? "info";
+              const borderCls = sev === "critical" ? "border-red-200 bg-red-50" : sev === "warning" ? "border-yellow-200 bg-yellow-50" : "border-blue-200 bg-blue-50";
+              const badgeCls  = sev === "critical" ? "bg-red-100 text-red-800" : sev === "warning" ? "bg-yellow-100 text-yellow-800" : "bg-blue-100 text-blue-800";
+              const riskLabel = sev === "critical" ? "HIGH RISK" : sev === "warning" ? "MEDIUM RISK" : "LOW RISK";
+              const dateStr   = anomaly.generated_at ? new Date(anomaly.generated_at).toLocaleDateString() : "—";
+              return (
+                <div key={anomaly.id ?? idx} className={`p-4 rounded-lg border-2 ${borderCls}`}>
+                  <div className="flex items-start justify-between mb-2">
+                    <div>
+                      <h3 className="font-semibold text-gray-900">{anomaly.title}</h3>
+                      <p className="text-sm text-gray-600 mt-1">{anomaly.summary}</p>
+                    </div>
+                    <span className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ml-3 ${badgeCls}`}>
+                      {riskLabel}
+                    </span>
                   </div>
-                  <span
-                    className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${
-                      anomaly.riskLevel === "high"
-                        ? "bg-red-100 text-red-800"
-                        : anomaly.riskLevel === "medium"
-                        ? "bg-yellow-100 text-yellow-800"
-                        : "bg-blue-100 text-blue-800"
-                    }`}
-                  >
-                    {anomaly.riskLevel.toUpperCase()} RISK
-                  </span>
+                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-200">
+                    <div>
+                      <p className="text-xs text-gray-600">Detected</p>
+                      <p className="font-medium text-gray-900">{dateStr}</p>
+                    </div>
+                    {anomaly.affected_metric && (
+                      <div>
+                        <p className="text-xs text-gray-600">Metric</p>
+                        <p className="font-medium text-gray-900 capitalize">{anomaly.affected_metric}</p>
+                      </div>
+                    )}
+                    {anomaly.current_value != null && (
+                      <div>
+                        <p className="text-xs text-gray-600">Observed</p>
+                        <p className="font-medium text-gray-900">{anomaly.current_value}</p>
+                      </div>
+                    )}
+                    {anomaly.expected_value != null && (
+                      <div>
+                        <p className="text-xs text-gray-600">Expected</p>
+                        <p className="font-medium text-gray-900">{anomaly.expected_value}</p>
+                      </div>
+                    )}
+                    {anomaly.cooperative_name && (
+                      <div>
+                        <p className="text-xs text-gray-600">Cooperative</p>
+                        <p className="font-medium text-gray-900 text-xs">{anomaly.cooperative_name}</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-200">
-                  <div>
-                    <p className="text-xs text-gray-600">Date</p>
-                    <p className="font-medium text-gray-900">{anomaly.date}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Amount</p>
-                    <p className="font-medium text-gray-900">₣{anomaly.amount.toLocaleString("en-RW")}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-600">Type</p>
-                    <p className="font-medium text-gray-900 capitalize">{anomaly.type}</p>
-                  </div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
+            {apiAnomalies.length === 0 && !loading && (
+              <p className="text-sm text-gray-400 text-center py-6">No anomalies detected.</p>
+            )}
           </div>
         </Card>
       )}
@@ -489,7 +607,7 @@ ${predictions
                 </tr>
               </thead>
               <tbody>
-                {memberEngagement.map((member, idx) => (
+                {staticMemberEngagement.map((member, idx) => (
                   <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-900">{member.memberName}</td>
                     <td className="px-4 py-3">
@@ -544,7 +662,7 @@ ${predictions
             Benchmarking Against Similar Cooperatives
           </h2>
           <div className="space-y-6">
-            {benchmarks.map((bench, idx) => (
+            {staticBenchmarks.map((bench, idx) => (
               <div key={idx} className="p-4 bg-gray-50 rounded-lg">
                 <div className="flex items-start justify-between mb-4">
                   <div>
@@ -597,12 +715,10 @@ ${predictions
 
       {activeTab === "performance" && (
         <div className="grid grid-cols-2 gap-6">
-          {Object.entries(modelPerformance).map(([modelName, metrics]) => (
+          {Object.entries(staticModelPerformance).map(([modelName, metrics]) => (
             <Card key={modelName} className="p-6">
               <h3 className="font-semibold text-gray-900 mb-4 capitalize">
-                {modelName
-                  .replace(/([A-Z])/g, " $1")
-                  .trim()}
+                {modelName.replace(/([A-Z])/g, " $1").trim()}
               </h3>
               <div className="space-y-3">
                 {Object.entries(metrics).map(([metric, value]) => (

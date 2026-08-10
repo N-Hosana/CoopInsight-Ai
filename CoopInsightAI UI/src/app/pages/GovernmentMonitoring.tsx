@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { AlertTriangle, MapPin, CheckCircle, Clock, Download, RefreshCw } from "lucide-react";
+import { api } from "../services/api";
 
 interface CooperativeLocation {
   id: string;
@@ -56,6 +57,13 @@ interface ScheduledReport {
   recipients: string[];
 }
 
+interface SectorData {
+  sector: string;
+  cooperativeCount: number;
+  memberCount: number;
+  totalSavings: number;
+}
+
 export function GovernmentMonitoring() {
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<"overview" | "map" | "interventions" | "compliance" | "reports" | "model" | "agents" | "activities">(
@@ -67,151 +75,15 @@ export function GovernmentMonitoring() {
   const [selectedActivityCooperative, setSelectedActivityCooperative] = useState<string>("All Cooperatives");
   const [selectedActivityStatus, setSelectedActivityStatus] = useState<string>("All Status");
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setLastRefresh(new Date());
-    }, 30000); // auto-refresh every 30s
-    return () => clearInterval(interval);
-  }, []);
+  // ─── API state ────────────────────────────────────────────────────────────
+  const [cooperatives, setCooperatives] = useState<CooperativeLocation[]>([]);
+  const [complianceChecklist, setComplianceChecklist] = useState<ComplianceItem[]>([]);
+  const [interventionRecommendations, setInterventionRecommendations] = useState<InterventionRecommendation[]>([]);
+  const [sectorData, setSectorData] = useState<SectorData[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const cooperatives: CooperativeLocation[] = [
-    {
-      id: "COOP001",
-      name: "Green Valley Farmers",
-      district: "Gasabo",
-      sector: "Kimihurura",
-      latitude: -1.9536,
-      longitude: 30.4341,
-      members: 145,
-      status: "compliant",
-      complianceScore: 95,
-      lastAudit: "2026-03-15",
-    },
-    {
-      id: "COOP002",
-      name: "Kigali Coffee Producers",
-      district: "Gasabo",
-      sector: "Kicukiro",
-      latitude: -1.9448,
-      longitude: 30.0619,
-      members: 87,
-      status: "at-risk",
-      complianceScore: 68,
-      lastAudit: "2026-02-10",
-    },
-    {
-      id: "COOP003",
-      name: "Southern Dairy Cooperative",
-      district: "Gasabo",
-      sector: "Remera",
-      latitude: -2.0469,
-      longitude: 30.4656,
-      members: 203,
-      status: "non-compliant",
-      complianceScore: 45,
-      lastAudit: "2026-01-05",
-    },
-    {
-      id: "COOP004",
-      name: "Eastern Agricultural Union",
-      district: "Gasabo",
-      sector: "Kacyiru",
-      latitude: -2.0208,
-      longitude: 30.7661,
-      members: 156,
-      status: "compliant",
-      complianceScore: 92,
-      lastAudit: "2026-03-20",
-    },
-    {
-      id: "COOP005",
-      name: "Rubavu Fish Farmers",
-      district: "Gasabo",
-      sector: "Kimihurura",
-      latitude: -1.4979,
-      longitude: 29.2544,
-      members: 98,
-      status: "at-risk",
-      complianceScore: 72,
-      lastAudit: "2026-02-28",
-    },
-  ];
-
-  const complianceChecklist: ComplianceItem[] = [
-    {
-      id: "FIN001",
-      title: "Q2 Financial Audit Report",
-      category: "financial",
-      status: "compliant",
-      dueDate: "2026-04-30",
-      priority: "high",
-      description: "Quarterly financial statements must be audited and submitted",
-    },
-    {
-      id: "GOV001",
-      title: "Board Meeting Minutes",
-      category: "governance",
-      status: "compliant",
-      dueDate: "2026-04-15",
-      priority: "medium",
-      description: "Board meeting minutes must be documented and filed",
-    },
-    {
-      id: "OPS001",
-      title: "Member Registry Update",
-      category: "operational",
-      status: "non-compliant",
-      dueDate: "2026-03-31",
-      priority: "high",
-      description: "Member registry must be updated with new members within 30 days",
-    },
-    {
-      id: "SAF001",
-      title: "Safety Compliance Certification",
-      category: "safety",
-      status: "pending-review",
-      dueDate: "2026-05-15",
-      priority: "medium",
-      description: "Annual safety compliance certification required",
-    },
-    {
-      id: "FIN002",
-      title: "Tax Compliance Filing",
-      category: "financial",
-      status: "pending-review",
-      dueDate: "2026-05-31",
-      priority: "high",
-      description: "Annual tax compliance filing deadline",
-    },
-  ];
-
-  const interventionRecommendations: InterventionRecommendation[] = [
-    {
-      cooperativeId: "COOP003",
-      cooperativeName: "Southern Dairy Cooperative",
-      riskLevel: "critical",
-      reason: "Compliance score 45% - missed Q1 financial audit, member registry not updated",
-      recommendedAction: "Immediate regulatory intervention required. Conduct compliance audit within 2 weeks.",
-      timeline: "Within 2 weeks",
-    },
-    {
-      cooperativeId: "COOP002",
-      cooperativeName: "Kigali Coffee Producers",
-      riskLevel: "high",
-      reason: "Compliance score 68% - Q1 audit submitted late, governance records incomplete",
-      recommendedAction: "Issue compliance notice. Schedule follow-up audit within 30 days.",
-      timeline: "Within 30 days",
-    },
-    {
-      cooperativeId: "COOP005",
-      cooperativeName: " Fish Farmers",
-      riskLevel: "medium",
-      reason: "Compliance score 72% - Minor administrative issues in member registry",
-      recommendedAction: "Send compliance reminder and provide technical support for record-keeping",
-      timeline: "Within 60 days",
-    },
-  ];
-
+  // Static data that doesn't come from the backend
   const scheduledReports: ScheduledReport[] = [
     {
       id: "RPT001",
@@ -247,62 +119,95 @@ export function GovernmentMonitoring() {
     },
   ];
 
-  const activityList: CooperativeActivity[] = [
-    {
-      id: "ACT001",
-      cooperativeId: "COOP001",
-      cooperativeName: "Green Valley Farmers",
-      title: "Harvest Planning Review",
-      category: "production",
-      date: "2026-04-12",
-      status: "Completed",
-      summary: "Reviewed harvest schedules and aligned distribution plans across the district.",
-    },
-    {
-      id: "ACT002",
-      cooperativeId: "COOP002",
-      cooperativeName: "Kigali Coffee Producers",
-      title: "Market Access Training",
-      category: "training",
-      date: "2026-04-18",
-      status: "Ongoing",
-      summary: "Supporting cooperative members in accessing national retail channels.",
-    },
-    {
-      id: "ACT003",
-      cooperativeId: "COOP003",
-      cooperativeName: "Southern Dairy Cooperative",
-      title: "Compliance Audit Readiness",
-      category: "governance",
-      date: "2026-04-26",
-      status: "Planned",
-      summary: "Preparing documentation and audit checkpoints ahead of the regulatory visit.",
-    },
-    {
-      id: "ACT004",
-      cooperativeId: "COOP004",
-      cooperativeName: "Eastern Agricultural Union",
-      title: "Water Access Initiative",
-      category: "operational",
-      date: "2026-04-22",
-      status: "Ongoing",
-      summary: "Upgrading irrigation infrastructure for smallholder cooperative farms.",
-    },
-    {
-      id: "ACT005",
-      cooperativeId: "COOP005",
-      cooperativeName: "Rubavu Fish Farmers",
-      title: "Member Registry Update",
-      category: "operational",
-      date: "2026-04-20",
-      status: "Completed",
-      summary: "Completed member registry verification for the upcoming audit cycle.",
-    },
-  ];
+  const activityList: CooperativeActivity[] = [];
+
+  const fetchData = async () => {
+    setIsRefreshing(true);
+    setError(null);
+    try {
+      const [coopsRes, complianceRes, overviewRes] = await Promise.all([
+        api.get<any>("/cooperatives?page=1&limit=100"),
+        api.get<any>("/dashboard/government/compliance"),
+        api.get<any>("/dashboard/government/overview"),
+      ]);
+
+      // Map raw cooperatives list to CooperativeLocation shape
+      const rawCoops: CooperativeLocation[] = ((coopsRes as any).data ?? []).map((c: any) => ({
+        id: c.id ?? c._id ?? "",
+        name: c.name ?? "",
+        district: c.district ?? c.location?.district ?? "",
+        sector: c.sector ?? c.location?.sector ?? "",
+        latitude: c.latitude ?? c.location?.latitude ?? 0,
+        longitude: c.longitude ?? c.location?.longitude ?? 0,
+        members: c.memberCount ?? c.members ?? 0,
+        status: c.status ?? "compliant",
+        complianceScore: c.complianceScore ?? 0,
+        lastAudit: c.lastAudit ?? "",
+      }));
+      setCooperatives(rawCoops);
+
+      // Map compliance data from /dashboard/government/compliance
+      const complianceData = (complianceRes as any).data ?? {};
+      const nonCompliantList = complianceData.nonCompliantList ?? [];
+      const items: ComplianceItem[] = nonCompliantList.map((c: any) => ({
+        id: String(c.id),
+        title: c.name,
+        category: "governance" as const,
+        status: (c.health_score ?? 0) < 40 ? "non-compliant" : "pending-review",
+        dueDate: "",
+        priority: (c.health_score ?? 0) < 40 ? "high" : "medium",
+        description: `Health score: ${c.health_score ?? 0}%`,
+      }));
+      setComplianceChecklist(items);
+
+      // Build intervention recommendations from non-compliant cooperatives
+      const interventions: InterventionRecommendation[] = nonCompliantList.map((c: any) => ({
+        cooperativeId: String(c.id),
+        cooperativeName: c.name,
+        riskLevel: (c.health_score ?? 0) < 40 ? "critical" : "high",
+        reason: `Health score ${c.health_score ?? 0}%`,
+        recommendedAction:
+          (c.health_score ?? 0) < 40
+            ? "Immediate regulatory intervention required. Conduct compliance audit within 2 weeks."
+            : "Issue compliance notice. Schedule follow-up audit within 30 days.",
+        timeline: (c.health_score ?? 0) < 40 ? "Within 2 weeks" : "Within 30 days",
+      }));
+      setInterventionRecommendations(interventions);
+
+      const overviewData = (overviewRes as any).data ?? {};
+      setSectorData(
+        (overviewData.breakdownBySector ?? []).map((s: any) => ({
+          sector: s.sector ?? "",
+          cooperativeCount: parseInt(s.count) || 0,
+          memberCount: 0,
+          totalSavings: 0,
+        }))
+      );
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to load monitoring data");
+    } finally {
+      setLoading(false);
+      setIsRefreshing(false);
+      setLastRefresh(new Date());
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(() => {
+      setLastRefresh(new Date());
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleRefreshData = () => {
+    fetchData();
+  };
 
   const activityCooperativeOptions = [
     "All Cooperatives",
     ...Array.from(new Set(activityList.map((activity) => activity.cooperativeName))),
+    ...Array.from(new Set(cooperatives.map((c) => c.name))),
   ];
 
   const activityStatusOptions = ["All Status", "Planned", "Ongoing", "Completed"];
@@ -312,14 +217,6 @@ export function GovernmentMonitoring() {
     const statusMatch = selectedActivityStatus === "All Status" || activity.status === selectedActivityStatus;
     return coopMatch && statusMatch;
   });
-
-  const handleRefreshData = () => {
-    setIsRefreshing(true);
-    setTimeout(() => {
-      setLastRefresh(new Date());
-      setIsRefreshing(false);
-    }, 800);
-  };
 
   const complianceByStatus = {
     compliant: cooperatives.filter((c) => c.status === "compliant").length,
@@ -359,7 +256,6 @@ export function GovernmentMonitoring() {
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <h2 className="text-xl font-bold text-gray-900">{drillDownCoop.name}</h2>
               <button onClick={() => setDrillDownCoop(null)} className="p-2 hover:bg-gray-100 rounded-lg">
-                <AlertTriangle className="w-5 h-5 text-gray-400" style={{ display: "none" }} />
                 <span className="text-gray-500 text-lg font-bold">✕</span>
               </button>
             </div>
@@ -401,7 +297,9 @@ export function GovernmentMonitoring() {
                 <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(drillDownCoop.status)}`}>
                   {drillDownCoop.status.toUpperCase()}
                 </span>
-                <p className="text-xs text-gray-500">Coordinates: {drillDownCoop.latitude.toFixed(4)}, {drillDownCoop.longitude.toFixed(4)}</p>
+                {(drillDownCoop.latitude !== 0 || drillDownCoop.longitude !== 0) && (
+                  <p className="text-xs text-gray-500">Coordinates: {drillDownCoop.latitude.toFixed(4)}, {drillDownCoop.longitude.toFixed(4)}</p>
+                )}
               </div>
               {interventionRecommendations.find(i => i.cooperativeId === drillDownCoop.id) && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-4">
@@ -413,6 +311,7 @@ export function GovernmentMonitoring() {
           </div>
         </div>
       )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Government Monitoring Dashboard</h1>
@@ -429,6 +328,12 @@ export function GovernmentMonitoring() {
           </Button>
         </div>
       </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-red-800 text-sm">
+          {error}
+        </div>
+      )}
 
       <div className="flex gap-2 border-b border-gray-200 overflow-x-auto">
         {[
@@ -455,7 +360,16 @@ export function GovernmentMonitoring() {
         ))}
       </div>
 
-      {activeTab === "overview" && (
+      {loading && (
+        <div className="flex items-center justify-center py-16">
+          <div className="text-center">
+            <RefreshCw className="w-8 h-8 text-[#2563EB] animate-spin mx-auto mb-3" />
+            <p className="text-gray-600">Loading monitoring data...</p>
+          </div>
+        </div>
+      )}
+
+      {!loading && activeTab === "overview" && (
         <div className="space-y-6">
           <div className="grid grid-cols-4 gap-6">
             <Card className="p-6">
@@ -470,7 +384,9 @@ export function GovernmentMonitoring() {
             <Card className="p-6 bg-green-50">
               <p className="text-sm text-green-700 mb-1">Compliant</p>
               <p className="text-3xl font-bold text-green-900">{complianceByStatus.compliant}</p>
-              <div className="text-xs text-green-700 mt-2">{Math.round((complianceByStatus.compliant / cooperatives.length) * 100)}% of total</div>
+              <div className="text-xs text-green-700 mt-2">
+                {cooperatives.length > 0 ? Math.round((complianceByStatus.compliant / cooperatives.length) * 100) : 0}% of total
+              </div>
             </Card>
             <Card className="p-6 bg-yellow-50">
               <p className="text-sm text-yellow-700 mb-1">At Risk</p>
@@ -484,39 +400,74 @@ export function GovernmentMonitoring() {
             </Card>
           </div>
 
+          {sectorData.length > 0 && (
+            <Card className="p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Cooperatives by Sector</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      {["Sector", "Cooperatives", "Members", "Total Savings"].map((h) => (
+                        <th key={h} className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {sectorData.map((s) => (
+                      <tr key={s.sector} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 font-medium text-gray-900">{s.sector}</td>
+                        <td className="px-4 py-3 text-gray-700">{s.cooperativeCount ?? 0}</td>
+                        <td className="px-4 py-3 text-gray-700">{(s.memberCount ?? 0).toLocaleString()}</td>
+                        <td className="px-4 py-3 text-gray-700">
+                          {typeof s.totalSavings === "number"
+                            ? `RWF ${s.totalSavings.toLocaleString()}`
+                            : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
           <Card className="p-6">
             <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
               <MapPin className="w-6 h-6 text-[#2563EB]" />
               Cooperatives by Region
             </h2>
-            <div className="space-y-3">
-              {cooperatives.map((coop) => (
-                <div
-                  key={coop.id}
-                  onClick={() => setDrillDownCoop(coop)}
-                  className="p-4 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
-                >
-                  <div className="flex items-start justify-between mb-2">
-                    <div className="flex-1">
-                      <h3 className="font-semibold text-gray-900">{coop.name}</h3>
-                      <p className="text-sm text-gray-600">{coop.sector}, {coop.district}</p>
+            {cooperatives.length === 0 ? (
+              <p className="text-gray-500 text-sm text-center py-8">No cooperatives found.</p>
+            ) : (
+              <div className="space-y-3">
+                {cooperatives.map((coop) => (
+                  <div
+                    key={coop.id}
+                    onClick={() => setDrillDownCoop(coop)}
+                    className="p-4 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
+                  >
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="flex-1">
+                        <h3 className="font-semibold text-gray-900">{coop.name}</h3>
+                        <p className="text-sm text-gray-600">{coop.sector}{coop.district ? `, ${coop.district}` : ""}</p>
+                      </div>
+                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(coop.status)}`}>
+                        {coop.status.toUpperCase()}
+                      </span>
                     </div>
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(coop.status)}`}>
-                      {coop.status.toUpperCase()}
-                    </span>
+                    <div className="flex items-center justify-between text-sm">
+                      <p className="text-gray-600">Members: {coop.members}</p>
+                      <p className="font-medium text-gray-900">Compliance: {coop.complianceScore}%</p>
+                    </div>
                   </div>
-                  <div className="flex items-center justify-between text-sm">
-                    <p className="text-gray-600">Members: {coop.members}</p>
-                    <p className="font-medium text-gray-900">Compliance: {coop.complianceScore}%</p>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </Card>
         </div>
       )}
 
-      {activeTab === "map" && (
+      {!loading && activeTab === "map" && (
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
             <MapPin className="w-6 h-6 text-[#2563EB]" />
@@ -535,13 +486,15 @@ export function GovernmentMonitoring() {
                 <div className="flex items-start justify-between mb-2">
                   <div>
                     <h3 className="font-medium text-gray-900">{coop.name}</h3>
-                    <p className="text-xs text-gray-600">{coop.district} District</p>
+                    {coop.district && <p className="text-xs text-gray-600">{coop.district} District</p>}
                   </div>
                   <span className={`px-2 py-1 rounded text-xs font-medium ${getStatusColor(coop.status)}`}>
                     {coop.status}
                   </span>
                 </div>
-                <p className="text-xs text-gray-600 mb-2">Coordinates: {coop.latitude.toFixed(4)}, {coop.longitude.toFixed(4)}</p>
+                {(coop.latitude !== 0 || coop.longitude !== 0) && (
+                  <p className="text-xs text-gray-600 mb-2">Coordinates: {coop.latitude.toFixed(4)}, {coop.longitude.toFixed(4)}</p>
+                )}
                 <p className="text-sm font-medium text-gray-900">Compliance Score: {coop.complianceScore}%</p>
               </div>
             ))}
@@ -549,7 +502,7 @@ export function GovernmentMonitoring() {
         </Card>
       )}
 
-      {activeTab === "activities" && (
+      {!loading && activeTab === "activities" && (
         <Card className="p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between mb-6">
             <div>
@@ -621,122 +574,130 @@ export function GovernmentMonitoring() {
         </Card>
       )}
 
-      {activeTab === "interventions" && (
+      {!loading && activeTab === "interventions" && (
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
             <AlertTriangle className="w-6 h-6 text-[#2563EB]" />
             Intervention Recommendations ({interventionRecommendations.length})
           </h2>
-          <div className="space-y-4">
-            {interventionRecommendations.map((intervention, idx) => (
-              <div
-                key={idx}
-                className={`p-4 rounded-lg border-2 ${
-                  intervention.riskLevel === "critical"
-                    ? "border-red-200 bg-red-50"
-                    : intervention.riskLevel === "high"
-                    ? "border-yellow-200 bg-yellow-50"
-                    : "border-blue-200 bg-blue-50"
-                }`}
-              >
-                <div className="flex items-start justify-between mb-3">
-                  <div>
-                    <h3 className="font-semibold text-gray-900">{intervention.cooperativeName}</h3>
-                    <p className="text-sm text-gray-700 mt-1">{intervention.reason}</p>
+          {interventionRecommendations.length === 0 ? (
+            <p className="text-gray-500 text-sm text-center py-8">No intervention recommendations at this time.</p>
+          ) : (
+            <div className="space-y-4">
+              {interventionRecommendations.map((intervention, idx) => (
+                <div
+                  key={idx}
+                  className={`p-4 rounded-lg border-2 ${
+                    intervention.riskLevel === "critical"
+                      ? "border-red-200 bg-red-50"
+                      : intervention.riskLevel === "high"
+                      ? "border-yellow-200 bg-yellow-50"
+                      : "border-blue-200 bg-blue-50"
+                  }`}
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <h3 className="font-semibold text-gray-900">{intervention.cooperativeName}</h3>
+                      <p className="text-sm text-gray-700 mt-1">{intervention.reason}</p>
+                    </div>
+                    <span
+                      className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${
+                        intervention.riskLevel === "critical"
+                          ? "bg-red-100 text-red-800"
+                          : intervention.riskLevel === "high"
+                          ? "bg-yellow-100 text-yellow-800"
+                          : "bg-blue-100 text-blue-800"
+                      }`}
+                    >
+                      {intervention.riskLevel.toUpperCase()}
+                    </span>
                   </div>
-                  <span
-                    className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${
-                      intervention.riskLevel === "critical"
-                        ? "bg-red-100 text-red-800"
-                        : intervention.riskLevel === "high"
-                        ? "bg-yellow-100 text-yellow-800"
-                        : "bg-blue-100 text-blue-800"
-                    }`}
-                  >
-                    {intervention.riskLevel.toUpperCase()}
-                  </span>
+                  <div className="bg-white bg-opacity-60 p-3 rounded mb-3">
+                    <p className="text-sm font-medium text-gray-900">Recommended Action</p>
+                    <p className="text-sm text-gray-700 mt-1">{intervention.recommendedAction}</p>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-gray-600">
+                    <Clock className="w-4 h-4" />
+                    Timeline: {intervention.timeline}
+                  </div>
                 </div>
-                <div className="bg-white bg-opacity-60 p-3 rounded mb-3">
-                  <p className="text-sm font-medium text-gray-900">Recommended Action</p>
-                  <p className="text-sm text-gray-700 mt-1">{intervention.recommendedAction}</p>
-                </div>
-                <div className="flex items-center gap-2 text-xs text-gray-600">
-                  <Clock className="w-4 h-4" />
-                  Timeline: {intervention.timeline}
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </Card>
       )}
 
-      {activeTab === "compliance" && (
+      {!loading && activeTab === "compliance" && (
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
             <CheckCircle className="w-6 h-6 text-[#2563EB]" />
             Compliance Tracking Checklist
           </h2>
-          <div className="space-y-3">
-            {complianceChecklist.map((item) => (
-              <div
-                key={item.id}
-                className={`p-4 rounded-lg border ${
-                  item.status === "compliant"
-                    ? "border-green-200 bg-green-50"
-                    : item.status === "non-compliant"
-                    ? "border-red-200 bg-red-50"
-                    : "border-yellow-200 bg-yellow-50"
-                }`}
-              >
-                <div className="flex items-start justify-between mb-2">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <h3 className="font-semibold text-gray-900">{item.title}</h3>
-                      <span
-                        className={`px-2 py-1 rounded text-xs font-medium ${
-                          item.priority === "high"
-                            ? "bg-red-100 text-red-800"
-                            : item.priority === "medium"
-                            ? "bg-yellow-100 text-yellow-800"
-                            : "bg-blue-100 text-blue-800"
-                        }`}
-                      >
-                        {item.priority.toUpperCase()}
-                      </span>
-                    </div>
-                    <p className="text-sm text-gray-700 mb-2">{item.description}</p>
-                  </div>
-                  <span
-                    className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${getCategoryColor(
-                      item.category
-                    )}`}
-                  >
-                    {item.category}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className={`${
+          {complianceChecklist.length === 0 ? (
+            <p className="text-gray-500 text-sm text-center py-8">No compliance data available.</p>
+          ) : (
+            <div className="space-y-3">
+              {complianceChecklist.map((item) => (
+                <div
+                  key={item.id}
+                  className={`p-4 rounded-lg border ${
                     item.status === "compliant"
-                      ? "text-green-700 font-medium"
+                      ? "border-green-200 bg-green-50"
                       : item.status === "non-compliant"
-                      ? "text-red-700 font-medium"
-                      : "text-yellow-700 font-medium"
-                  }`}>
-                    {item.status === "compliant"
-                      ? "✓ Compliant"
-                      : item.status === "non-compliant"
-                      ? "✗ Non-Compliant"
-                      : "⟳ Pending Review"}
-                  </span>
-                  <p className="text-gray-600">Due: {item.dueDate}</p>
+                      ? "border-red-200 bg-red-50"
+                      : "border-yellow-200 bg-yellow-50"
+                  }`}
+                >
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <h3 className="font-semibold text-gray-900">{item.title}</h3>
+                        <span
+                          className={`px-2 py-1 rounded text-xs font-medium ${
+                            item.priority === "high"
+                              ? "bg-red-100 text-red-800"
+                              : item.priority === "medium"
+                              ? "bg-yellow-100 text-yellow-800"
+                              : "bg-blue-100 text-blue-800"
+                          }`}
+                        >
+                          {item.priority.toUpperCase()}
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-700 mb-2">{item.description}</p>
+                    </div>
+                    <span
+                      className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${getCategoryColor(
+                        item.category
+                      )}`}
+                    >
+                      {item.category}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className={`${
+                      item.status === "compliant"
+                        ? "text-green-700 font-medium"
+                        : item.status === "non-compliant"
+                        ? "text-red-700 font-medium"
+                        : "text-yellow-700 font-medium"
+                    }`}>
+                      {item.status === "compliant"
+                        ? "✓ Compliant"
+                        : item.status === "non-compliant"
+                        ? "✗ Non-Compliant"
+                        : "⟳ Pending Review"}
+                    </span>
+                    {item.dueDate && <p className="text-gray-600">Last Audit: {item.dueDate}</p>}
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </Card>
       )}
 
-      {activeTab === "reports" && (
+      {!loading && activeTab === "reports" && (
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
             <Download className="w-6 h-6 text-[#2563EB]" />
@@ -777,7 +738,8 @@ export function GovernmentMonitoring() {
           </div>
         </Card>
       )}
-      {activeTab === "agents" && (
+
+      {!loading && activeTab === "agents" && (
         <div className="space-y-6">
           {/* Agent summary cards */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -871,7 +833,7 @@ export function GovernmentMonitoring() {
         </div>
       )}
 
-      {activeTab === "model" && (
+      {!loading && activeTab === "model" && (
         <div className="space-y-6">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[

@@ -84,10 +84,10 @@ export function MemberDetails() {
       api.get(`/members/${id}/dividends`),
     ])
       .then(([memberRes, loansRes, contributionsRes, dividendsRes]) => {
-        setMember(memberRes.data.member);
-        setLoans(loansRes.data.loans ?? []);
-        setContributions(contributionsRes.data.contributions ?? []);
-        setDividends(dividendsRes.data.dividends ?? []);
+        setMember(memberRes.data);
+        setLoans(loansRes.data ?? []);
+        setContributions(contributionsRes.data ?? []);
+        setDividends(dividendsRes.data ?? []);
       })
       .catch((err) => {
         setError(err?.response?.data?.message ?? "Failed to load member data.");

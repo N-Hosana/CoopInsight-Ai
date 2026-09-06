@@ -444,7 +444,7 @@ export const activityPerformance: ActivityPerformance[] = [
 export const savingsBalance = 32750000;
 export const activeLoanBalance = 12300000;
 
-export const formatFrw = (value: number) => `₣${value.toLocaleString("en-RW")}`;
+export const formatFrw = (value: number) => `RWF ${value.toLocaleString("en-RW")}`;
 
 export const getFinancialStats = () => {
   const totalIncome = transactions.filter((item) => item.type === "Income").reduce((sum, item) => sum + item.amount, 0);

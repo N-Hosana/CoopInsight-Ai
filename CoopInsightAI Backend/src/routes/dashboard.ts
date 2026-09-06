@@ -124,15 +124,16 @@ router.get("/recent-activity", authenticate, async (req: Request, res: Response)
 
     let txnWhere = "";
     let memberWhere = "";
-    const txnParams: any[] = [];
-    const memberParams: any[] = [];
+    const params: any[] = [];
 
     if (role === "manager" || role === "cooperative" || role === "member") {
+      params.push(userCoopId);
       txnWhere = `AND t.cooperative_id = $1`;
-      txnParams.push(userCoopId);
       memberWhere = `AND m.cooperative_id = $1`;
-      memberParams.push(userCoopId);
     }
+
+    params.push(limitNum);
+    const limitPlaceholder = `$${params.length}`;
 
     const result = await query(
       `(SELECT 'transaction' AS entity_type, t.id::text, t.description AS title, t.type AS sub_type,
@@ -148,8 +149,8 @@ router.get("/recent-activity", authenticate, async (req: Request, res: Response)
         WHERE m.deleted_at IS NULL ${memberWhere}
         ORDER BY m.created_at DESC LIMIT 5)
        ORDER BY created_at DESC
-       LIMIT $${txnParams.length + memberParams.length + 1}`,
-      [...txnParams, ...memberParams, limitNum]
+       LIMIT ${limitPlaceholder}`,
+      params
     );
 
     res.json({ success: true, data: result.rows });

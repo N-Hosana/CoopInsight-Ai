@@ -1,6 +1,27 @@
 import { Router, Request, Response } from "express";
 import { query } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
+import { uploadDocument, buildFileUrl } from "../middleware/upload";
+
+const DOCUMENT_TYPE_MAP: Record<string, string> = {
+  registration: "registration",
+  financial: "financial",
+  "financial report": "financial",
+  minutes: "minutes",
+  policy: "policy",
+  bylaws: "policy",
+  constitution: "policy",
+  license: "registration",
+  permit: "registration",
+  permits: "registration",
+  report: "report",
+  other: "other",
+};
+
+function normalizeDocumentType(raw: string | undefined): string | null {
+  if (!raw) return null;
+  return DOCUMENT_TYPE_MAP[raw.trim().toLowerCase()] ?? null;
+}
 
 const router = Router();
 
@@ -37,9 +58,12 @@ router.get("/", async (req: Request, res: Response) => {
     }
 
     const dataQuery = `
-      SELECT c.*, COUNT(m.id) AS member_count
+      SELECT c.*,
+        COUNT(DISTINCT m.id) AS member_count,
+        COALESCE(json_agg(DISTINCT cl.*) FILTER (WHERE cl.id IS NOT NULL), '[]') AS leadership
       FROM cooperatives c
       LEFT JOIN members m ON m.cooperative_id = c.id AND m.deleted_at IS NULL
+      LEFT JOIN cooperative_leadership cl ON cl.cooperative_id = c.id
       WHERE c.deleted_at IS NULL
         AND ($1::text IS NULL OR c.sector = $1)
         AND ($2::text IS NULL OR c.type = $2)
@@ -435,22 +459,21 @@ router.get("/:id/documents", async (req: Request, res: Response) => {
 });
 
 // ─── POST /:id/documents ──────────────────────────────────────────────────────
-router.post("/:id/documents", async (req: Request, res: Response) => {
+router.post("/:id/documents", uploadDocument.single("file"), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, type, description, url, size_bytes } = req.body;
+    const { name, type, description } = req.body;
 
-    if (!type) {
-      return res.status(400).json({ message: "Document type is required" });
+    const normalizedType = normalizeDocumentType(type);
+    if (!normalizedType) {
+      return res.status(400).json({ message: "Document type is required and must be one of: registration, financial, minutes, policy, bylaws, constitution, license, permit, report, other" });
     }
 
-    const validTypes = ["registration", "financial", "minutes", "policy", "report", "other"];
-    if (!validTypes.includes(type)) {
-      return res.status(400).json({ message: "Invalid document type" });
+    if (!req.file) {
+      return res.status(400).json({ message: "A file is required" });
     }
 
-    // TODO: Wire up S3/cloud storage — url is a placeholder until file upload middleware is added
-    const docUrl = url || "https://storage-placeholder.com/doc.pdf";
+    const docUrl = buildFileUrl(req, "documents", req.file.filename);
 
     const result = await query(
       `
@@ -461,11 +484,11 @@ router.post("/:id/documents", async (req: Request, res: Response) => {
       `,
       [
         id,
-        name || "document",
-        type,
+        name || req.file.originalname,
+        normalizedType,
         description || null,
         docUrl,
-        size_bytes || null,
+        req.file.size,
         req.user!.userId,
       ]
     );

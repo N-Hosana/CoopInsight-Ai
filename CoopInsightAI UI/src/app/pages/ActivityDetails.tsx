@@ -20,12 +20,27 @@ import {
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../services/api";
 
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
+const STATUS_DISPLAY: Record<string, "Planned" | "Ongoing" | "Completed" | "Cancelled"> = {
+  planned: "Planned",
+  ongoing: "Ongoing",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
+const STATUS_API: Record<string, string> = {
+  Planned: "planned",
+  Ongoing: "ongoing",
+  Completed: "completed",
+  Cancelled: "cancelled",
+};
+
 interface ActivityAttachment {
   id: string;
   name: string;
-  type: "photo" | "document";
-  size: string;
-  uploadedAt: string;
+  url?: string;
+  size_bytes?: number;
+  uploaded_at: string;
 }
 
 interface Participant {
@@ -47,14 +62,13 @@ interface ActivityDetail {
   created_by_name?: string;
   // Legacy / UI-enriched fields
   date?: string;
-  status: "Planned" | "Ongoing" | "Completed";
+  status: "Planned" | "Ongoing" | "Completed" | "Cancelled";
   description: string;
   resourcesAllocated?: number;
   resourcesUtilized?: number;
   participantsCount?: number;
   outcome?: string;
   impact?: string;
-  attachments?: ActivityAttachment[];
   history?: {
     date: string;
     status: "Planned" | "Ongoing" | "Completed";
@@ -80,7 +94,12 @@ export function ActivityDetails() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const [newAttachment, setNewAttachment] = useState({ name: "", type: "document" as "photo" | "document" });
+  const [attachments, setAttachments] = useState<ActivityAttachment[]>([]);
+  const [attachmentName, setAttachmentName] = useState("");
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [deletingAttachmentId, setDeletingAttachmentId] = useState<string | null>(null);
 
   // Register participant
   const [registerMemberId, setRegisterMemberId] = useState("");
@@ -93,21 +112,22 @@ export function ActivityDetails() {
     setLoading(true);
     setError(null);
     try {
-      const [actRes, partRes] = await Promise.allSettled([
+      const [actRes, partRes, attRes] = await Promise.allSettled([
         api.get<{ activity: ActivityDetail } | ActivityDetail>(`/activities/${id}`),
         api.get<{ participants: Participant[] }>(`/activities/${id}/participants`),
+        api.get<{ data: ActivityAttachment[] } | ActivityAttachment[]>(`/activities/${id}/attachments`),
       ]);
 
       if (actRes.status === "fulfilled") {
-        const data = (actRes.value as any).activity ?? actRes.value;
+        const data = (actRes.value as any).data ?? actRes.value;
         // Normalise date field
         const normalised: ActivityDetail = {
           ...data,
           date: data.date || data.scheduled_date || "",
           participantsCount: data.participantsCount ?? data.participant_count ?? 0,
           createdBy: data.createdBy || data.created_by_name || "",
-          attachments: data.attachments || [],
           history: data.history || [],
+          status: STATUS_DISPLAY[data.status] ?? data.status,
         };
         setActivity(normalised);
         setFormData(normalised);
@@ -116,7 +136,12 @@ export function ActivityDetails() {
       }
 
       if (partRes.status === "fulfilled") {
-        setParticipants((partRes.value as any).participants ?? []);
+        setParticipants((partRes.value as any).data ?? []);
+      }
+
+      if (attRes.status === "fulfilled") {
+        const raw = (attRes.value as any).data ?? attRes.value;
+        setAttachments(Array.isArray(raw) ? raw : []);
       }
     } finally {
       setLoading(false);
@@ -130,7 +155,7 @@ export function ActivityDetails() {
 
   const canEdit = user?.role === "manager" || user?.role === "admin";
 
-  const formatCurrency = (value: number) => `₣${value.toLocaleString("en-RW")}`;
+  const formatCurrency = (value: number) => `RWF ${value.toLocaleString("en-RW")}`;
 
   const formatDate = (dateString: string) => {
     if (!dateString) return "—";
@@ -146,29 +171,24 @@ export function ActivityDetails() {
   const utilizationPercent = resourcesAllocated > 0 ? Math.round((resourcesUtilized / resourcesAllocated) * 100) : 0;
 
   const handleSave = async () => {
-    if (!formData || !id) return;
+    if (!formData || !id || !activity) return;
     setSaving(true);
     setSaveError(null);
     try {
-      const res = await api.patch<{ activity: ActivityDetail } | ActivityDetail>(`/activities/${id}`, {
+      await api.put(`/activities/${id}`, {
         title: formData.title,
         description: formData.description,
-        status: formData.status,
-        participant_count: formData.participantsCount,
         outcome: formData.outcome,
         impact: formData.impact,
       });
-      const updated = (res as any).activity ?? res;
-      const normalised: ActivityDetail = {
-        ...formData,
-        ...updated,
-        date: updated.date || updated.scheduled_date || formData.date || "",
-        participantsCount: updated.participantsCount ?? updated.participant_count ?? formData.participantsCount,
-        attachments: formData.attachments,
-        history: formData.history,
-      };
-      setActivity(normalised);
-      setFormData(normalised);
+
+      if (formData.status !== activity.status) {
+        await api.patch(`/activities/${id}/status`, {
+          status: STATUS_API[formData.status] ?? formData.status.toLowerCase(),
+        });
+      }
+
+      await fetchActivity();
       setIsEditing(false);
     } catch (err: any) {
       setSaveError(err?.message || "Failed to save changes. Please try again.");
@@ -188,8 +208,8 @@ export function ActivityDetails() {
       setRegisterSuccess("Participant registered successfully.");
       setRegisterMemberId("");
       // Refresh participants list
-      const res = await api.get<{ participants: Participant[] }>(`/activities/${id}/participants`);
-      setParticipants((res as any).participants ?? []);
+      const res = await api.get<{ data: Participant[] }>(`/activities/${id}/participants`);
+      setParticipants((res as any).data ?? []);
     } catch (err: any) {
       setRegisterError(err?.message || "Failed to register participant.");
     } finally {
@@ -197,32 +217,50 @@ export function ActivityDetails() {
     }
   };
 
-  const handleAddAttachment = (e: React.FormEvent) => {
+  const handleAddAttachment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData || !newAttachment.name) return;
+    if (!id || !attachmentFile) return;
 
-    const attachment: ActivityAttachment = {
-      id: `att-${Date.now()}`,
-      name: newAttachment.name,
-      type: newAttachment.type,
-      size: "0 KB",
-      uploadedAt: formatDate(new Date().toISOString()),
-    };
+    setUploadingAttachment(true);
+    setAttachmentError(null);
 
-    setFormData({
-      ...formData,
-      attachments: [...(formData.attachments || []), attachment],
-    });
+    const token = localStorage.getItem("coopinsight_access_token");
+    const body = new FormData();
+    body.append("file", attachmentFile);
+    body.append("name", attachmentName || attachmentFile.name);
 
-    setNewAttachment({ name: "", type: "document" });
+    try {
+      const res = await fetch(`${BASE_URL}/activities/${id}/attachments`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAttachmentError(data.message ?? "Upload failed. Please try again.");
+      } else {
+        setAttachments((prev) => [data.data, ...prev]);
+        setAttachmentName("");
+        setAttachmentFile(null);
+      }
+    } catch {
+      setAttachmentError("Network error. Please check your connection and try again.");
+    } finally {
+      setUploadingAttachment(false);
+    }
   };
 
-  const handleRemoveAttachment = (attId: string) => {
-    if (!formData) return;
-    setFormData({
-      ...formData,
-      attachments: (formData.attachments || []).filter((a) => a.id !== attId),
-    });
+  const handleRemoveAttachment = async (attId: string) => {
+    if (!id) return;
+    setDeletingAttachmentId(attId);
+    try {
+      await api.delete(`/activities/${id}/attachments/${attId}`);
+      setAttachments((prev) => prev.filter((a) => a.id !== attId));
+    } catch (err: any) {
+      setAttachmentError(err?.message ?? "Failed to delete attachment.");
+    } finally {
+      setDeletingAttachmentId(null);
+    }
   };
 
   const handleExportReport = () => {
@@ -255,8 +293,8 @@ ${activity.outcome || "Not specified"}
 Impact:
 ${activity.impact || "Not specified"}
 
-ATTACHMENTS (${(activity.attachments || []).length})
-${(activity.attachments || []).map((a) => `- ${a.name} (${a.type}) - ${a.size} - ${a.uploadedAt}`).join("\n")}
+ATTACHMENTS (${attachments.length})
+${attachments.map((a) => `- ${a.name} - ${new Date(a.uploaded_at).toLocaleDateString()}`).join("\n")}
 
 ACTIVITY HISTORY
 ${(activity.history || []).map((h) => `${formatDate(h.date)}: ${h.status} - ${h.notes}`).join("\n")}
@@ -584,73 +622,77 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
         </Card>
       )}
 
-      {((formData.attachments && formData.attachments.length > 0) || (canEdit && isEditing)) && (
+      {(attachments.length > 0 || canEdit) && (
         <Card className="p-6 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
               <Paperclip className="w-5 h-5" />
-              Attachments ({(formData.attachments || []).length})
+              Attachments ({attachments.length})
             </h2>
-            {canEdit && isEditing && (
-              <Button size="sm" variant="secondary" onClick={() => document.getElementById("attachment-form")?.scrollIntoView()}>
-                Add Attachment
-              </Button>
-            )}
           </div>
 
-          {canEdit && isEditing && (
-            <form id="attachment-form" onSubmit={handleAddAttachment} className="p-4 bg-gray-50 rounded-lg border border-gray-200 space-y-3">
+          {attachmentError && <p className="text-sm text-red-600">{attachmentError}</p>}
+
+          {canEdit && (
+            <form onSubmit={handleAddAttachment} className="p-4 bg-gray-50 rounded-lg border border-gray-200 space-y-3">
               <div className="grid grid-cols-3 gap-3">
                 <input
                   type="text"
-                  value={newAttachment.name}
-                  onChange={(e) => setNewAttachment({ ...newAttachment, name: e.target.value })}
-                  placeholder="Document name"
+                  value={attachmentName}
+                  onChange={(e) => setAttachmentName(e.target.value)}
+                  placeholder="Document name (optional)"
                   className="col-span-2 rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
-                  required
                 />
-                <select
-                  value={newAttachment.type}
-                  onChange={(e) => setNewAttachment({ ...newAttachment, type: e.target.value as any })}
-                  className="rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
-                >
-                  <option value="document">Document</option>
-                  <option value="photo">Photo</option>
-                </select>
+                <input
+                  type="file"
+                  onChange={(e) => setAttachmentFile(e.target.files?.[0] ?? null)}
+                  className="rounded-lg border border-gray-300 px-2 py-2 text-sm text-gray-600"
+                />
               </div>
-              <Button type="submit" size="sm">
-                Add Attachment
+              <Button type="submit" size="sm" disabled={!attachmentFile || uploadingAttachment}>
+                {uploadingAttachment ? "Uploading…" : "Add Attachment"}
               </Button>
             </form>
           )}
 
           <div className="space-y-2">
-            {(formData.attachments || []).map((att) => (
+            {attachments.map((att) => (
               <div key={att.id} className="flex items-center justify-between p-3 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100">
                 <div className="flex items-center gap-3 flex-1">
-                  {att.type === "photo" ? (
-                    <span className="text-blue-600">📷</span>
-                  ) : (
-                    <FileText className="w-4 h-4 text-gray-400" />
-                  )}
+                  <FileText className="w-4 h-4 text-gray-400" />
                   <div className="min-w-0 flex-1">
-                    <p className="font-medium text-gray-900 truncate">{att.name}</p>
+                    {att.url ? (
+                      <a
+                        href={att.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-medium text-[#2563EB] hover:underline truncate block"
+                      >
+                        {att.name}
+                      </a>
+                    ) : (
+                      <p className="font-medium text-gray-900 truncate">{att.name}</p>
+                    )}
                     <p className="text-xs text-gray-500">
-                      {att.type === "photo" ? "Photo" : "Document"} • {att.size} • {att.uploadedAt}
+                      {new Date(att.uploaded_at).toLocaleDateString()}
                     </p>
                   </div>
                 </div>
-                {canEdit && isEditing && (
+                {canEdit && (
                   <button
                     type="button"
                     onClick={() => handleRemoveAttachment(att.id)}
-                    className="text-red-600 hover:text-red-700 p-2"
+                    disabled={deletingAttachmentId === att.id}
+                    className="text-red-600 hover:text-red-700 p-2 disabled:opacity-50"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 )}
               </div>
             ))}
+            {attachments.length === 0 && (
+              <p className="text-sm text-gray-500">No attachments yet.</p>
+            )}
           </div>
         </Card>
       )}

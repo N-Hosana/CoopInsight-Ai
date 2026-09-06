@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router";
 import { useAuth } from "../contexts/AuthContext";
+import { AuthBackground } from "../components/AuthBackground";
 import { LogIn, Mail, Lock, AlertCircle, ArrowLeft } from "lucide-react";
 
 export function Login() {
@@ -86,7 +87,12 @@ export function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center p-4">
+    <div className="h-screen bg-background flex">
+      <AuthBackground
+        tagline="Empowering Rwanda's Cooperatives"
+        subtext="Real-time insights, transparent governance, and AI-driven decisions for cooperatives across Gasabo District."
+      />
+      <div className="flex-1 h-screen flex items-center justify-center p-4 overflow-y-auto">
       <div className="w-full max-w-md">
         {/* Logo & Title */}
         <div className="text-center mb-8">
@@ -270,6 +276,7 @@ export function Login() {
             </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

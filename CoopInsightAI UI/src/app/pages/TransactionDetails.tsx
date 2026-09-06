@@ -21,13 +21,15 @@ export function TransactionDetails() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin" || user?.role === "Admin";
+  const canManageStatus = user?.role === "admin" || user?.role === "generalManager";
 
   const [transaction, setTransaction] = useState<Transaction | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<"cancelled" | "reversed" | null>(null);
+  const [reason, setReason] = useState("");
 
   useEffect(() => {
     if (!id) return;
@@ -46,15 +48,38 @@ export function TransactionDetails() {
     fetchTransaction();
   }, [id]);
 
-  const handleStatusUpdate = async (newStatus: string) => {
+  const handleApprove = async () => {
     if (!id || !transaction) return;
     try {
       setUpdatingStatus(true);
       setStatusError(null);
-      const response = await api.patch(`/transactions/${id}/status`, { status: newStatus });
-      setTransaction(response.data?.transaction || { ...transaction, status: newStatus });
+      const response = await api.patch(`/transactions/${id}/approve`, {});
+      setTransaction(response.data ?? { ...transaction, status: "completed" });
     } catch (err: any) {
-      setStatusError(err?.response?.data?.message || "Failed to update status.");
+      setStatusError(err?.message || "Failed to approve transaction.");
+    } finally {
+      setUpdatingStatus(false);
+    }
+  };
+
+  const handleConfirmStatusChange = async () => {
+    if (!id || !transaction || !pendingAction) return;
+    if (!reason.trim()) {
+      setStatusError("A reason is required.");
+      return;
+    }
+    try {
+      setUpdatingStatus(true);
+      setStatusError(null);
+      const response = await api.patch(`/transactions/${id}/status`, {
+        status: pendingAction,
+        reason: reason.trim(),
+      });
+      setTransaction(response.data ?? { ...transaction, status: pendingAction });
+      setPendingAction(null);
+      setReason("");
+    } catch (err: any) {
+      setStatusError(err?.message || "Failed to update status.");
     } finally {
       setUpdatingStatus(false);
     }
@@ -165,28 +190,78 @@ export function TransactionDetails() {
           </div>
         </div>
 
-        {isAdmin && (
+        {canManageStatus && (
           <div className="mt-8 rounded-2xl border border-gray-200 p-6 bg-gray-50">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Update Status</h2>
             {statusError && (
               <p className="text-red-600 text-sm mb-3">{statusError}</p>
             )}
             <div className="flex flex-wrap gap-3">
-              {["Pending", "Completed", "Cancelled"].map((status) => (
-                <button
-                  key={status}
-                  disabled={updatingStatus || transaction.status === status}
-                  onClick={() => handleStatusUpdate(status)}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    transaction.status === status
-                      ? "bg-gray-200 text-gray-500 cursor-default"
-                      : "bg-[#2D6A4F] text-white hover:bg-[#1B4332] disabled:opacity-50"
-                  }`}
-                >
-                  {updatingStatus ? "Updating..." : status}
-                </button>
-              ))}
+              <button
+                disabled={updatingStatus || transaction.status === "completed"}
+                onClick={handleApprove}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  transaction.status === "completed"
+                    ? "bg-gray-200 text-gray-500 cursor-default"
+                    : "bg-[#2D6A4F] text-white hover:bg-[#1B4332] disabled:opacity-50"
+                }`}
+              >
+                {updatingStatus ? "Updating..." : "Approve / Mark Completed"}
+              </button>
+              <button
+                disabled={updatingStatus || transaction.status === "cancelled"}
+                onClick={() => { setPendingAction("cancelled"); setStatusError(null); }}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  transaction.status === "cancelled"
+                    ? "bg-gray-200 text-gray-500 cursor-default"
+                    : "bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+                }`}
+              >
+                Cancel Transaction
+              </button>
+              <button
+                disabled={updatingStatus || transaction.status === "reversed"}
+                onClick={() => { setPendingAction("reversed"); setStatusError(null); }}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  transaction.status === "reversed"
+                    ? "bg-gray-200 text-gray-500 cursor-default"
+                    : "bg-yellow-600 text-white hover:bg-yellow-700 disabled:opacity-50"
+                }`}
+              >
+                Reverse Transaction
+              </button>
             </div>
+
+            {pendingAction && (
+              <div className="mt-4 flex items-end gap-3">
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Reason for {pendingAction === "cancelled" ? "cancellation" : "reversal"}
+                  </label>
+                  <input
+                    type="text"
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] outline-none"
+                    placeholder="Explain why this transaction is being changed"
+                  />
+                </div>
+                <button
+                  disabled={updatingStatus}
+                  onClick={handleConfirmStatusChange}
+                  className="px-4 py-2 bg-[#2D6A4F] text-white rounded-lg hover:bg-[#1B4332] text-sm font-medium disabled:opacity-50"
+                >
+                  {updatingStatus ? "Confirming..." : "Confirm"}
+                </button>
+                <button
+                  disabled={updatingStatus}
+                  onClick={() => { setPendingAction(null); setReason(""); setStatusError(null); }}
+                  className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

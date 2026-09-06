@@ -10,6 +10,19 @@ const router = Router();
 
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
+// GET /cooperatives — public, minimal fields only, used by the registration form
+router.get("/cooperatives", async (req: Request, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT id, name, sector FROM cooperatives WHERE status = 'active' AND deleted_at IS NULL ORDER BY name`
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error("GET /auth/cooperatives error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // POST /login
 router.post("/login", async (req: Request, res: Response) => {
   try {

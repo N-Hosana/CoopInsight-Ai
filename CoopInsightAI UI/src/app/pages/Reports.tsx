@@ -103,12 +103,18 @@ export function Reports() {
         const data = await api.get<any>(
           `/reports?page=1&limit=100&type=${encodeURIComponent(typeParam)}&cooperative_id=${encodeURIComponent(coopParam)}`
         );
-        const fetched = (data as any).data ?? [];
+        const fetched: any[] = (data as any).data ?? [];
         setReportList(fetched);
 
         // Build cooperative options from fetched data for admin/government users
         if (isReportAllAllowed) {
-          const names = Array.from(new Set(fetched.map((r) => r.cooperative_name).filter(Boolean)));
+          const names = Array.from(
+            new Set(
+              fetched
+                .map((r: any) => r.cooperative_name)
+                .filter((n: unknown): n is string => typeof n === "string" && n.length > 0)
+            )
+          );
           setCooperativeOptions(["All Cooperatives", ...names]);
         }
       } catch (err: any) {

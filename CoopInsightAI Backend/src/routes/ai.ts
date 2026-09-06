@@ -400,8 +400,80 @@ router.get("/benchmarks", async (req: Request, res: Response) => {
   }
 });
 
+// GET /rankings — district league table for a month
+// Oversight roles only: this is a comparison across cooperatives, so a manager
+// or member has no business seeing where their peers place.
+router.get(
+  "/rankings",
+  authorize("admin", "generalManager", "government"),
+  async (req: Request, res: Response) => {
+    try {
+      const { period } = req.query;
+
+      let aiData: any = null;
+      let reachable = false;
+      try {
+        aiData = await callAIService(`/rankings${period ? `?period=${period}` : ""}`);
+        reachable = true;
+      } catch {
+        reachable = false;
+      }
+
+      if (!reachable) {
+        return res.json({
+          success: true,
+          data: {
+            period: period || null,
+            standings: [],
+            availablePeriods: [],
+            reachable: false,
+            note: "AI service unreachable. The league table cannot be computed.",
+          },
+        });
+      }
+
+      res.json({ success: true, data: { ...aiData, reachable: true } });
+    } catch (err) {
+      console.error("GET /ai/rankings error:", err);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// GET /rankings/trend — rank movement over recent months
+router.get(
+  "/rankings/trend",
+  authorize("admin", "generalManager", "government"),
+  async (req: Request, res: Response) => {
+    try {
+      const { months = 6 } = req.query;
+
+      let aiData: any = null;
+      let reachable = false;
+      try {
+        aiData = await callAIService(`/rankings/trend?months=${months}`);
+        reachable = true;
+      } catch {
+        reachable = false;
+      }
+
+      if (!reachable) {
+        return res.json({
+          success: true,
+          data: { periods: [], series: [], reachable: false, note: "AI service unreachable." },
+        });
+      }
+
+      res.json({ success: true, data: { ...aiData, reachable: true } });
+    } catch (err) {
+      console.error("GET /ai/rankings/trend error:", err);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
 // GET /model-performance
-router.get("/model-performance", authorize("admin", "generalManager"), async (_req: Request, res: Response) => {
+router.get("/model-performance", authorize("admin", "generalManager", "government"), async (_req: Request, res: Response) => {
   try {
     let aiData: any = null;
     let reachable = false;

@@ -15,8 +15,6 @@ import {
   formatFrw,
   loanRecords,
   dividendRecords,
-  balanceSheets,
-  financialPeriods,
   members,
 } from "../data/financialData";
 
@@ -40,10 +38,26 @@ interface Summary {
   netBalance: number;
 }
 
+interface BalanceSheet {
+  assets: { totalAssets: number; [key: string]: number };
+  liabilities: { totalLiabilities: number; [key: string]: number };
+  equity: { totalEquity: number; [key: string]: number };
+  periodStart?: string;
+  periodEnd?: string;
+}
+
+interface FinancialPeriod {
+  id: string;
+  label: string;
+  period_start: string;
+  period_end: string;
+  status: "open" | "closed";
+}
+
 export function Financials() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [selectedPeriod, setSelectedPeriod] = useState("Q2 2026 (Current)");
+  const [selectedPeriod, setSelectedPeriod] = useState("Current Period");
   const [selectedDetailView, setSelectedDetailView] = useState("Transactions");
   const [selectedCooperativeId, setSelectedCooperativeId] = useState("all");
 
@@ -52,6 +66,9 @@ export function Financials() {
   const [summary, setSummary] = useState<Summary>({ totalIncome: 0, totalExpenses: 0, netBalance: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [balanceSheet, setBalanceSheet] = useState<BalanceSheet | null>(null);
+  const [balanceSheetError, setBalanceSheetError] = useState<string | null>(null);
+  const [periods, setPeriods] = useState<FinancialPeriod[]>([]);
 
   const isAllCooperativesView =
     user?.role === "generalManager" ||
@@ -78,34 +95,27 @@ export function Financials() {
     }
   }, [isAllCooperativesView, user?.cooperativeId]);
 
-  // Fetch transactions from backend
+  // Fetch transactions + summary from backend
   useEffect(() => {
     const fetchTransactions = async () => {
       setLoading(true);
       setError(null);
       try {
-        const params = new URLSearchParams({
-          page: "1",
-          limit: "50",
-          type: "",
-          category: "",
-          cooperative_id:
-            selectedCooperativeId === "all"
-              ? ""
-              : selectedCooperativeId,
-          start_date: "",
-          end_date: "",
-        });
-        const data = await api.get<{
-          transactions: Transaction[];
-          total: number;
-          page: number;
-          totalPages: number;
-          summary: Summary;
-        }>(`/transactions?${params.toString()}`);
-        setTransactions(data.transactions ?? []);
-        if (data.summary) {
-          setSummary(data.summary);
+        const listParams = new URLSearchParams({ page: "1", limit: "50" });
+        const summaryParams = new URLSearchParams();
+        if (selectedCooperativeId !== "all") {
+          listParams.set("cooperativeId", selectedCooperativeId);
+          summaryParams.set("cooperativeId", selectedCooperativeId);
+        }
+
+        const [listRes, summaryRes] = await Promise.all([
+          api.get<{ data: Transaction[] }>(`/transactions?${listParams.toString()}`),
+          api.get<{ data: Summary }>(`/transactions/summary?${summaryParams.toString()}`),
+        ]);
+
+        setTransactions(listRes.data ?? []);
+        if (summaryRes.data) {
+          setSummary(summaryRes.data);
         }
       } catch (err: any) {
         setError(err?.message || "Failed to load transactions");
@@ -115,6 +125,36 @@ export function Financials() {
     };
     fetchTransactions();
   }, [selectedCooperativeId]);
+
+  // Fetch balance sheet + financial periods from backend (per-cooperative resources)
+  useEffect(() => {
+    const coopScopeId =
+      selectedCooperativeId !== "all" ? selectedCooperativeId : user?.cooperativeId;
+
+    if (!coopScopeId && !["manager", "cooperative"].includes(user?.role ?? "")) {
+      setBalanceSheet(null);
+      setPeriods([]);
+      return;
+    }
+
+    const params = coopScopeId ? `?cooperativeId=${coopScopeId}` : "";
+
+    api
+      .get<{ data: BalanceSheet }>(`/transactions/balance-sheet${params}`)
+      .then((res) => {
+        setBalanceSheet(res.data ?? null);
+        setBalanceSheetError(null);
+      })
+      .catch((err: any) => {
+        setBalanceSheet(null);
+        setBalanceSheetError(err?.status === 404 ? "No balance sheet has been recorded yet." : err?.message ?? "Failed to load balance sheet.");
+      });
+
+    api
+      .get<{ data: FinancialPeriod[] }>(`/transactions/periods${params}`)
+      .then((res) => setPeriods(res.data ?? []))
+      .catch(() => setPeriods([]));
+  }, [selectedCooperativeId, user?.cooperativeId, user?.role]);
 
   const cooperativeOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -174,7 +214,7 @@ export function Financials() {
   }, [selectedCooperativeId, user?.cooperativeId, isAllCooperativesView]);
 
   const visibleLoanDisbursements = useMemo(
-    () => visibleTransactions.filter((transaction) => transaction.type === "Loan"),
+    () => visibleTransactions.filter((transaction) => transaction.category === "loan_disbursements"),
     [visibleTransactions]
   );
 
@@ -186,12 +226,12 @@ export function Financials() {
   const selectedDetailBalanceSheet = useMemo(() => {
     const income = summary.totalIncome ?? 0;
     const expenses = summary.totalExpenses ?? 0;
-    const assets = income + 1200000;
-    const liabilities = Math.max(0, expenses - 300000);
-    const equity = assets - liabilities;
+    const assets = balanceSheet?.assets.totalAssets ?? 0;
+    const liabilities = balanceSheet?.liabilities.totalLiabilities ?? 0;
+    const equity = balanceSheet?.equity.totalEquity ?? 0;
     const netProfit = income - expenses;
     return { assets, liabilities, equity, totalIncome: income, totalExpenses: expenses, netProfit };
-  }, [summary]);
+  }, [summary, balanceSheet]);
 
   const roleSpecificDescription = useMemo(() => {
     const coopText =
@@ -212,13 +252,13 @@ export function Financials() {
     const totalIncome = summary.totalIncome ?? 0;
     const totalExpenses = summary.totalExpenses ?? 0;
     const totalLoans = visibleTransactions
-      .filter((item) => item.type === "Loan")
+      .filter((item) => item.category === "loan_disbursements")
       .reduce((sum, item) => sum + item.amount, 0);
     const totalDividends = visibleTransactions
-      .filter((item) => item.type === "Dividend")
+      .filter((item) => item.category === "dividends")
       .reduce((sum, item) => sum + item.amount, 0);
     const totalSavings = visibleTransactions
-      .filter((item) => item.type === "Savings")
+      .filter((item) => item.category === "member_contributions")
       .reduce((sum, item) => sum + item.amount, 0);
     return { totalIncome, totalExpenses, totalLoans, totalDividends, totalSavings };
   }, [summary, visibleTransactions]);
@@ -230,7 +270,7 @@ export function Financials() {
     { label: "Active Loans", value: formatFrw(stats.totalLoans), change: "+5.1%", trend: "up", icon: CreditCard },
   ];
 
-  const currentBalanceSheet = balanceSheets.find((b) => b.period === selectedPeriod) || balanceSheets[1];
+  const currentBalanceSheet = selectedDetailBalanceSheet;
 
   const handleExportBalanceSheet = () => {
     const report = `
@@ -442,6 +482,9 @@ Role: ${user?.role}
               <Download className="w-4 h-4" />
             </Button>
           </div>
+          {balanceSheetError && (
+            <p className="text-sm text-gray-500 mb-3">{balanceSheetError}</p>
+          )}
           <div className="space-y-3 text-sm">
             <div>
               <p className="text-gray-600">Assets</p>
@@ -462,42 +505,39 @@ Role: ${user?.role}
       {/* Financial Periods */}
       <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Financial Periods</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {financialPeriods.map((period) => (
-            <div
-              key={period.id}
-              onClick={() => setSelectedPeriod(period.name)}
-              className={`p-4 rounded-lg border-2 cursor-pointer transition-colors ${
-                selectedPeriod === period.name
-                  ? "border-[#2563EB] bg-blue-50"
-                  : "border-gray-200 hover:border-gray-300"
-              }`}
-            >
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-gray-900">{period.name}</h3>
-                <span
-                  className={`text-xs font-medium px-2 py-1 rounded ${
-                    period.status === "Open"
-                      ? "bg-green-100 text-green-800"
-                      : "bg-gray-100 text-gray-800"
-                  }`}
-                >
-                  {period.status}
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-sm">
-                <div>
-                  <p className="text-gray-600">Income</p>
-                  <p className="font-medium text-green-600">{formatFrw(period.totalIncome)}</p>
+        {periods.length === 0 ? (
+          <p className="text-sm text-gray-500">No financial periods recorded yet.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {periods.map((period) => (
+              <div
+                key={period.id}
+                onClick={() => setSelectedPeriod(period.label)}
+                className={`p-4 rounded-lg border-2 cursor-pointer transition-colors ${
+                  selectedPeriod === period.label
+                    ? "border-[#2563EB] bg-blue-50"
+                    : "border-gray-200 hover:border-gray-300"
+                }`}
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-semibold text-gray-900">{period.label}</h3>
+                  <span
+                    className={`text-xs font-medium px-2 py-1 rounded ${
+                      period.status === "open"
+                        ? "bg-green-100 text-green-800"
+                        : "bg-gray-100 text-gray-800"
+                    }`}
+                  >
+                    {period.status === "open" ? "Open" : "Closed"}
+                  </span>
                 </div>
-                <div>
-                  <p className="text-gray-600">Expenses</p>
-                  <p className="font-medium text-red-600">{formatFrw(period.totalExpenses)}</p>
-                </div>
+                <p className="text-sm text-gray-600">
+                  {new Date(period.period_start).toLocaleDateString()} – {new Date(period.period_end).toLocaleDateString()}
+                </p>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Transaction History with Audit Trail */}
@@ -574,6 +614,9 @@ Role: ${user?.role}
                 <Download className="w-4 h-4" />
               </Button>
             </div>
+            {balanceSheetError && (
+              <p className="text-sm text-gray-500 mb-4">{balanceSheetError}</p>
+            )}
             <div className="grid gap-4 md:grid-cols-2">
               <div className="rounded-2xl border border-gray-200 bg-slate-50 p-5">
                 <p className="text-sm text-gray-500">Assets</p>
@@ -595,7 +638,8 @@ Role: ${user?.role}
           </div>
         ) : selectedDetailView === "Active Loans" ? (
           <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Active Loans Tracking</h2>
+            <h2 className="text-lg font-semibold text-gray-900 mb-1">Active Loans Tracking</h2>
+            <p className="text-xs text-amber-600 mb-4">Sample data — a cooperative-wide loans endpoint isn't available yet.</p>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-gray-50">
@@ -684,6 +728,7 @@ Role: ${user?.role}
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Savings Account Management</h2>
                 <p className="text-sm text-gray-500">Review savings balances and member savings health across the cooperative.</p>
+                <p className="text-xs text-amber-600 mt-1">Sample data — a cooperative-wide savings endpoint isn't available yet.</p>
               </div>
               <div className="rounded-2xl bg-slate-50 p-4 text-sm text-gray-700">
                 <p className="text-gray-600">Total Savings Balance</p>
@@ -721,7 +766,8 @@ Role: ${user?.role}
           </div>
         ) : (
           <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Dividend Distribution Records</h2>
+            <h2 className="text-lg font-semibold text-gray-900 mb-1">Dividend Distribution Records</h2>
+            <p className="text-xs text-amber-600 mb-4">Sample data — a cooperative-wide dividends endpoint isn't available yet.</p>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-gray-50">

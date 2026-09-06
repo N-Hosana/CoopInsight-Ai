@@ -1,8 +1,17 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate, Link } from "react-router";
 import { useAuth } from "../contexts/AuthContext";
 import { GASABO_SECTORS } from "../data/gasaboData";
+import { AuthBackground } from "../components/AuthBackground";
 import { UserPlus, Mail, Lock, User, Building2, Phone, CreditCard, Check, X, MapPin } from "lucide-react";
+
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
+interface CooperativeOption {
+  id: string;
+  name: string;
+  sector: string;
+}
 
 export function Register() {
   const navigate = useNavigate();
@@ -33,15 +42,16 @@ export function Register() {
   });
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [cooperatives, setCooperatives] = useState<CooperativeOption[]>([]);
 
-  const cooperatives = [
-    { id: "coop-1", name: "Terimbere Kacyiru Coffee Cooperative", sector: "kacyiru" },
-    { id: "coop-2", name: "Abakundakawa Remera", sector: "remera" },
-    { id: "coop-3", name: "Imbuto Kimironko Dairy", sector: "kimironko" },
-    { id: "coop-4", name: "Dukore Gisozi Handicrafts", sector: "gisozi" },
-    { id: "coop-5", name: "Twisungane Kinyinya Agriculture", sector: "kinyinya" },
-    { id: "coop-6", name: "Amizero Jabana Poultry", sector: "jabana" },
-  ];
+  useEffect(() => {
+    fetch(`${BASE_URL}/auth/cooperatives`)
+      .then((res) => res.json())
+      .then((data) => setCooperatives(data?.data ?? []))
+      .catch(() => {
+        // Keep the list empty on failure — the select will just show no options
+      });
+  }, []);
 
   const passwordStrength = useMemo(() => {
     const password = formData.password;
@@ -107,7 +117,12 @@ export function Register() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center p-4">
+    <div className="h-screen bg-background flex">
+      <AuthBackground
+        tagline="Join Rwanda's Cooperative Network"
+        subtext="Register your account to manage members, track finances, and grow your cooperative with data-driven tools."
+      />
+      <div className="flex-1 h-screen flex items-center justify-center p-4 overflow-y-auto">
       <div className="w-full max-w-2xl">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary mb-4">
@@ -167,14 +182,14 @@ export function Register() {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number</label>
+                <label className="block text-sm font-medium text-card-foreground mb-2">Phone Number</label>
                 <div className="relative">
-                  <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
                   <input
                     type="tel"
                     value={formData.phone}
                     onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                    className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] focus:border-transparent outline-none"
+                    className="w-full pl-10 pr-4 py-3 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
                     placeholder="+250788123456"
                     required
                   />
@@ -182,14 +197,14 @@ export function Register() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">National ID</label>
+                <label className="block text-sm font-medium text-card-foreground mb-2">National ID</label>
                 <div className="relative">
-                  <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
                   <input
                     type="text"
                     value={formData.nationalId}
                     onChange={(e) => setFormData({ ...formData, nationalId: e.target.value })}
-                    className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] focus:border-transparent outline-none"
+                    className="w-full pl-10 pr-4 py-3 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
                     placeholder="1198712345678901"
                     required
                   />
@@ -198,7 +213,7 @@ export function Register() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Account Type</label>
+              <label className="block text-sm font-medium text-card-foreground mb-2">Account Type</label>
               <select
                 value={formData.role}
                 onChange={(e) =>
@@ -207,7 +222,7 @@ export function Register() {
                     role: e.target.value as "admin" | "manager" | "member" | "government" | "generalManager",
                   })
                 }
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] focus:border-transparent outline-none"
+                className="w-full px-4 py-3 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
               >
                 <option value="member">Cooperative Member</option>
                 <option value="manager">Cooperative Manager</option>
@@ -258,7 +273,11 @@ export function Register() {
                   >
                     <option value="">Choose a cooperative...</option>
                     {cooperatives
-                      .filter((coop) => !formData.sector || coop.sector === formData.sector)
+                      .filter(
+                        (coop) =>
+                          !formData.sector ||
+                          coop.sector?.toLowerCase() === formData.sector.toLowerCase()
+                      )
                       .map((coop) => (
                         <option key={coop.id} value={coop.id}>
                           {coop.name}
@@ -270,14 +289,14 @@ export function Register() {
             )}
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
+              <label className="block text-sm font-medium text-card-foreground mb-2">Password</label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
                 <input
                   type="password"
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] focus:border-transparent outline-none"
+                  className="w-full pl-10 pr-4 py-3 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
                   placeholder="••••••••"
                   required
                 />
@@ -285,7 +304,7 @@ export function Register() {
               {formData.password && (
                 <div className="mt-2">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs text-gray-600">Password strength:</span>
+                    <span className="text-xs text-muted-foreground">Password strength:</span>
                     <span className={`text-xs font-medium ${passwordStrength.label === "Weak" ? "text-red-600" : passwordStrength.label === "Fair" ? "text-yellow-600" : passwordStrength.label === "Good" ? "text-blue-600" : "text-green-600"}`}>
                       {passwordStrength.label}
                     </span>
@@ -339,9 +358,9 @@ export function Register() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Confirm Password</label>
+              <label className="block text-sm font-medium text-card-foreground mb-2">Confirm Password</label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
                 <input
                   type="password"
                   value={formData.confirmPassword}
@@ -351,7 +370,7 @@ export function Register() {
                       confirmPassword: e.target.value,
                     })
                   }
-                  className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] focus:border-transparent outline-none"
+                  className="w-full pl-10 pr-4 py-3 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
                   placeholder="••••••••"
                   required
                 />
@@ -376,6 +395,7 @@ export function Register() {
             </p>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

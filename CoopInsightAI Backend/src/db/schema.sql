@@ -575,3 +575,42 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_created   ON audit_logs(created_at DES
 CREATE INDEX IF NOT EXISTS idx_ai_insights_coop     ON ai_insights(cooperative_id);
 CREATE INDEX IF NOT EXISTS idx_loan_records_member  ON loan_records(member_id);
 CREATE INDEX IF NOT EXISTS idx_contributions_member ON member_contributions(member_id);
+
+-- ─── MEMBERSHIP EXIT REQUESTS ──────────────────────────────────────
+
+-- A member-initiated request to be removed from their cooperative. The member
+-- files it themselves; the cooperative manager (or an admin) must respond before
+-- response_due_at, which is stamped at submission from the published SLA.
+CREATE TABLE IF NOT EXISTS membership_exit_requests (
+  id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cooperative_id      UUID NOT NULL REFERENCES cooperatives(id) ON DELETE CASCADE,
+  member_id           UUID REFERENCES members(id) ON DELETE SET NULL,
+  requested_by        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reason_category     VARCHAR(50) NOT NULL CHECK (reason_category IN
+                        ('relocation','financial_hardship','joining_another_cooperative',
+                         'dissatisfied_with_management','health','retirement',
+                         'business_closed','other')),
+  reason_detail       TEXT NOT NULL,
+  preferred_exit_date DATE,
+  savings_instruction VARCHAR(30) NOT NULL DEFAULT 'refund_mobile_money' CHECK (savings_instruction IN
+                        ('refund_mobile_money','refund_bank_transfer','refund_cash',
+                         'donate_to_cooperative','no_savings_held')),
+  contact_phone       VARCHAR(20),
+  acknowledged_terms  BOOLEAN NOT NULL DEFAULT FALSE,
+  status              VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN
+                        ('pending','under_review','approved','rejected','withdrawn')),
+  response_due_at     TIMESTAMPTZ NOT NULL,
+  decision_note       TEXT,
+  decided_by          UUID REFERENCES users(id),
+  decided_at          TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- A member may only have one request awaiting a response at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exit_requests_one_open
+  ON membership_exit_requests(requested_by)
+  WHERE status IN ('pending','under_review');
+
+CREATE INDEX IF NOT EXISTS idx_exit_requests_coop   ON membership_exit_requests(cooperative_id);
+CREATE INDEX IF NOT EXISTS idx_exit_requests_status ON membership_exit_requests(status);

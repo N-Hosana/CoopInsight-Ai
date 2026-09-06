@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
-import { Input } from "../components/Input";
 import { Select } from "../components/Select";
 import { useAuth } from "../contexts/AuthContext";
 import { Plus, UserCircle, Search, Download } from "lucide-react";
@@ -19,18 +18,19 @@ interface Member {
   email: string;
   nationalId: string;
   joinDate?: string;
-  status?: "Active" | "Probation" | "Inactive";
+  status?: "Active" | "Inactive" | "Suspended";
 }
 
-const cooperativeOptions = [
-  { value: "", label: "All cooperatives" },
-];
+interface CooperativeOption {
+  value: string;
+  label: string;
+}
 
 const statusOptions = [
   { value: "", label: "All statuses" },
-  { value: "Active", label: "Active" },
-  { value: "Probation", label: "Probation" },
-  { value: "Inactive", label: "Inactive" },
+  { value: "active", label: "Active" },
+  { value: "inactive", label: "Inactive" },
+  { value: "suspended", label: "Suspended" },
 ];
 
 export function Members() {
@@ -39,22 +39,27 @@ export function Members() {
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
   const [totalCount, setTotalCount] = useState(0);
-  const [showForm, setShowForm] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterCooperative, setFilterCooperative] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
-  const [formData, setFormData] = useState({
-    name: "",
-    role: "",
-    contribution: "",
-    cooperative: "",
-    cooperativeId: "",
-    phone: "",
-    email: "",
-    nationalId: "",
-    joinDate: new Date().toISOString().split("T")[0],
-    status: "Active" as "Active" | "Probation" | "Inactive",
-  });
+  const [cooperativeOptions, setCooperativeOptions] = useState<CooperativeOption[]>([
+    { value: "", label: "All cooperatives" },
+  ]);
+
+  useEffect(() => {
+    api
+      .get<any>("/cooperatives?page=1&limit=100")
+      .then((res: any) => {
+        const data = res?.data ?? [];
+        setCooperativeOptions([
+          { value: "", label: "All cooperatives" },
+          ...data.map((c: any) => ({ value: String(c.id), label: c.name })),
+        ]);
+      })
+      .catch(() => {
+        // Keep the default "All cooperatives" option on failure
+      });
+  }, []);
 
   const fetchMembers = async () => {
     setLoading(true);
@@ -63,12 +68,18 @@ export function Members() {
       params.set("page", "1");
       params.set("limit", "100");
       if (searchTerm) params.set("search", searchTerm);
-      if (filterCooperative) params.set("cooperative_id", filterCooperative);
+      if (filterCooperative) params.set("cooperativeId", filterCooperative);
       if (filterStatus) params.set("status", filterStatus);
 
       const response = await api.get<any>(`/members?${params.toString()}`);
       const data = response?.data ?? [];
       const list = Array.isArray(data) ? data : response?.data ?? [];
+
+      const statusLabels: Record<string, "Active" | "Inactive" | "Suspended"> = {
+        active: "Active",
+        inactive: "Inactive",
+        suspended: "Suspended",
+      };
 
       const mapped: Member[] = (list as any[]).map((m: any) => ({
         id: String(m.id),
@@ -83,7 +94,7 @@ export function Members() {
         email: m.email || "",
         nationalId: m.national_id || "",
         joinDate: m.membership_date || m.join_date || undefined,
-        status: (m.status === "active" ? "Active" : m.status) as "Active" | "Probation" | "Inactive" | undefined,
+        status: statusLabels[m.status as string],
       }));
 
       setMembers(mapped);
@@ -99,24 +110,6 @@ export function Members() {
     fetchMembers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchTerm, filterCooperative, filterStatus]);
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setShowForm(false);
-    setFormData({
-      name: "",
-      role: "",
-      contribution: "",
-      cooperative: "",
-      cooperativeId: "",
-      phone: "",
-      email: "",
-      nationalId: "",
-      joinDate: new Date().toISOString().split("T")[0],
-      status: "Active",
-    });
-    fetchMembers();
-  };
 
   const handleBulkExport = () => {
     const csv = [
@@ -157,98 +150,13 @@ export function Members() {
             Export
           </Button>
           {(user?.role === "manager" || user?.role === "admin") && (
-            <Button onClick={() => setShowForm(!showForm)}>
+            <Button onClick={() => navigate("/members/new")}>
               <Plus className="w-4 h-4 inline-block mr-2" />
               Add Member
             </Button>
           )}
         </div>
       </div>
-
-      {showForm && (user?.role === "manager" || user?.role === "admin") && (
-        <Card className="p-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-6">Add New Member</h2>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid gap-4 md:grid-cols-2">
-              <Input
-                label="Member Name"
-                placeholder="Enter full name"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                required
-              />
-              <Input
-                label="Role"
-                placeholder="e.g., Producer, Manager, Coordinator"
-                value={formData.role}
-                onChange={(e) => setFormData({ ...formData, role: e.target.value })}
-                required
-              />
-              <Input
-                label="Email"
-                placeholder="member@example.coop"
-                type="email"
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                required
-              />
-              <Input
-                label="Phone Number"
-                placeholder="+250788123456"
-                type="tel"
-                value={formData.phone}
-                onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                required
-              />
-              <Input
-                label="National ID"
-                placeholder="1199XXXXXXXXXXXX"
-                value={formData.nationalId}
-                onChange={(e) => setFormData({ ...formData, nationalId: e.target.value })}
-                required
-              />
-              <Input
-                label="Contribution"
-                placeholder="e.g., 2500"
-                value={formData.contribution}
-                onChange={(e) => setFormData({ ...formData, contribution: e.target.value })}
-                required
-              />
-              <Input
-                label="Join Date"
-                type="date"
-                value={formData.joinDate}
-                onChange={(e) => setFormData({ ...formData, joinDate: e.target.value })}
-                required
-              />
-              <Select
-                label="Status"
-                options={[
-                  { value: "Active", label: "Active" },
-                  { value: "Probation", label: "Probation" },
-                  { value: "Inactive", label: "Inactive" },
-                ]}
-                value={formData.status}
-                onChange={(e) => setFormData({ ...formData, status: e.target.value as any })}
-                required
-              />
-              <Select
-                label="Cooperative"
-                options={cooperativeOptions}
-                value={formData.cooperative}
-                onChange={(e) => setFormData({ ...formData, cooperative: e.target.value })}
-                required
-              />
-            </div>
-            <div className="flex gap-3">
-              <Button type="submit">Submit</Button>
-              <Button type="button" variant="secondary" onClick={() => setShowForm(false)}>
-                Cancel
-              </Button>
-            </div>
-          </form>
-        </Card>
-      )}
 
       <Card className="p-6">
         <div className="grid gap-4 md:grid-cols-3 mb-6">
@@ -338,7 +246,7 @@ export function Members() {
                         className={`inline-flex px-3 py-1 text-xs font-medium rounded-full ${
                           member.status === "Active"
                             ? "bg-green-100 text-green-800"
-                            : member.status === "Probation"
+                            : member.status === "Suspended"
                             ? "bg-yellow-100 text-yellow-800"
                             : "bg-gray-100 text-gray-800"
                         }`}

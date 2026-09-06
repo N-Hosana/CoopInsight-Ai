@@ -25,9 +25,13 @@ interface AppearanceData {
 interface NotificationsData {
   emailNotifications?: boolean;
   smsNotifications?: boolean;
-  pushNotifications?: boolean;
-  activityAlerts?: boolean;
-  financialAlerts?: boolean;
+  inAppNotifications?: boolean;
+  loanDueReminders?: boolean;
+  activityReminders?: boolean;
+  monthlyReports?: boolean;
+  complianceAlerts?: boolean;
+  newMemberAlerts?: boolean;
+  loginNotifications?: boolean;
   [key: string]: any;
 }
 
@@ -88,14 +92,22 @@ export function Settings() {
   const [notifications, setNotifications] = useState<NotificationsData>({
     emailNotifications: true,
     smsNotifications: true,
-    pushNotifications: true,
-    activityAlerts: true,
-    financialAlerts: true,
+    inAppNotifications: true,
+    loanDueReminders: true,
+    activityReminders: true,
+    monthlyReports: true,
+    complianceAlerts: true,
+    newMemberAlerts: false,
+    loginNotifications: true,
   });
   const [savingNotifications, setSavingNotifications] = useState(false);
 
   // Security section
   const [twoFactorAuth, setTwoFactorAuth] = useState(false);
+  const [twoFactorStep, setTwoFactorStep] = useState<"idle" | "awaiting-otp" | "awaiting-password">("idle");
+  const [twoFactorOtp, setTwoFactorOtp] = useState("");
+  const [twoFactorPassword, setTwoFactorPassword] = useState("");
+  const [twoFactorLoading, setTwoFactorLoading] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -124,7 +136,7 @@ export function Settings() {
           setNotifications((prev) => ({ ...prev, ...s.notifications }));
         }
         if (s.security) {
-          setTwoFactorAuth(s.security.twoFactorAuth ?? false);
+          setTwoFactorAuth((s.security as any).twoFactorEnabled ?? s.security.twoFactorAuth ?? false);
         }
       } catch {
         // Non-fatal: fall back to defaults / auth context values
@@ -200,6 +212,71 @@ export function Settings() {
 
   const handleToggleNotification = (key: keyof NotificationsData) => {
     setNotifications((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleStartEnableTwoFactor = async () => {
+    setTwoFactorLoading(true);
+    try {
+      await api.post("/settings/two-factor/enable", {});
+      setTwoFactorStep("awaiting-otp");
+      showToast("A verification code has been sent to confirm 2FA setup.");
+    } catch (err: any) {
+      showToast(err?.message ?? "Failed to start two-factor setup.", "error");
+    } finally {
+      setTwoFactorLoading(false);
+    }
+  };
+
+  const handleConfirmEnableTwoFactor = async () => {
+    if (!twoFactorOtp) {
+      showToast("Enter the verification code to continue.", "error");
+      return;
+    }
+    setTwoFactorLoading(true);
+    try {
+      await api.post("/settings/two-factor/confirm", { otp: twoFactorOtp });
+      setTwoFactorAuth(true);
+      setTwoFactorStep("idle");
+      setTwoFactorOtp("");
+      showToast("Two-factor authentication enabled.");
+    } catch (err: any) {
+      showToast(err?.message ?? "Invalid or expired code.", "error");
+    } finally {
+      setTwoFactorLoading(false);
+    }
+  };
+
+  const handleConfirmDisableTwoFactor = async () => {
+    if (!twoFactorPassword) {
+      showToast("Enter your password to disable two-factor authentication.", "error");
+      return;
+    }
+    setTwoFactorLoading(true);
+    try {
+      await api.post("/settings/two-factor/disable", { password: twoFactorPassword });
+      setTwoFactorAuth(false);
+      setTwoFactorStep("idle");
+      setTwoFactorPassword("");
+      showToast("Two-factor authentication disabled.");
+    } catch (err: any) {
+      showToast(err?.message ?? "Failed to disable two-factor authentication.", "error");
+    } finally {
+      setTwoFactorLoading(false);
+    }
+  };
+
+  const handleToggleTwoFactor = () => {
+    if (twoFactorStep !== "idle") {
+      setTwoFactorStep("idle");
+      setTwoFactorOtp("");
+      setTwoFactorPassword("");
+      return;
+    }
+    if (twoFactorAuth) {
+      setTwoFactorStep("awaiting-password");
+    } else {
+      handleStartEnableTwoFactor();
+    }
   };
 
   // ---------------------------------------------------------------------------
@@ -319,7 +396,7 @@ export function Settings() {
                 {[
                   { key: "emailNotifications", label: "Email Notifications", description: "Receive updates via email" },
                   { key: "smsNotifications", label: "SMS Notifications", description: "Receive updates via SMS" },
-                  { key: "pushNotifications", label: "In-App Notifications", description: "Receive updates inside the app" },
+                  { key: "inAppNotifications", label: "In-App Notifications", description: "Receive updates inside the app" },
                 ].map((option) => (
                   <div key={option.key} className="flex items-center justify-between p-4 bg-muted rounded-xl border border-border">
                     <div>
@@ -345,11 +422,12 @@ export function Settings() {
                 <h3 className="font-semibold text-gray-900 mb-2">Notification types</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {[
-                    { label: "Loan Reminders", key: "activityAlerts" },
-                    { label: "Meeting Notifications", key: "pushNotifications" },
-                    { label: "Compliance Alerts", key: "activityAlerts" },
-                    { label: "Member Activity", key: "activityAlerts" },
-                    { label: "Financial Updates", key: "financialAlerts" },
+                    { label: "Loan Reminders", key: "loanDueReminders" },
+                    { label: "Meeting Notifications", key: "activityReminders" },
+                    { label: "Compliance Alerts", key: "complianceAlerts" },
+                    { label: "Member Activity", key: "newMemberAlerts" },
+                    { label: "Financial Updates", key: "monthlyReports" },
+                    { label: "Login Notifications", key: "loginNotifications" },
                   ].map(({ label, key }) => (
                     <div key={label} className="flex items-center justify-between p-3 rounded-xl border border-gray-200">
                       <span className="text-sm text-gray-700">{label}</span>
@@ -388,23 +466,74 @@ export function Settings() {
                 <Shield className="w-5 h-5 text-[#2D6A4F]" />
                 <h2 className="text-lg font-semibold text-card-foreground">Security Settings</h2>
               </div>
-              <div className="flex items-center justify-between p-4 rounded-xl border border-gray-200 bg-muted">
-                <div>
-                  <p className="font-medium text-card-foreground">Two-Factor Authentication</p>
-                  <p className="text-sm text-muted-foreground">Add an extra security layer to your account.</p>
-                </div>
-                <button
-                  onClick={() => setTwoFactorAuth((v) => !v)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    twoFactorAuth ? "bg-[#2D6A4F]" : "bg-gray-300"
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      twoFactorAuth ? "translate-x-6" : "translate-x-1"
+              <div className="p-4 rounded-xl border border-gray-200 bg-muted space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium text-card-foreground">Two-Factor Authentication</p>
+                    <p className="text-sm text-muted-foreground">Add an extra security layer to your account.</p>
+                  </div>
+                  <button
+                    onClick={handleToggleTwoFactor}
+                    disabled={twoFactorLoading}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-60 ${
+                      twoFactorAuth ? "bg-[#2D6A4F]" : "bg-gray-300"
                     }`}
-                  />
-                </button>
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        twoFactorAuth ? "translate-x-6" : "translate-x-1"
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {twoFactorStep === "awaiting-otp" && (
+                  <div className="flex items-end gap-3">
+                    <div className="flex-1">
+                      <label className="block text-sm font-medium text-card-foreground mb-2">
+                        Enter the verification code
+                      </label>
+                      <input
+                        type="text"
+                        value={twoFactorOtp}
+                        onChange={(e) => setTwoFactorOtp(e.target.value)}
+                        className="w-full px-4 py-3 bg-background border border-border rounded-xl text-foreground"
+                        placeholder="6-digit code"
+                      />
+                    </div>
+                    <button
+                      onClick={handleConfirmEnableTwoFactor}
+                      disabled={twoFactorLoading}
+                      className="px-4 py-3 bg-[#2D6A4F] text-white rounded-xl hover:bg-[#1B4332] transition-colors text-sm font-medium disabled:opacity-60"
+                    >
+                      {twoFactorLoading ? "Confirming…" : "Confirm"}
+                    </button>
+                  </div>
+                )}
+
+                {twoFactorStep === "awaiting-password" && (
+                  <div className="flex items-end gap-3">
+                    <div className="flex-1">
+                      <label className="block text-sm font-medium text-card-foreground mb-2">
+                        Enter your password to disable 2FA
+                      </label>
+                      <input
+                        type="password"
+                        value={twoFactorPassword}
+                        onChange={(e) => setTwoFactorPassword(e.target.value)}
+                        className="w-full px-4 py-3 bg-background border border-border rounded-xl text-foreground"
+                        placeholder="Current password"
+                      />
+                    </div>
+                    <button
+                      onClick={handleConfirmDisableTwoFactor}
+                      disabled={twoFactorLoading}
+                      className="px-4 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors text-sm font-medium disabled:opacity-60"
+                    >
+                      {twoFactorLoading ? "Disabling…" : "Disable"}
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-4">

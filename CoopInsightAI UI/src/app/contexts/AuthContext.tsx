@@ -74,8 +74,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Transient state shared across the 3-step login flow
   const [pendingUserId, setPendingUserId] = useState<string | null>(null);
-  const [pendingUser, setPendingUser] = useState<User | null>(null);
-  // Ref mirrors pendingUser so loginWithOTP reads the latest value synchronously
+  // The user resolved at password step, held until OTP verification commits it.
+  // A ref rather than state: loginWithOTP has to read the latest value
+  // synchronously within the same tick, which a state value cannot guarantee.
   const pendingUserRef = useRef<User | null>(null);
   // Dev-mode OTP hint (backend returns this when NODE_ENV !== production)
   const [devOtp, setDevOtp] = useState<string | null>(null);
@@ -116,7 +117,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem("coopinsight_refresh_token", data.refreshToken);
       const mapped = mapApiUser(data.user);
       pendingUserRef.current = mapped;
-      setPendingUser(mapped);
       return true;
     } catch {
       return false;
@@ -130,7 +130,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(userToCommit);
     localStorage.setItem("coopinsight_user", JSON.stringify(userToCommit));
     pendingUserRef.current = null;
-    setPendingUser(null);
     setPendingUserId(null);
     setDevOtp(null);
     return true;

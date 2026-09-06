@@ -13,16 +13,22 @@ import {
   FileText,
   Briefcase,
   Download,
-  Plus,
-  X,
 } from "lucide-react";
 
 interface CooperativeDocument {
   id: string;
   name: string;
   type: string;
-  uploadedAt: string;
-  size?: string;
+  file_url?: string;
+  uploaded_at: string;
+}
+
+interface LeadershipRecord {
+  id: string;
+  name: string;
+  role: string;
+  email?: string;
+  phone?: string;
 }
 
 interface CooperativeProfileData {
@@ -32,25 +38,23 @@ interface CooperativeProfileData {
   district: string;
   sector: string;
   type: string;
-  chairperson: string;
-  chairpersonEmail?: string;
-  chairpersonPhone?: string;
-  treasurer: string;
-  treasurerEmail?: string;
-  treasurerPhone?: string;
+  president: string;
+  presidentEmail?: string;
+  presidentPhone?: string;
+  vicePresident: string;
+  vicePresidentEmail?: string;
+  vicePresidentPhone?: string;
   secretary: string;
   secretaryEmail?: string;
   secretaryPhone?: string;
+  sectorOfficer: string;
+  sectorOfficerPhone?: string;
   registrationDate: string;
   status: string;
-  bylawsFileName: string;
-  licenseFileName: string;
-  permitsFileName: string;
-  constitutionFileName?: string;
   operatingArea: string;
   membershipSize: string;
   description: string;
-  documents: CooperativeDocument[];
+  leadershipRaw: LeadershipRecord[];
 }
 
 interface HealthScore {
@@ -59,12 +63,16 @@ interface HealthScore {
   trend: "up" | "down" | "stable";
 }
 
+// Roles are matched exactly so "Vice President" is never mistaken for "President".
+const findLeader = (leadership: any[], role: string) =>
+  leadership.find((l: any) => l.role?.trim().toLowerCase() === role);
+
 const mapApiCooperative = (raw: any): CooperativeProfileData => {
   const leadership: any[] = raw.leadership ?? [];
-  const find = (role: string) => leadership.find((l: any) => l.role?.toLowerCase().includes(role));
-  const chair = find("chair");
-  const treasurer = find("treasurer");
-  const secretary = find("secretary");
+  const president = findLeader(leadership, "president");
+  const vicePresident = findLeader(leadership, "vice president");
+  const secretary = findLeader(leadership, "secretary");
+  const sectorOfficer = findLeader(leadership, "sector cooperative officer");
   return {
     id: raw.id,
     name: raw.name ?? "",
@@ -77,21 +85,35 @@ const mapApiCooperative = (raw: any): CooperativeProfileData => {
     description: raw.description ?? "",
     operatingArea: [raw.cell, raw.village].filter(Boolean).join(", ") || raw.sector || "",
     membershipSize: String(raw.member_count ?? raw.membershipSize ?? "0"),
-    chairperson: chair?.name ?? "",
-    chairpersonEmail: chair?.email ?? "",
-    chairpersonPhone: chair?.phone ?? "",
-    treasurer: treasurer?.name ?? "",
-    treasurerEmail: treasurer?.email ?? "",
-    treasurerPhone: treasurer?.phone ?? "",
+    president: president?.name ?? "",
+    presidentEmail: president?.email ?? "",
+    presidentPhone: president?.phone ?? "",
+    vicePresident: vicePresident?.name ?? "",
+    vicePresidentEmail: vicePresident?.email ?? "",
+    vicePresidentPhone: vicePresident?.phone ?? "",
     secretary: secretary?.name ?? "",
     secretaryEmail: secretary?.email ?? "",
     secretaryPhone: secretary?.phone ?? "",
-    bylawsFileName: "",
-    licenseFileName: "",
-    permitsFileName: "",
-    documents: raw.documents ?? [],
+    sectorOfficer: sectorOfficer?.name ?? "",
+    sectorOfficerPhone: sectorOfficer?.phone ?? "",
+    leadershipRaw: leadership,
   };
 };
+
+// The three cooperative offices the RCA register records. The sector cooperative
+// officer is shown read-only — they are a district appointee, not an office of
+// the cooperative, so they are not editable from this page.
+const LEADERSHIP_ROLES: Array<{
+  matchTerm: string;
+  roleLabel: string;
+  nameKey: keyof CooperativeProfileData;
+  emailKey: keyof CooperativeProfileData;
+  phoneKey: keyof CooperativeProfileData;
+}> = [
+  { matchTerm: "president", roleLabel: "President", nameKey: "president", emailKey: "presidentEmail", phoneKey: "presidentPhone" },
+  { matchTerm: "vice president", roleLabel: "Vice President", nameKey: "vicePresident", emailKey: "vicePresidentEmail", phoneKey: "vicePresidentPhone" },
+  { matchTerm: "secretary", roleLabel: "Secretary", nameKey: "secretary", emailKey: "secretaryEmail", phoneKey: "secretaryPhone" },
+];
 
 export function CooperativeProfile() {
   const { user } = useAuth();
@@ -112,22 +134,18 @@ export function CooperativeProfile() {
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const [isEditing, setIsEditing] = useState(false);
-  const [showDocumentForm, setShowDocumentForm] = useState(false);
   const [formData, setFormData] = useState<CooperativeProfileData | null>(null);
-  const [newDocument, setNewDocument] = useState({
-    name: "",
-    type: "Bylaws" as string,
-    file: null as File | null,
-  });
+  const [documents, setDocuments] = useState<CooperativeDocument[]>([]);
 
   const fetchCooperative = async () => {
     if (!cooperativeId) return;
     setLoading(true);
     setError(null);
     try {
-      const [coopRes, healthRes] = await Promise.allSettled([
+      const [coopRes, healthRes, docsRes] = await Promise.allSettled([
         api.get<{ cooperative: CooperativeProfileData } | CooperativeProfileData>(`/cooperatives/${cooperativeId}`),
         api.get<HealthScore>(`/cooperatives/${cooperativeId}/health-score`),
+        api.get<{ data: CooperativeDocument[] } | CooperativeDocument[]>(`/cooperatives/${cooperativeId}/documents`),
       ]);
 
       if (coopRes.status === "fulfilled") {
@@ -144,6 +162,12 @@ export function CooperativeProfile() {
         setHealthScore(healthRes.value as HealthScore);
       }
       // Health score failure is non-fatal — just leave it null
+
+      if (docsRes.status === "fulfilled") {
+        const raw = (docsRes.value as any).data ?? docsRes.value;
+        setDocuments(Array.isArray(raw) ? raw : []);
+      }
+      // Document fetch failure is non-fatal — just leave the list empty
     } finally {
       setLoading(false);
     }
@@ -169,49 +193,37 @@ export function CooperativeProfile() {
           allowedPayload[key] = formData[key as keyof CooperativeProfileData];
         }
       }
-      const res = await api.put<{ data: CooperativeProfileData }>(
-        `/cooperatives/${cooperativeId}`,
-        allowedPayload
+      await api.put<{ data: CooperativeProfileData }>(`/cooperatives/${cooperativeId}`, allowedPayload);
+
+      // Leadership lives in a separate table — create/update/delete each role independently.
+      await Promise.all(
+        LEADERSHIP_ROLES.map(async (role) => {
+          const existing = findLeader(formData.leadershipRaw, role.matchTerm);
+          const name = (formData[role.nameKey] as string)?.trim();
+          const payload = {
+            name,
+            role: role.roleLabel,
+            email: (formData[role.emailKey] as string) || undefined,
+            phone: (formData[role.phoneKey] as string) || undefined,
+          };
+
+          if (existing && !name) {
+            await api.delete(`/cooperatives/${cooperativeId}/leadership/${existing.id}`);
+          } else if (existing && name) {
+            await api.put(`/cooperatives/${cooperativeId}/leadership/${existing.id}`, payload);
+          } else if (!existing && name) {
+            await api.post(`/cooperatives/${cooperativeId}/leadership`, payload);
+          }
+        })
       );
-      const updatedRaw = (res as any).data ?? res;
-      const updated = mapApiCooperative(updatedRaw);
-      setCooperative(updated);
-      setFormData(updated);
+
+      await fetchCooperative();
       setIsEditing(false);
     } catch (err: any) {
       setSaveError(err?.message || "Failed to save changes. Please try again.");
     } finally {
       setSaving(false);
     }
-  };
-
-  const handleAddDocument = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formData || !newDocument.name) return;
-
-    const updatedDoc: CooperativeDocument = {
-      id: `doc-${Date.now()}`,
-      name: newDocument.name,
-      type: newDocument.type,
-      uploadedAt: new Date().toLocaleDateString(),
-      size: "0 KB",
-    };
-
-    setFormData({
-      ...formData,
-      documents: [...formData.documents, updatedDoc],
-    });
-
-    setNewDocument({ name: "", type: "Bylaws", file: null });
-    setShowDocumentForm(false);
-  };
-
-  const handleRemoveDocument = (docId: string) => {
-    if (!formData) return;
-    setFormData({
-      ...formData,
-      documents: formData.documents.filter((doc) => doc.id !== docId),
-    });
   };
 
   const handleExportProfile = () => {
@@ -235,20 +247,23 @@ Operating Area: ${cooperative.operatingArea}
 Membership Size: ${cooperative.membershipSize}
 
 LEADERSHIP
-Chairperson: ${cooperative.chairperson}
-Email: ${cooperative.chairpersonEmail || "N/A"}
-Phone: ${cooperative.chairpersonPhone || "N/A"}
+President: ${cooperative.president || "Not recorded"}
+Email: ${cooperative.presidentEmail || "N/A"}
+Phone: ${cooperative.presidentPhone || "N/A"}
 
-Treasurer: ${cooperative.treasurer}
-Email: ${cooperative.treasurerEmail || "N/A"}
-Phone: ${cooperative.treasurerPhone || "N/A"}
+Vice President: ${cooperative.vicePresident || "Not recorded"}
+Email: ${cooperative.vicePresidentEmail || "N/A"}
+Phone: ${cooperative.vicePresidentPhone || "N/A"}
 
-Secretary: ${cooperative.secretary}
+Secretary: ${cooperative.secretary || "Vacant / not recorded"}
 Email: ${cooperative.secretaryEmail || "N/A"}
 Phone: ${cooperative.secretaryPhone || "N/A"}
 
-DOCUMENTS (${cooperative.documents?.length ?? 0})
-${(cooperative.documents ?? []).map((doc) => `- ${doc.name} (${doc.type}) - ${doc.uploadedAt} - ${doc.size || "0 KB"}`).join("\n")}
+Sector Cooperative Officer: ${cooperative.sectorOfficer || "Not recorded"}
+Phone: ${cooperative.sectorOfficerPhone || "N/A"}
+
+DOCUMENTS (${documents.length})
+${documents.map((doc) => `- ${doc.name} (${doc.type}) - ${new Date(doc.uploaded_at).toLocaleDateString()}`).join("\n")}
 
 DESCRIPTION
 ${cooperative.description}
@@ -415,32 +430,38 @@ ${cooperative.description}
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <p className="text-xs text-gray-500">Chairperson</p>
+                <p className="text-xs text-gray-500">President</p>
                 {isEditing ? (
                   <input
                     type="text"
-                    value={formData.chairperson}
-                    onChange={(e) => setFormData({ ...formData, chairperson: e.target.value })}
+                    value={formData.president}
+                    onChange={(e) => setFormData({ ...formData, president: e.target.value })}
                     className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB] mt-1"
                   />
                 ) : (
-                  <p className="font-medium text-gray-900">{formData.chairperson}</p>
+                  <p className="font-medium text-gray-900">{formData.president || "—"}</p>
+                )}
+                {!isEditing && formData.presidentPhone && (
+                  <p className="text-xs text-gray-500 mt-0.5">{formData.presidentPhone}</p>
                 )}
               </div>
               <div>
-                <p className="text-xs text-gray-500">Treasurer</p>
+                <p className="text-xs text-gray-500">Vice President</p>
                 {isEditing ? (
                   <input
                     type="text"
-                    value={formData.treasurer}
-                    onChange={(e) => setFormData({ ...formData, treasurer: e.target.value })}
+                    value={formData.vicePresident}
+                    onChange={(e) => setFormData({ ...formData, vicePresident: e.target.value })}
                     className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB] mt-1"
                   />
                 ) : (
-                  <p className="font-medium text-gray-900">{formData.treasurer}</p>
+                  <p className="font-medium text-gray-900">{formData.vicePresident || "—"}</p>
+                )}
+                {!isEditing && formData.vicePresidentPhone && (
+                  <p className="text-xs text-gray-500 mt-0.5">{formData.vicePresidentPhone}</p>
                 )}
               </div>
-              <div className="sm:col-span-2">
+              <div>
                 <p className="text-xs text-gray-500">Secretary</p>
                 {isEditing ? (
                   <input
@@ -450,7 +471,17 @@ ${cooperative.description}
                     className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB] mt-1"
                   />
                 ) : (
-                  <p className="font-medium text-gray-900">{formData.secretary}</p>
+                  <p className="font-medium text-gray-900">{formData.secretary || "Vacant"}</p>
+                )}
+                {!isEditing && formData.secretaryPhone && (
+                  <p className="text-xs text-gray-500 mt-0.5">{formData.secretaryPhone}</p>
+                )}
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Sector Cooperative Officer</p>
+                <p className="font-medium text-gray-900">{formData.sectorOfficer || "—"}</p>
+                {formData.sectorOfficerPhone && (
+                  <p className="text-xs text-gray-500 mt-0.5">{formData.sectorOfficerPhone}</p>
                 )}
               </div>
             </div>
@@ -462,66 +493,19 @@ ${cooperative.description}
                 <FileText className="w-4 h-4" />
                 <span className="text-sm font-medium">Document Repository</span>
               </div>
-              {canEdit && isEditing && (
+              {canEdit && (
                 <Button
                   className="!px-2 !py-1 text-sm"
                   variant="secondary"
-                  onClick={() => setShowDocumentForm(!showDocumentForm)}
+                  onClick={() => navigate("/cooperative-documents")}
                 >
-                  <Plus className="w-3 h-3 mr-1" />
-                  Add Document
+                  Manage Documents
                 </Button>
               )}
             </div>
 
-            {showDocumentForm && (
-              <form onSubmit={handleAddDocument} className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Document Name</label>
-                    <input
-                      type="text"
-                      value={newDocument.name}
-                      onChange={(e) => setNewDocument({ ...newDocument, name: e.target.value })}
-                      placeholder="e.g., Financial Report 2024"
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Document Type</label>
-                    <select
-                      value={newDocument.type}
-                      onChange={(e) => setNewDocument({ ...newDocument, type: e.target.value })}
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
-                    >
-                      <option>Bylaws</option>
-                      <option>Constitution</option>
-                      <option>License</option>
-                      <option>Permit</option>
-                      <option>Financial Report</option>
-                      <option>Other</option>
-                    </select>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button type="submit" className="!px-2 !py-1 text-sm">
-                      Add Document
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      className="!px-2 !py-1 text-sm"
-                      onClick={() => setShowDocumentForm(false)}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                </div>
-              </form>
-            )}
-
             <div className="space-y-2">
-              {(formData.documents ?? []).map((doc) => (
+              {documents.map((doc) => (
                 <div
                   key={doc.id}
                   className="flex items-center justify-between p-3 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors"
@@ -529,23 +513,28 @@ ${cooperative.description}
                   <div className="flex items-center gap-3 flex-1">
                     <FileText className="w-4 h-4 text-gray-400" />
                     <div className="min-w-0 flex-1">
-                      <p className="font-medium text-gray-900 truncate">{doc.name}</p>
+                      {doc.file_url ? (
+                        <a
+                          href={doc.file_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-medium text-[#2563EB] hover:underline truncate block"
+                        >
+                          {doc.name}
+                        </a>
+                      ) : (
+                        <p className="font-medium text-gray-900 truncate">{doc.name}</p>
+                      )}
                       <p className="text-xs text-gray-500">
-                        {doc.type} • {doc.uploadedAt} • {doc.size}
+                        {doc.type} • {new Date(doc.uploaded_at).toLocaleDateString()}
                       </p>
                     </div>
                   </div>
-                  {canEdit && isEditing && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveDocument(doc.id)}
-                      className="text-red-600 hover:text-red-700 p-2"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  )}
                 </div>
               ))}
+              {documents.length === 0 && (
+                <p className="text-sm text-gray-500">No documents uploaded yet.</p>
+              )}
             </div>
           </div>
 

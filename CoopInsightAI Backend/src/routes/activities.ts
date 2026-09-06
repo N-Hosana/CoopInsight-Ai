@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { query } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
+import { uploadAttachment, buildFileUrl } from "../middleware/upload";
 
 const router = Router();
 
@@ -578,27 +579,36 @@ router.get("/:id/attachments", authenticate, async (req: Request, res: Response)
 });
 
 // POST /:id/attachments
-router.post("/:id/attachments", authenticate, async (req: Request, res: Response) => {
+router.post("/:id/attachments", authenticate, uploadAttachment.single("file"), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { description } = req.body;
+    const { name, description } = req.body;
 
     const existing = await query(`SELECT id FROM activities WHERE id = $1 AND deleted_at IS NULL`, [id]);
     if (existing.rows.length === 0) {
       return res.status(404).json({ success: false, message: "Activity not found" });
     }
 
+    if (!req.file) {
+      return res.status(400).json({ message: "A file is required" });
+    }
+
+    const fileUrl = buildFileUrl(req, "attachments", req.file.filename);
+
+    const result = await query(
+      `
+      INSERT INTO activity_attachments
+        (activity_id, name, url, size_bytes, description, uploaded_by, uploaded_at)
+      VALUES ($1,$2,$3,$4,$5,$6,NOW())
+      RETURNING *
+      `,
+      [id, name || req.file.originalname, fileUrl, req.file.size, description || null, req.user!.userId]
+    );
+
     res.status(201).json({
       success: true,
-      message: "Attachment upload pending S3 integration",
-      data: {
-        id: "attachment-placeholder-id",
-        activityId: id,
-        name: "pending",
-        url: "pending S3 integration",
-        description: description || null,
-        uploadedAt: new Date().toISOString(),
-      },
+      message: "Attachment uploaded successfully",
+      data: result.rows[0],
     });
   } catch (err) {
     console.error("POST /activities/:id/attachments error:", err);

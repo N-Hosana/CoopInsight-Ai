@@ -104,7 +104,7 @@ export function RecordTransaction() {
     setSuccessMessage(null);
     setErrorMessage(null);
 
-    const cooperativeId = user?.cooperative_id ?? user?.cooperativeId ?? null;
+    const cooperativeId = user?.cooperativeId ?? null;
 
     try {
       for (const txn of transactions) {
@@ -295,7 +295,7 @@ export function RecordTransaction() {
                         {txn.memberId && <p className="text-xs text-gray-600">Member: {txn.memberId}</p>}
                       </div>
                       <div className="text-right mr-4">
-                        <p className="text-lg font-bold text-gray-900">₣{txn.amount.toLocaleString("en-RW")}</p>
+                        <p className="text-lg font-bold text-gray-900">RWF {txn.amount.toLocaleString("en-RW")}</p>
                         <p className={`text-xs font-medium ${
                           txn.status === "Completed"
                             ? "text-green-600"
@@ -337,7 +337,7 @@ export function RecordTransaction() {
               </div>
               <div className="pt-3 border-t border-blue-200">
                 <p className="text-sm text-gray-600 mb-1">Total Amount</p>
-                <p className="text-2xl font-bold text-[#2563EB]">₣{totalAmount.toLocaleString("en-RW")}</p>
+                <p className="text-2xl font-bold text-[#2563EB]">RWF {totalAmount.toLocaleString("en-RW")}</p>
               </div>
               <div className="pt-3 border-t border-blue-200">
                 <p className="text-sm text-gray-600 mb-2">By Status</p>

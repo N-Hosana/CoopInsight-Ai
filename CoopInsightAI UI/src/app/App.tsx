@@ -20,6 +20,9 @@ import {
   Menu,
   X,
   ChevronDown,
+  UserMinus,
+  ClipboardCheck,
+  Trophy,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
@@ -53,6 +56,9 @@ import { ActivityDetails } from "./pages/ActivityDetails";
 import { AIInsightDetail } from "./pages/AIInsightDetail";
 import { CooperativeProfile } from "./pages/CooperativeProfile";
 import { CooperativeDocuments } from "./pages/CooperativeDocuments";
+import { Membership } from "./pages/Membership";
+import { CooperativeRequests } from "./pages/CooperativeRequests";
+import { CooperativeRankings } from "./pages/CooperativeRankings";
 import { NotificationBar } from "./components/NotificationBar";
 
 function ProfileDropdown() {
@@ -148,9 +154,12 @@ const getNavigationForUser = (user: { role: string; cooperativeId?: string } | n
     { name: "Financials", path: "/financials", icon: DollarSign, roles: ["admin", "manager", "member", "government", "generalManager"] },
     { name: "AI Insights", path: "/ai-insights", icon: Brain, roles: ["admin", "manager", "member", "generalManager"] },
     { name: "Government Monitoring", path: "/government-monitoring", icon: Building2, roles: ["government", "admin", "generalManager"] },
+    { name: "League Table", path: "/rankings", icon: Trophy, roles: ["government", "admin", "generalManager"] },
     { name: "Reports", path: "/reports", icon: FileText, roles: ["admin", "manager", "government", "generalManager"] },
     { name: "Cooperative Profile", path: "/cooperative-profile", icon: Building2, roles: ["manager", "member"], requireCooperative: true },
     { name: "Documents", path: "/cooperative-documents", icon: FileText, roles: ["manager", "member", "government"] },
+    { name: "Membership", path: "/membership", icon: UserMinus, roles: ["member", "manager", "admin", "generalManager"] },
+    { name: "Cooperative Requests", path: "/cooperative-requests", icon: ClipboardCheck, roles: ["member", "manager", "admin", "government", "generalManager"] },
     { name: "Notifications", path: "/notifications", icon: BellIcon, roles: ["admin", "manager", "member", "government", "generalManager"] },
     { name: "Integrations", path: "/integrations", icon: Plug, roles: ["admin", "manager", "generalManager"] },
     { name: "Security & Audit", path: "/security-audit", icon: Shield, roles: ["admin", "government", "generalManager"] },
@@ -413,6 +422,23 @@ function AppRoutes() {
           element={
             <RoleRoute roles={["manager", "member", "government"]}>
               <CooperativeDocuments />
+            </RoleRoute>
+          }
+        />
+        <Route
+          path="membership"
+          element={
+            <RoleRoute roles={["member", "manager", "admin", "generalManager"]}>
+              <Membership />
+            </RoleRoute>
+          }
+        />
+        <Route path="cooperative-requests" element={<CooperativeRequests />} />
+        <Route
+          path="rankings"
+          element={
+            <RoleRoute roles={["government", "admin", "generalManager"]}>
+              <CooperativeRankings />
             </RoleRoute>
           }
         />

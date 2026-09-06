@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   CheckCircle, XCircle, RefreshCw, Settings, Smartphone, Building2,
-  Database, Zap, Tractor, AlertTriangle, X, Play,
+  Database, Zap, Tractor, AlertTriangle, X, Play, Trash2,
 } from "lucide-react";
 import { api } from "../services/api";
 
@@ -26,15 +26,6 @@ interface Integration {
 }
 
 // ─── Static helpers ───────────────────────────────────────────────────────────
-
-const typeIconMap: Record<string, React.ElementType> = {
-  payment_mtn: Smartphone,
-  payment_airtel: Smartphone,
-  banking: Building2,
-  government: Database,
-  communication: Zap,
-  agriculture: Tractor,
-};
 
 const typeMeta: Record<string, { category: string; description: string; color: string; icon: React.ElementType }> = {
   payment_mtn:    { category: "Payment",       description: "Accept mobile money payments from members",                          color: "yellow", icon: Smartphone },
@@ -163,12 +154,15 @@ export function Integrations() {
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (id: string, name: string) => {
+    if (!window.confirm(`Remove the ${name} integration entirely? This deletes its stored configuration.`)) {
+      return;
+    }
     try {
       await api.delete(`/integrations/${id}`);
       setIntegrations((prev) => prev.filter((i) => i.id !== id));
-    } catch {
-      // silently fail
+    } catch (err: any) {
+      setFetchError(err?.message ?? "Could not remove the integration.");
     }
   };
 
@@ -301,12 +295,21 @@ export function Integrations() {
                         </button>
                       </>
                     ) : (
-                      <button
-                        onClick={() => handleConnect(integration.id)}
-                        className="px-3 py-1.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] text-xs font-medium"
-                      >
-                        Connect
-                      </button>
+                      <>
+                        <button
+                          onClick={() => handleConnect(integration.id)}
+                          className="px-3 py-1.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] text-xs font-medium"
+                        >
+                          Connect
+                        </button>
+                        <button
+                          onClick={() => handleDelete(integration.id, integration.name)}
+                          title="Remove this integration and its stored configuration"
+                          className="px-3 py-1.5 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 text-xs font-medium flex items-center gap-1"
+                        >
+                          <Trash2 className="w-3 h-3" /> Remove
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>

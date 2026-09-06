@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { query } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
+import { uploadPhoto, buildFileUrl } from "../middleware/upload";
 
 const router = Router();
 
@@ -690,15 +691,29 @@ router.get("/:id/activities", async (req: Request, res: Response) => {
 });
 
 // ─── POST /:id/photo ──────────────────────────────────────────────────────────
-router.post("/:id/photo", async (req: Request, res: Response) => {
+router.post("/:id/photo", uploadPhoto.single("photo"), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    // TODO: Add multer middleware, validate image type (jpg/png/webp, max 2MB), upload to S3,
-    //       then: UPDATE members SET photo_url = $1, updated_at = NOW() WHERE id = $2
+
+    if (!req.file) {
+      return res.status(400).json({ message: "A photo file is required" });
+    }
+
+    const photoUrl = buildFileUrl(req, "photos", req.file.filename);
+
+    const result = await query(
+      `UPDATE members SET photo_url = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL RETURNING id, photo_url`,
+      [photoUrl, id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, message: "Member not found" });
+    }
+
     res.json({
       success: true,
-      message: "Photo upload placeholder — S3 integration pending",
-      data: { memberId: id, photoUrl: "https://storage-placeholder.com/photo.jpg" },
+      message: "Photo uploaded successfully",
+      data: { memberId: id, photoUrl },
     });
   } catch (err) {
     console.error("POST /members/:id/photo error:", err);

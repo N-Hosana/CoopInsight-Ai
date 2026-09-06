@@ -8,6 +8,8 @@ import { useAuth } from "../contexts/AuthContext";
 import { api } from "../services/api";
 import { Plus, Building2, Users, ChevronDown, ChevronUp, MessageSquare, ExternalLink } from "lucide-react";
 
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
 interface Member {
   id: string;
   name: string;
@@ -42,31 +44,44 @@ interface Cooperative {
   licenseFileName: string;
   permitsFileName: string;
   leadership: {
-    chairperson: string;
-    chairpersonEmail?: string;
-    chairpersonPhone?: string;
-    treasurer: string;
-    treasurerEmail?: string;
-    treasurerPhone?: string;
+    president: string;
+    presidentEmail?: string;
+    presidentPhone?: string;
+    vicePresident: string;
+    vicePresidentEmail?: string;
+    vicePresidentPhone?: string;
     secretary: string;
     secretaryEmail?: string;
     secretaryPhone?: string;
+    sectorOfficer: string;
+    sectorOfficerPhone?: string;
   };
   members: Member[];
-  totalRevenue: string;
+  totalSavings: string;
   healthScore: number;
   documents: CooperativeDocument[];
 }
 
+// Roles are matched exactly so "Vice President" is never mistaken for "President".
+const findLeader = (leadership: any[], role: string) =>
+  leadership.find((l: any) => l.role?.trim().toLowerCase() === role);
+
 function mapApiCooperative(raw: any, membershipSize?: number, composition: Cooperative["composition"] = "Mixed"): Cooperative {
+  const leadership: any[] = Array.isArray(raw.leadership) ? raw.leadership : [];
+  const president = findLeader(leadership, "president");
+  const vicePresident = findLeader(leadership, "vice president");
+  const secretary = findLeader(leadership, "secretary");
+  const sectorOfficer = findLeader(leadership, "sector cooperative officer");
+  const totalSavings = Number(raw.total_savings ?? 0);
+
   return {
     id: String(raw.id ?? ""),
     name: raw.name ?? "",
     sector: raw.sector ?? "",
     district: raw.address ?? "Gasabo District",
-    type: raw.sector ?? "",
+    type: raw.type ?? "",
     registrationNumber: raw.registration_number ?? "",
-    registrationDate: raw.established_date ?? "",
+    registrationDate: raw.registration_date ? String(raw.registration_date).slice(0, 10) : "",
     status: raw.status ?? "Active",
     operatingArea: raw.address ?? "",
     membershipSize: String(membershipSize ?? raw.member_count ?? 0),
@@ -76,13 +91,21 @@ function mapApiCooperative(raw: any, membershipSize?: number, composition: Coope
     licenseFileName: "",
     permitsFileName: "",
     leadership: {
-      chairperson: "",
-      treasurer: "",
-      secretary: "",
+      president: president?.name ?? "",
+      presidentEmail: president?.email ?? "",
+      presidentPhone: president?.phone ?? "",
+      vicePresident: vicePresident?.name ?? "",
+      vicePresidentEmail: vicePresident?.email ?? "",
+      vicePresidentPhone: vicePresident?.phone ?? "",
+      secretary: secretary?.name ?? "",
+      secretaryEmail: secretary?.email ?? "",
+      secretaryPhone: secretary?.phone ?? "",
+      sectorOfficer: sectorOfficer?.name ?? "",
+      sectorOfficerPhone: sectorOfficer?.phone ?? "",
     },
     members: [],
-    totalRevenue: "$0",
-    healthScore: 58,
+    totalSavings: `RWF ${totalSavings.toLocaleString()}`,
+    healthScore: Math.round(Number(raw.health_score ?? 0)),
     documents: [],
   };
 }
@@ -161,12 +184,12 @@ export function Cooperatives() {
     status: "Active",
     operatingArea: "",
     membershipSize: "",
-    chairperson: "",
-    chairpersonEmail: "",
-    chairpersonPhone: "",
-    treasurer: "",
-    treasurerEmail: "",
-    treasurerPhone: "",
+    president: "",
+    presidentEmail: "",
+    presidentPhone: "",
+    vicePresident: "",
+    vicePresidentEmail: "",
+    vicePresidentPhone: "",
     secretary: "",
     secretaryEmail: "",
     secretaryPhone: "",
@@ -175,6 +198,25 @@ export function Cooperatives() {
     licenseFileName: "",
     permitsFileName: "",
   });
+  const [registrationFiles, setRegistrationFiles] = useState<{
+    bylaws: File | null;
+    constitution: File | null;
+    license: File | null;
+    permits: File | null;
+  }>({ bylaws: null, constitution: null, license: null, permits: null });
+
+  const uploadRegistrationDocument = async (cooperativeId: string, type: string, file: File) => {
+    const token = localStorage.getItem("coopinsight_access_token");
+    const body = new FormData();
+    body.append("file", file);
+    body.append("name", file.name);
+    body.append("type", type);
+    await fetch(`${BASE_URL}/cooperatives/${cooperativeId}/documents`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body,
+    });
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -188,9 +230,9 @@ export function Cooperatives() {
       "registrationDate",
       "operatingArea",
       "membershipSize",
-      "chairperson",
-      "treasurer",
-      "secretary",
+      // Only the president is mandatory — the vice president and secretary posts
+      // are genuinely vacant in some cooperatives on the RCA register.
+      "president",
       "bylawsFileName",
       "constitutionFileName",
       "licenseFileName",
@@ -214,16 +256,46 @@ export function Cooperatives() {
 
     setFormSubmitting(true);
     try {
-      await api.post("/cooperatives", {
+      const createRes = await api.post<{ data: { id: string } }>("/cooperatives", {
         name: formData.name,
+        type: formData.type,
         registration_number: formData.registrationNumber,
         sector: formData.sector,
         status: formData.status,
         member_count: Number(formData.membershipSize),
-        established_date: formData.registrationDate,
+        registration_date: formData.registrationDate,
         address: formData.operatingArea,
         description: `Type: ${formData.type}`,
       });
+      const newCoopId = (createRes as any).data?.id;
+
+      if (newCoopId) {
+        const leadershipEntries: Array<[string, string, string, string]> = [
+          [formData.president, "President", formData.presidentEmail, formData.presidentPhone],
+          [formData.vicePresident, "Vice President", formData.vicePresidentEmail, formData.vicePresidentPhone],
+          [formData.secretary, "Secretary", formData.secretaryEmail, formData.secretaryPhone],
+        ];
+        await Promise.all(
+          leadershipEntries
+            .filter(([name]) => name)
+            .map(([name, role, email, phone]) =>
+              api.post(`/cooperatives/${newCoopId}/leadership`, { name, role, email, phone })
+            )
+        );
+
+        const fileUploads: Array<[string, File | null]> = [
+          ["bylaws", registrationFiles.bylaws],
+          ["constitution", registrationFiles.constitution],
+          ["license", registrationFiles.license],
+          ["permit", registrationFiles.permits],
+        ];
+        await Promise.all(
+          fileUploads
+            .filter(([, file]) => file)
+            .map(([type, file]) => uploadRegistrationDocument(newCoopId, type, file as File))
+        );
+      }
+
       await fetchCooperatives();
       setFormData({
         name: "",
@@ -235,12 +307,12 @@ export function Cooperatives() {
         status: "Active",
         operatingArea: "",
         membershipSize: "",
-        chairperson: "",
-        chairpersonEmail: "",
-        chairpersonPhone: "",
-        treasurer: "",
-        treasurerEmail: "",
-        treasurerPhone: "",
+        president: "",
+        presidentEmail: "",
+        presidentPhone: "",
+        vicePresident: "",
+        vicePresidentEmail: "",
+        vicePresidentPhone: "",
         secretary: "",
         secretaryEmail: "",
         secretaryPhone: "",
@@ -249,6 +321,7 @@ export function Cooperatives() {
         licenseFileName: "",
         permitsFileName: "",
       });
+      setRegistrationFiles({ bylaws: null, constitution: null, license: null, permits: null });
       setShowForm(false);
     } catch (err: any) {
       setFormError(err?.response?.data?.message ?? err?.message ?? "Failed to register cooperative.");
@@ -409,30 +482,30 @@ export function Cooperatives() {
 
             <div className="grid gap-4 md:grid-cols-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Chairperson</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">President</label>
                 <input
                   type="text"
-                  value={formData.chairperson}
-                  onChange={(e) => setFormData({ ...formData, chairperson: e.target.value })}
+                  value={formData.president}
+                  onChange={(e) => setFormData({ ...formData, president: e.target.value })}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
                   required
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Chairperson Email</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">President Email</label>
                 <input
                   type="email"
-                  value={formData.chairpersonEmail}
-                  onChange={(e) => setFormData({ ...formData, chairpersonEmail: e.target.value })}
+                  value={formData.presidentEmail}
+                  onChange={(e) => setFormData({ ...formData, presidentEmail: e.target.value })}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Chairperson Phone</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">President Phone</label>
                 <input
                   type="tel"
-                  value={formData.chairpersonPhone}
-                  onChange={(e) => setFormData({ ...formData, chairpersonPhone: e.target.value })}
+                  value={formData.presidentPhone}
+                  onChange={(e) => setFormData({ ...formData, presidentPhone: e.target.value })}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
                 />
               </div>
@@ -440,30 +513,30 @@ export function Cooperatives() {
 
             <div className="grid gap-4 md:grid-cols-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Treasurer</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Vice President</label>
                 <input
                   type="text"
-                  value={formData.treasurer}
-                  onChange={(e) => setFormData({ ...formData, treasurer: e.target.value })}
+                  value={formData.vicePresident}
+                  onChange={(e) => setFormData({ ...formData, vicePresident: e.target.value })}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
                   required
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Treasurer Email</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Vice President Email</label>
                 <input
                   type="email"
-                  value={formData.treasurerEmail}
-                  onChange={(e) => setFormData({ ...formData, treasurerEmail: e.target.value })}
+                  value={formData.vicePresidentEmail}
+                  onChange={(e) => setFormData({ ...formData, vicePresidentEmail: e.target.value })}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Treasurer Phone</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Vice President Phone</label>
                 <input
                   type="tel"
-                  value={formData.treasurerPhone}
-                  onChange={(e) => setFormData({ ...formData, treasurerPhone: e.target.value })}
+                  value={formData.vicePresidentPhone}
+                  onChange={(e) => setFormData({ ...formData, vicePresidentPhone: e.target.value })}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
                 />
               </div>
@@ -508,7 +581,10 @@ export function Cooperatives() {
                   accept=".pdf,.doc,.docx"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
-                    if (file) setFormData({ ...formData, bylawsFileName: file.name });
+                    if (file) {
+                      setFormData({ ...formData, bylawsFileName: file.name });
+                      setRegistrationFiles((prev) => ({ ...prev, bylaws: file }));
+                    }
                   }}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm text-gray-600"
                   required
@@ -521,7 +597,10 @@ export function Cooperatives() {
                   accept=".pdf,.doc,.docx"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
-                    if (file) setFormData({ ...formData, constitutionFileName: file.name });
+                    if (file) {
+                      setFormData({ ...formData, constitutionFileName: file.name });
+                      setRegistrationFiles((prev) => ({ ...prev, constitution: file }));
+                    }
                   }}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm text-gray-600"
                   required
@@ -534,7 +613,10 @@ export function Cooperatives() {
                   accept=".pdf,.doc,.docx"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
-                    if (file) setFormData({ ...formData, licenseFileName: file.name });
+                    if (file) {
+                      setFormData({ ...formData, licenseFileName: file.name });
+                      setRegistrationFiles((prev) => ({ ...prev, license: file }));
+                    }
                   }}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm text-gray-600"
                   required
@@ -547,7 +629,10 @@ export function Cooperatives() {
                   accept=".pdf,.doc,.docx"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
-                    if (file) setFormData({ ...formData, permitsFileName: file.name });
+                    if (file) {
+                      setFormData({ ...formData, permitsFileName: file.name });
+                      setRegistrationFiles((prev) => ({ ...prev, permits: file }));
+                    }
                   }}
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm text-gray-600"
                   required
@@ -619,8 +704,8 @@ export function Cooperatives() {
                     </div>
                     <div className="flex items-center gap-6">
                       <div className="text-right">
-                        <p className="text-sm text-gray-500">Revenue</p>
-                        <p className="text-lg font-semibold text-gray-900">{coop.totalRevenue}</p>
+                        <p className="text-sm text-gray-500">Member savings</p>
+                        <p className="text-lg font-semibold text-gray-900">{coop.totalSavings}</p>
                       </div>
                       <div className="text-right">
                         <p className="text-sm text-gray-500">Health Score</p>
@@ -731,22 +816,27 @@ export function Cooperatives() {
                           <h4 className="text-lg font-semibold text-gray-900 mb-4">Leadership & Contact</h4>
                           <div className="space-y-4 text-sm text-gray-700">
                             <div className="grid gap-2">
-                              <p className="text-sm text-gray-500">Chairperson</p>
-                              <p className="font-medium text-gray-900">{coop.leadership.chairperson || "—"}</p>
-                              {coop.leadership.chairpersonEmail && <p className="text-gray-500">{coop.leadership.chairpersonEmail}</p>}
-                              {coop.leadership.chairpersonPhone && <p className="text-gray-500">{coop.leadership.chairpersonPhone}</p>}
+                              <p className="text-sm text-gray-500">President</p>
+                              <p className="font-medium text-gray-900">{coop.leadership.president || "—"}</p>
+                              {coop.leadership.presidentEmail && <p className="text-gray-500">{coop.leadership.presidentEmail}</p>}
+                              {coop.leadership.presidentPhone && <p className="text-gray-500">{coop.leadership.presidentPhone}</p>}
                             </div>
                             <div className="grid gap-2">
-                              <p className="text-sm text-gray-500">Treasurer</p>
-                              <p className="font-medium text-gray-900">{coop.leadership.treasurer || "—"}</p>
-                              {coop.leadership.treasurerEmail && <p className="text-gray-500">{coop.leadership.treasurerEmail}</p>}
-                              {coop.leadership.treasurerPhone && <p className="text-gray-500">{coop.leadership.treasurerPhone}</p>}
+                              <p className="text-sm text-gray-500">Vice President</p>
+                              <p className="font-medium text-gray-900">{coop.leadership.vicePresident || "—"}</p>
+                              {coop.leadership.vicePresidentEmail && <p className="text-gray-500">{coop.leadership.vicePresidentEmail}</p>}
+                              {coop.leadership.vicePresidentPhone && <p className="text-gray-500">{coop.leadership.vicePresidentPhone}</p>}
                             </div>
                             <div className="grid gap-2">
                               <p className="text-sm text-gray-500">Secretary</p>
-                              <p className="font-medium text-gray-900">{coop.leadership.secretary || "—"}</p>
+                              <p className="font-medium text-gray-900">{coop.leadership.secretary || "Vacant"}</p>
                               {coop.leadership.secretaryEmail && <p className="text-gray-500">{coop.leadership.secretaryEmail}</p>}
                               {coop.leadership.secretaryPhone && <p className="text-gray-500">{coop.leadership.secretaryPhone}</p>}
+                            </div>
+                            <div className="grid gap-2 border-t border-gray-100 pt-4">
+                              <p className="text-sm text-gray-500">Sector Cooperative Officer</p>
+                              <p className="font-medium text-gray-900">{coop.leadership.sectorOfficer || "—"}</p>
+                              {coop.leadership.sectorOfficerPhone && <p className="text-gray-500">{coop.leadership.sectorOfficerPhone}</p>}
                             </div>
                           </div>
                         </div>

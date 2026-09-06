@@ -28,8 +28,6 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  AreaChart,
-  Area,
   Legend,
 } from "recharts";
 
@@ -780,12 +778,12 @@ function MemberDashboard({ user, announcements }: { user: any; announcements: Sy
   );
 }
 
+// financialTrends and notifications are part of DashboardDataProps but the admin
+// view does not render them; they are consumed by the manager/member dashboards.
 function AdminDashboard({
   announcements,
   stats,
   activities,
-  financialTrends,
-  notifications,
   loading,
   error,
 }: { announcements: SystemAnnouncement[] } & DashboardDataProps) {

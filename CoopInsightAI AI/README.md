@@ -57,6 +57,8 @@ without a code change.
 | GET | `/benchmarks` | Peer comparison for one cooperative |
 | GET | `/rankings` | District league table for a month |
 | GET | `/rankings/trend` | Rank movement over recent months |
+| GET | `/monthly-audit` | Functionality and engagement audit of every cooperative, with the field-visit list |
+| GET | `/monthly-audit/{cooperative_id}` | One cooperative's row, with district context |
 | GET | `/model-performance` | What is fitted, and how it scored |
 | POST | `/retrain` | Refit one model or all of them |
 | GET | `/data-volume` | Row counts behind every fit |
@@ -185,6 +187,62 @@ and the response says which was used — "above average" means something differe
 against 2 peers than against 20. Position is reported as a **percentile**, which
 stays meaningful on small samples.
 
+### Monthly functionality audit — `app/analytics/monthly_audit.py`
+
+The problem this exists for: **cooperatives rarely announce that they have
+stopped working.** They go quiet. The meetings stop, the contributions stop,
+nobody files anything, and a year and a half later a sector officer discovers a
+cooperative that has not traded since the year before last. By then the members
+have lost their savings.
+
+Two indices, computed for every cooperative in the district for a given month:
+
+| | Components |
+|---|---|
+| **Functionality** | trading (35%), meeting and governance (25%), record-keeping and a valid permit (20%), membership stability (20%) |
+| **Engagement** | share of members contributing (45%) and attending (35%) over the last quarter, and whether anything was held to attend (20%) |
+
+They combine 60/40 — a cooperative can have engaged members and still be
+finished, but one that has stopped operating is finished regardless — into a band
+of *healthy · monitor · at risk · critical*. The output is not the band. The
+output is a **ranked list of cooperatives to go and visit**, each with the reasons
+it was flagged and what the officer should do about it.
+
+Deliberately a defined index rather than a learned model: there are no labelled
+"this cooperative had failed by March" examples to train against, and a score
+that decides whether somebody drives out to a village has to be explainable to
+that village.
+
+#### Where this one breaks the project's own rule, and why
+
+Everywhere else here, an unmeasurable component is **excluded** from a score
+rather than counted as zero. This audit counts silence against a cooperative,
+because a cooperative that has recorded nothing for six months is precisely what
+it is built to catch — if silence is not a signal, the audit detects nothing.
+
+Three things keep that honest:
+
+* Every row carries **`evidenceQuality`** — the share of components that could be
+  measured from records that exist, rather than inferred from their absence.
+* A row scoring ≤0.4 on that is flagged **`flaggedOnSilenceAlone`**, and the UI
+  labels it: this cooperative may simply not be using the system.
+* The output is a *visit*, not a verdict. Nothing is marked as failed; somebody
+  is sent to look.
+
+#### The default period is the last *completed* month
+
+Run on the 8th, an audit of the month in progress reports that every cooperative
+has stopped trading, because most of them trade later in the month — it would
+manufacture a district-wide crisis every time the page was opened early. The
+default is the last complete month, or the last month that holds any data if that
+is earlier. An explicit in-progress period is allowed but returns a warning in
+`note` and `periodComplete: false`. `tests/test_monthly_audit.py` pins this,
+including the January roll-back into the previous year.
+
+`latest_period_with_data()` also excludes future-dated rows, because the
+activities calendar carries meetings planned weeks ahead and an unbounded `MAX`
+pointed the audit at a month that had not happened yet.
+
 ---
 
 ## The model registry
@@ -203,6 +261,7 @@ alongside — it does not claim an "accuracy" it never measured:
 | `member_engagement_scorer` | `coverage` | It is a defined index, not an estimate. Coverage tells you if it means anything yet. |
 | `peer_benchmarker` | `coverage` | Positional comparison; nothing is learned. |
 | `district_league` | `separation` | Whether the composite actually distinguishes cooperatives. A scheme scoring everyone alike reads near 0. |
+| `cooperative_functionality_auditor` | `evidence_quality` | Not an accuracy: the share of each band resting on records that exist rather than on their absence. It is the number that says whether to trust this month's visit list. |
 
 A fit that cannot honestly be made is saved as `insufficient_data` with an
 explanation, rather than as a success with a meaningless number.
@@ -222,25 +281,37 @@ Last fit (`POST /retrain`):
 
 | Model | Metric | Value |
 |---|---|---|
-| `anomaly_detector` | flag_rate | 0.0101 |
-| `savings_forecaster` | accuracy | 0.9427 |
+| `anomaly_detector` | flag_rate | 0.0073 |
+| `savings_forecaster` | accuracy | 0.9429 |
 | `member_engagement_scorer` | coverage | 1.00 |
 | `peer_benchmarker` | coverage | 1.00 |
-| `district_league` | separation | 0.8271 |
+| `district_league` | separation | 0.8477 |
+| `cooperative_functionality_auditor` | evidence_quality | 0.9714 |
 
-A ~1% flag rate is what you want from an outlier detector: rare enough to be
-worth an officer's attention. `separation` at 0.83 means the league table
-genuinely distinguishes cooperatives rather than bunching them.
+A sub-1% flag rate is what you want from an outlier detector: rare enough to be
+worth an officer's attention. `separation` at 0.85 means the league table
+genuinely distinguishes cooperatives rather than bunching them. Evidence quality
+at 0.97 means the monthly audit is reading real records for almost every
+component of almost every cooperative — the bands are not being driven by gaps.
 
 ### Demo data caveat
 
 The seed generates each cooperative's monthly trading from a "quality" derived
 from its health score, so cooperatives seeded as well-run genuinely do rank
 higher — the rankings are explainable, but they are not a discovery. Two
-cooperatives (UNITAX, COPCOM) carry one deliberately anomalous transaction each,
-marked `[demo anomaly]` in the description, so anomaly detection has something
-real to find. Replace the seed with real returns and everything recomputes; no
-service change is needed, just `POST /retrain`.
+cooperatives carry one deliberately anomalous transaction each, marked
+`[demo anomaly]` in the description, so anomaly detection has something real to
+find.
+
+For the same reason **one cooperative is seeded as dormant**: its generated
+trading, meetings and contributions stop eight months back and it is left on an
+unconverted temporary permit, so the monthly audit has a genuinely dormant
+cooperative to catch and the visit list is not empty on a fresh install. The seed
+marks it `[demo dormancy]` and records an insight saying so. The cooperative is
+real; that trading gap is not.
+
+Replace the seed with real returns and everything recomputes; no service change
+is needed, just `POST /retrain`.
 
 ---
 
@@ -271,6 +342,7 @@ app/
   registry.py        Fitted params + metrics persistence
   analytics/         The methods
     anomalies.py  forecasting.py  engagement.py  benchmarks.py
+    rankings.py   monthly_audit.py
   routers/           One module per endpoint group
 tests/               Statistical core, no database required
 ```

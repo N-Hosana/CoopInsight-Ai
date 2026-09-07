@@ -31,6 +31,7 @@ KNOWN_MODELS = (
     "member_engagement_scorer",
     "peer_benchmarker",
     "district_league",
+    "cooperative_functionality_auditor",
 )
 
 

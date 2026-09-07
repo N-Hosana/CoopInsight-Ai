@@ -16,6 +16,9 @@ import {
   ShieldQuestion,
   Calculator,
   Wallet,
+  Users,
+  Gavel,
+  CalendarPlus,
 } from "lucide-react";
 
 interface ExitRequest {
@@ -33,12 +36,49 @@ interface ExitRequest {
   preferred_exit_date: string | null;
   savings_instruction: string;
   contact_phone: string | null;
-  status: "pending" | "under_review" | "approved" | "rejected" | "withdrawn";
+  status:
+    | "pending"
+    | "under_review"
+    | "meeting_scheduled"
+    | "meeting_held"
+    | "approved"
+    | "rejected"
+    | "withdrawn";
+  meetings: AssemblyMeeting[];
   response_due_at: string;
   decision_note: string | null;
   decided_by_name: string | null;
   decided_at: string | null;
   created_at: string;
+}
+
+/** The general assembly convened to decide one removal request. */
+interface AssemblyMeeting {
+  id: string;
+  scheduledFor: string;
+  location: string | null;
+  agenda: string;
+  status: "scheduled" | "held" | "cancelled";
+  membersEligible: number | null;
+  membersPresent: number | null;
+  quorumRequired: number | null;
+  quorumMet: boolean | null;
+  votesFor: number | null;
+  votesAgainst: number | null;
+  votesAbstain: number | null;
+  resolution: "approve_exit" | "reject_exit" | "deferred" | null;
+  resolutionNote: string | null;
+  cancellationReason: string | null;
+  convenedByName: string | null;
+  heldAt: string | null;
+  createdAt: string;
+}
+
+interface MeetingRules {
+  minimumNoticeDays: number;
+  quorumFraction: number;
+  majorityFraction: number;
+  explanation?: string;
 }
 
 interface MemberRecord {
@@ -67,13 +107,24 @@ const SAVINGS_LABELS: Record<string, string> = {
   no_savings_held: "I hold no savings with the cooperative",
 };
 
+const RESOLUTION_LABELS: Record<string, string> = {
+  approve_exit: "Release the member",
+  reject_exit: "Refuse the request",
+  deferred: "Deferred to another assembly",
+};
+
 const STATUS_STYLES: Record<string, { label: string; badge: string; Icon: typeof Clock }> = {
   pending: { label: "Awaiting response", badge: "bg-amber-100 text-amber-800", Icon: Clock },
   under_review: { label: "Under review", badge: "bg-blue-100 text-blue-800", Icon: ShieldQuestion },
+  meeting_scheduled: { label: "Assembly called", badge: "bg-indigo-100 text-indigo-800", Icon: Users },
+  meeting_held: { label: "Assembly has voted", badge: "bg-purple-100 text-purple-800", Icon: Gavel },
   approved: { label: "Approved", badge: "bg-green-100 text-green-800", Icon: CheckCircle2 },
   rejected: { label: "Not approved", badge: "bg-red-100 text-red-700", Icon: XCircle },
   withdrawn: { label: "Withdrawn by you", badge: "bg-gray-100 text-gray-700", Icon: Undo2 },
 };
+
+/** Statuses in which a request is still live and being worked. */
+const OPEN_STATUSES = ["pending", "under_review", "meeting_scheduled", "meeting_held"];
 
 const formatDate = (value: string | null) =>
   value ? new Date(value).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "—";
@@ -243,6 +294,111 @@ function SettlementCalculator() {
   );
 }
 
+/**
+ * The general assembly on one request, as both the member and the reviewer see
+ * it: when it sits, whether it was competent, and how the vote went.
+ */
+function MeetingPanel({ meeting }: { meeting: AssemblyMeeting }) {
+  const cast =
+    (meeting.votesFor ?? 0) + (meeting.votesAgainst ?? 0) + (meeting.votesAbstain ?? 0);
+
+  return (
+    <div
+      className={`rounded-xl border px-4 py-4 ${
+        meeting.status === "cancelled"
+          ? "border-gray-200 bg-gray-50"
+          : meeting.status === "held"
+            ? "border-purple-200 bg-purple-50"
+            : "border-indigo-200 bg-indigo-50"
+      }`}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Gavel className="w-4 h-4 text-gray-700" />
+          <p className="font-medium text-gray-900">
+            {meeting.status === "held"
+              ? "General assembly — held"
+              : meeting.status === "cancelled"
+                ? "General assembly — cancelled"
+                : "General assembly called"}
+          </p>
+        </div>
+        <p className="text-sm text-gray-600">
+          {formatDate(meeting.scheduledFor)}
+          {meeting.location && ` · ${meeting.location}`}
+        </p>
+      </div>
+
+      {meeting.status === "cancelled" ? (
+        <p className="mt-2 text-sm text-gray-700">{meeting.cancellationReason}</p>
+      ) : meeting.status === "scheduled" ? (
+        <>
+          <p className="mt-2 text-sm text-gray-700">
+            {meeting.quorumRequired} of {meeting.membersEligible} members must attend for the vote
+            to stand.
+            {meeting.convenedByName && ` Convened by ${meeting.convenedByName}.`}
+          </p>
+          <details className="mt-3">
+            <summary className="cursor-pointer text-sm font-medium text-gray-700">Agenda</summary>
+            <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-gray-700">
+              {meeting.agenda}
+            </pre>
+          </details>
+        </>
+      ) : (
+        <div className="mt-3 space-y-3">
+          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+            <span className="text-gray-700">
+              <span className="font-medium text-gray-900">{meeting.membersPresent}</span> of{" "}
+              {meeting.membersEligible} attended
+            </span>
+            <span className={meeting.quorumMet ? "text-[#2D6A4F]" : "text-red-700"}>
+              {meeting.quorumMet
+                ? `Quorum met (${meeting.quorumRequired} required)`
+                : `Quorum not met (${meeting.quorumRequired} required)`}
+            </span>
+          </div>
+
+          {cast > 0 && (
+            <div>
+              <div className="flex h-3 w-full overflow-hidden rounded-full bg-gray-200">
+                <div
+                  className="bg-[#2D6A4F]"
+                  style={{ width: `${((meeting.votesFor ?? 0) / cast) * 100}%` }}
+                />
+                <div
+                  className="bg-red-500"
+                  style={{ width: `${((meeting.votesAgainst ?? 0) / cast) * 100}%` }}
+                />
+                <div
+                  className="bg-gray-400"
+                  style={{ width: `${((meeting.votesAbstain ?? 0) / cast) * 100}%` }}
+                />
+              </div>
+              <p className="mt-1.5 text-sm text-gray-700">
+                {meeting.votesFor} for · {meeting.votesAgainst} against · {meeting.votesAbstain}{" "}
+                abstained
+              </p>
+            </div>
+          )}
+
+          {meeting.resolution && (
+            <p className="text-sm">
+              <span className="font-medium text-gray-900">Resolution: </span>
+              {RESOLUTION_LABELS[meeting.resolution] ?? meeting.resolution}
+            </p>
+          )}
+          {meeting.resolutionNote && (
+            <p className="rounded-lg bg-white px-3 py-2 text-sm text-gray-700">
+              {meeting.resolutionNote}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   const style = STATUS_STYLES[status] ?? STATUS_STYLES.pending;
   const { Icon } = style;
@@ -300,7 +456,7 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
   }, []);
 
   const openRequest = useMemo(
-    () => requests.find((r) => r.status === "pending" || r.status === "under_review") ?? null,
+    () => requests.find((r) => OPEN_STATUSES.includes(r.status)) ?? null,
     [requests]
   );
   const history = useMemo(() => requests.filter((r) => r.id !== openRequest?.id), [requests, openRequest]);
@@ -488,6 +644,25 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
             </div>
           </dl>
 
+          {openRequest.meetings?.length > 0 && (
+            <div className="mt-5 space-y-3">
+              <p className="text-xs uppercase tracking-wide text-gray-500">
+                The general assembly deciding your request
+              </p>
+              {openRequest.meetings.map((m) => (
+                <MeetingPanel key={m.id} meeting={m} />
+              ))}
+            </div>
+          )}
+
+          {openRequest.status === "pending" && (
+            <p className="mt-5 rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-700">
+              Your request has not yet been put to a general assembly. Members — not the office —
+              decide whether one of their own is released, so the cooperative must call an assembly
+              before it can answer you.
+            </p>
+          )}
+
           <div className="mt-6 border-t border-gray-200 pt-4">
             <Button variant="outline" onClick={() => handleWithdraw(openRequest.id)}>
               <span className="flex items-center gap-2">
@@ -495,6 +670,9 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
                 Withdraw this request
               </span>
             </Button>
+            <p className="text-xs text-gray-500 mt-2">
+              Withdrawing also cancels any assembly called to decide it.
+            </p>
           </div>
         </Card>
       )}
@@ -504,8 +682,10 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
         <Card className="p-6">
           <h3 className="text-lg font-semibold text-gray-900">Request removal from {user.cooperativeName}</h3>
           <p className="text-sm text-gray-600 mt-1">
-            Tell the cooperative why you want to leave. They have {responseWindowDays} days to respond, and you will be
-            notified of the outcome here and in your notifications.
+            Tell the cooperative why you want to leave. Your reasons are read out to a general assembly of the
+            members, who vote on whether to release you — the office cannot decide it alone. The cooperative has{" "}
+            {responseWindowDays} days to answer, and you will be notified here and in your notifications at every
+            step.
           </p>
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-5">
@@ -628,22 +808,118 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
 
 function ReviewerView() {
   const [requests, setRequests] = useState<ExitRequest[]>([]);
+  const [rules, setRules] = useState<MeetingRules | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  // Convening an assembly, and minuting what it resolved.
+  const [conveningFor, setConveningFor] = useState<string | null>(null);
+  const [convene, setConvene] = useState({ scheduledFor: "", location: "", agenda: "" });
+  const [recordingFor, setRecordingFor] = useState<string | null>(null);
+  const [vote, setVote] = useState({
+    membersPresent: "",
+    votesFor: "",
+    votesAgainst: "",
+    votesAbstain: "",
+    resolution: "",
+    resolutionNote: "",
+  });
+
   const fetchRequests = async () => {
     setLoading(true);
     setError("");
     try {
-      const data = await api.get<{ data: ExitRequest[] }>("/membership/exit-requests");
+      const data = await api.get<{ data: ExitRequest[]; meetingRules: MeetingRules }>(
+        "/membership/exit-requests"
+      );
       setRequests(data.data ?? []);
+      setRules(data.meetingRules ?? null);
     } catch (err: any) {
       setError(err?.message ?? "Failed to load removal requests.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const callAssembly = async (requestId: string) => {
+    if (!convene.scheduledFor) return setError("Choose when the assembly will sit.");
+    if (!convene.location.trim()) return setError("Say where the assembly will sit.");
+    setBusyId(requestId);
+    setError("");
+    try {
+      const res = await api.post<{ message: string }>(
+        `/membership/exit-requests/${requestId}/meeting`,
+        {
+          scheduledFor: new Date(convene.scheduledFor).toISOString(),
+          location: convene.location.trim(),
+          agenda: convene.agenda.trim() || undefined,
+        }
+      );
+      setMessage(res.message);
+      setConveningFor(null);
+      setConvene({ scheduledFor: "", location: "", agenda: "" });
+      await fetchRequests();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not call the assembly.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const recordOutcome = async (requestId: string, meetingId: string) => {
+    if (!vote.resolution) return setError("What did the assembly resolve?");
+    setBusyId(requestId);
+    setError("");
+    try {
+      const res = await api.patch<{ message: string }>(
+        `/membership/exit-requests/${requestId}/meeting/${meetingId}`,
+        {
+          membersPresent: Number(vote.membersPresent || 0),
+          votesFor: Number(vote.votesFor || 0),
+          votesAgainst: Number(vote.votesAgainst || 0),
+          votesAbstain: Number(vote.votesAbstain || 0),
+          resolution: vote.resolution,
+          resolutionNote: vote.resolutionNote.trim() || undefined,
+        }
+      );
+      setMessage(res.message);
+      setRecordingFor(null);
+      setVote({
+        membersPresent: "",
+        votesFor: "",
+        votesAgainst: "",
+        votesAbstain: "",
+        resolution: "",
+        resolutionNote: "",
+      });
+      await fetchRequests();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not record the meeting.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const cancelAssembly = async (requestId: string, meetingId: string) => {
+    const reason = window.prompt(
+      "Why is the assembly being cancelled? The members were already notified."
+    );
+    if (!reason?.trim()) return;
+    setBusyId(requestId);
+    try {
+      const res = await api.patch<{ message: string }>(
+        `/membership/exit-requests/${requestId}/meeting/${meetingId}/cancel`,
+        { reason: reason.trim() }
+      );
+      setMessage(res.message);
+      await fetchRequests();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not cancel the assembly.");
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -674,8 +950,8 @@ function ReviewerView() {
     }
   };
 
-  const open = requests.filter((r) => r.status === "pending" || r.status === "under_review");
-  const closed = requests.filter((r) => r.status !== "pending" && r.status !== "under_review");
+  const open = requests.filter((r) => OPEN_STATUSES.includes(r.status));
+  const closed = requests.filter((r) => !OPEN_STATUSES.includes(r.status));
 
   if (loading) return <p className="text-gray-500">Loading removal requests…</p>;
 
@@ -754,34 +1030,244 @@ function ReviewerView() {
                 </div>
               </dl>
 
-              <div className="mt-5 border-t border-gray-200 pt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Note to the member {r.status === "pending" ? "(required to reject)" : ""}
-                </label>
-                <textarea
-                  rows={2}
-                  value={notes[r.id] ?? ""}
-                  onChange={(e) => setNotes({ ...notes, [r.id]: e.target.value })}
-                  placeholder="Explain the decision, or what the member must do next."
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F] focus:border-transparent"
-                />
-                <div className="flex flex-wrap gap-3 mt-3">
-                  {r.status === "pending" && (
-                    <Button variant="outline" disabled={busyId === r.id} onClick={() => decide(r.id, "under_review")}>
-                      Mark under review
-                    </Button>
-                  )}
-                  <Button variant="primary" disabled={busyId === r.id} onClick={() => decide(r.id, "approved")}>
-                    Approve removal
-                  </Button>
-                  <Button variant="danger" disabled={busyId === r.id} onClick={() => decide(r.id, "rejected")}>
-                    Reject
-                  </Button>
-                </div>
-                <p className="text-xs text-gray-500 mt-2">
-                  Approving removes the member from the register and unlinks their login from the cooperative.
-                </p>
-              </div>
+              {/* ── The assembly ─────────────────────────────────────────── */}
+              {(() => {
+                const meetings = r.meetings ?? [];
+                const scheduled = meetings.find((m) => m.status === "scheduled") ?? null;
+                const held = meetings.find(
+                  (m) => m.status === "held" && m.resolution && m.resolution !== "deferred"
+                );
+
+                return (
+                  <div className="mt-5 border-t border-gray-200 pt-4 space-y-4">
+                    {meetings.length > 0 && (
+                      <div className="space-y-3">
+                        {meetings.map((m) => (
+                          <MeetingPanel key={m.id} meeting={m} />
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Step 1 — call the assembly */}
+                    {!scheduled && !held && (
+                      <div>
+                        {conveningFor !== r.id ? (
+                          <>
+                            <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-900">
+                              Members decide whether one of their own is released. Call a general
+                              assembly before you can answer this request.
+                            </div>
+                            <Button
+                              variant="primary"
+                              className="mt-3"
+                              onClick={() => setConveningFor(r.id)}
+                            >
+                              <span className="flex items-center gap-2">
+                                <CalendarPlus className="w-4 h-4" />
+                                Call a general assembly
+                              </span>
+                            </Button>
+                          </>
+                        ) : (
+                          <div className="space-y-4">
+                            <div className="grid gap-4 sm:grid-cols-2">
+                              <Input
+                                label="When it will sit *"
+                                type="datetime-local"
+                                value={convene.scheduledFor}
+                                onChange={(e) =>
+                                  setConvene({ ...convene, scheduledFor: e.target.value })
+                                }
+                              />
+                              <Input
+                                label="Where *"
+                                value={convene.location}
+                                onChange={(e) =>
+                                  setConvene({ ...convene, location: e.target.value })
+                                }
+                                placeholder="e.g. Cooperative office, Remera"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Agenda (leave blank for the standard agenda)
+                              </label>
+                              <textarea
+                                rows={3}
+                                value={convene.agenda}
+                                onChange={(e) => setConvene({ ...convene, agenda: e.target.value })}
+                                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F]"
+                              />
+                            </div>
+                            <p className="text-xs text-gray-500">
+                              Members must be given at least {rules?.minimumNoticeDays ?? 7} days'
+                              notice. The meeting is added to the activities calendar and every
+                              member is notified.
+                            </p>
+                            <div className="flex flex-wrap gap-3">
+                              <Button
+                                variant="primary"
+                                disabled={busyId === r.id}
+                                onClick={() => callAssembly(r.id)}
+                              >
+                                {busyId === r.id ? "Calling…" : "Call the assembly"}
+                              </Button>
+                              <Button variant="outline" onClick={() => setConveningFor(null)}>
+                                Cancel
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Step 2 — minute what it resolved */}
+                    {scheduled && (
+                      <div>
+                        {recordingFor !== r.id ? (
+                          <div className="flex flex-wrap gap-3">
+                            <Button variant="primary" onClick={() => setRecordingFor(r.id)}>
+                              <span className="flex items-center gap-2">
+                                <Gavel className="w-4 h-4" />
+                                Record what the assembly resolved
+                              </span>
+                            </Button>
+                            <Button
+                              variant="outline"
+                              disabled={busyId === r.id}
+                              onClick={() => cancelAssembly(r.id, scheduled.id)}
+                            >
+                              Cancel the assembly
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="space-y-4">
+                            <div className="grid gap-4 sm:grid-cols-4">
+                              <Input
+                                label="Members present *"
+                                type="number"
+                                min={0}
+                                value={vote.membersPresent}
+                                onChange={(e) =>
+                                  setVote({ ...vote, membersPresent: e.target.value })
+                                }
+                              />
+                              <Input
+                                label="Votes for *"
+                                type="number"
+                                min={0}
+                                value={vote.votesFor}
+                                onChange={(e) => setVote({ ...vote, votesFor: e.target.value })}
+                              />
+                              <Input
+                                label="Votes against *"
+                                type="number"
+                                min={0}
+                                value={vote.votesAgainst}
+                                onChange={(e) => setVote({ ...vote, votesAgainst: e.target.value })}
+                              />
+                              <Input
+                                label="Abstained *"
+                                type="number"
+                                min={0}
+                                value={vote.votesAbstain}
+                                onChange={(e) => setVote({ ...vote, votesAbstain: e.target.value })}
+                              />
+                            </div>
+                            <Select
+                              label="What did the assembly resolve? *"
+                              value={vote.resolution}
+                              onChange={(e) => setVote({ ...vote, resolution: e.target.value })}
+                              options={[
+                                { value: "", label: "Select the resolution…" },
+                                ...Object.entries(RESOLUTION_LABELS).map(([value, label]) => ({
+                                  value,
+                                  label,
+                                })),
+                              ]}
+                            />
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Minute the assembly's reasoning{" "}
+                                {vote.resolution && vote.resolution !== "deferred" ? "*" : ""}
+                              </label>
+                              <textarea
+                                rows={3}
+                                value={vote.resolutionNote}
+                                onChange={(e) =>
+                                  setVote({ ...vote, resolutionNote: e.target.value })
+                                }
+                                placeholder="Why the members decided as they did. The member is entitled to know."
+                                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F]"
+                              />
+                            </div>
+                            <p className="text-xs text-gray-500">
+                              Quorum is {scheduled.quorumRequired} of {scheduled.membersEligible}{" "}
+                              members. Without it the assembly can only defer. A removal carries on
+                              more than {Math.round((rules?.majorityFraction ?? 0.5) * 100)}% of the
+                              votes cast.
+                            </p>
+                            <div className="flex flex-wrap gap-3">
+                              <Button
+                                variant="primary"
+                                disabled={busyId === r.id}
+                                onClick={() => recordOutcome(r.id, scheduled.id)}
+                              >
+                                {busyId === r.id ? "Recording…" : "Record the resolution"}
+                              </Button>
+                              <Button variant="outline" onClick={() => setRecordingFor(null)}>
+                                Cancel
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Step 3 — record the decision the assembly reached */}
+                    {held && (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Note to the member (required to reject)
+                        </label>
+                        <textarea
+                          rows={2}
+                          value={notes[r.id] ?? ""}
+                          onChange={(e) => setNotes({ ...notes, [r.id]: e.target.value })}
+                          placeholder="Communicate the assembly's decision and what happens next."
+                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F] focus:border-transparent"
+                        />
+                        <div className="flex flex-wrap gap-3 mt-3">
+                          {held.resolution === "approve_exit" ? (
+                            <Button
+                              variant="primary"
+                              disabled={busyId === r.id}
+                              onClick={() => decide(r.id, "approved")}
+                            >
+                              Record the removal
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="danger"
+                              disabled={busyId === r.id}
+                              onClick={() => decide(r.id, "rejected")}
+                            >
+                              Record the refusal
+                            </Button>
+                          )}
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2">
+                          The assembly resolved to{" "}
+                          {RESOLUTION_LABELS[held.resolution!]?.toLowerCase()}, so that is the only
+                          decision that can be recorded.{" "}
+                          {held.resolution === "approve_exit" &&
+                            "Recording it removes the member from the register and unlinks their login."}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </Card>
           );
         })
@@ -834,8 +1320,8 @@ export function Membership() {
         <h1 className="text-2xl font-semibold text-gray-900">Membership</h1>
         <p className="text-gray-600 mt-1">
           {isReviewer
-            ? `Removal requests filed by your members. Each one must be answered within ${responseWindowDays} days.`
-            : `Manage your membership, or ask to be removed from your cooperative. Requests are answered within ${responseWindowDays} days.`}
+            ? `Removal requests filed by your members. Each one goes to a general assembly, which votes on whether to release the member, and must be answered within ${responseWindowDays} days.`
+            : `Manage your membership, or ask to be removed from your cooperative. A general assembly of the members decides your request, and the cooperative has ${responseWindowDays} days to answer.`}
         </p>
       </div>
 

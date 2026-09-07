@@ -9,12 +9,26 @@ import {
   DOCUMENT_CRITERIA,
   assessFormation,
 } from "../services/eligibility";
+import {
+  PERMIT_TERMS,
+  DISSOLUTION_AUDIT_CRITERIA,
+  DISSOLUTION_TARGET_DAYS,
+  assessDissolution,
+} from "../services/permits";
+import { issuePermit } from "./permits";
 
 const router = Router();
 router.use(authenticate);
 
 /** How long each level has to act before its step is overdue. */
 export const STAGE_RESPONSE_DAYS = 21;
+
+/**
+ * A dissolution is filed by the cooperative's president, not by any member who
+ * fancies closing it. These are the leadership titles the register uses for that
+ * office; the filer's name is matched against them before the request is taken.
+ */
+const PRESIDENT_TITLES = ["president", "chairperson", "chairman", "chairwoman"];
 
 /** The escalation chain. A request approved at one stage moves to the next. */
 const STAGE_ORDER = ["sector", "district", "rca"] as const;
@@ -79,7 +93,18 @@ const SELECT_REQUEST = `
               'reviewedAt', v.reviewed_at, 'reviewerName', ru.name) ORDER BY v.reviewed_at)
               FROM cooperative_request_reviews v
               JOIN users ru ON ru.id = v.reviewed_by
-             WHERE v.request_id = r.id), '[]') AS reviews
+             WHERE v.request_id = r.id), '[]') AS reviews,
+         COALESCE(
+           (SELECT json_agg(json_build_object(
+              'id', a.id, 'reference', a.reference, 'status', a.status,
+              'recommendation', a.recommendation, 'findings', a.findings,
+              'outcomeNote', a.outcome_note, 'score', a.score,
+              'aiAssessment', a.ai_assessment, 'dueOn', a.due_on,
+              'openedAt', a.opened_at, 'concludedAt', a.concluded_at,
+              'concludedByName', au.name) ORDER BY a.opened_at)
+              FROM rca_audits a
+              LEFT JOIN users au ON au.id = a.concluded_by
+             WHERE a.request_id = r.id), '[]') AS audits
     FROM cooperative_requests r
     JOIN users u ON u.id = r.submitted_by
     LEFT JOIN cooperatives c ON c.id = r.cooperative_id
@@ -132,10 +157,25 @@ router.get("/criteria", (_req: Request, res: Response) => {
     data: {
       formation: FORMATION_CRITERIA,
       dissolution: DISSOLUTION_CRITERIA,
+      dissolutionAudit: DISSOLUTION_AUDIT_CRITERIA,
       thresholds: FORMATION_THRESHOLDS,
       stageResponseDays: STAGE_RESPONSE_DAYS,
+      dissolutionTargetDays: DISSOLUTION_TARGET_DAYS,
       stageOrder: STAGE_ORDER,
       stageLabels: STAGE_LABEL,
+      permitTerms: PERMIT_TERMS,
+      notes: {
+        dissolutionFiler:
+          "A dissolution may only be filed by the cooperative's president, as recorded in its " +
+          "leadership register, or by an administrator acting on the register's behalf.",
+        dissolutionAudit:
+          `Approval at RCA level is blocked until the RCA has audited the grounds. The whole ` +
+          `chain targets ${DISSOLUTION_TARGET_DAYS} days, though a contested case or unsettled ` +
+          "accounts will take longer.",
+        formationPermit:
+          `Final approval registers the cooperative and issues a temporary operating permit ` +
+          `valid for ${PERMIT_TERMS.temporaryYears} year.`,
+      },
     },
   });
 });
@@ -257,6 +297,43 @@ router.post("/dissolution", async (req: Request, res: Response) => {
     }
     const c = coop.rows[0];
 
+    // ── Only the president may ask for the cooperative to be struck off ──────
+    // Dissolution ends the livelihood of everyone on the register, so the filing
+    // is restricted to the office that answers for the cooperative. The check is
+    // by name against the leadership record, because the president is a person on
+    // the register, not a system role. Administrators may file on the register's
+    // behalf — that is how a request from a cooperative with no login gets in.
+    const isAdministrator = ["admin", "generalManager"].includes(actor?.role ?? "");
+    let filedAsRole = "President";
+
+    if (!isAdministrator) {
+      const office = await query(
+        `SELECT role FROM cooperative_leadership
+          WHERE cooperative_id = $1
+            AND (end_date IS NULL OR end_date > CURRENT_DATE)
+            AND LOWER(name) = LOWER($2)`,
+        [targetId, actor?.name ?? ""]
+      );
+      const heldOffice = office.rows
+        .map((r) => String(r.role).toLowerCase())
+        .find((role) => PRESIDENT_TITLES.some((t) => role.includes(t)));
+
+      if (!heldOffice) {
+        return res.status(403).json({
+          success: false,
+          message:
+            `Only the president of ${c.name} may request its dissolution. Your account is not ` +
+            "recorded as holding that office in the cooperative's leadership record. If the " +
+            "leadership record is out of date, ask your sector cooperative officer to correct it.",
+        });
+      }
+      filedAsRole = office.rows.find((r) =>
+        PRESIDENT_TITLES.some((t) => String(r.role).toLowerCase().includes(t))
+      )!.role;
+    } else {
+      filedAsRole = `${actor?.role} filing on behalf of the president`;
+    }
+
     const open = await query(
       `SELECT id FROM cooperative_requests
         WHERE cooperative_id = $1 AND request_type = 'dissolution'
@@ -270,15 +347,22 @@ router.post("/dissolution", async (req: Request, res: Response) => {
       });
     }
 
+    // The whole chain targets two weeks end-to-end, so each stage gets a third of
+    // it rather than the three-week window a formation request enjoys. Formation
+    // is not urgent; a cooperative waiting to be wound up is.
+    const dissolutionStageDays = Math.max(3, Math.floor(DISSOLUTION_TARGET_DAYS / STAGE_ORDER.length));
+
     const reference = await nextReference("dissolution");
     const inserted = await query(
       `INSERT INTO cooperative_requests
          (request_type, reference, submitted_by, contact_name, contact_phone, contact_email,
           sector, cell, village, cooperative_id, dissolution_reason,
           votes_for, votes_against, votes_abstain, outstanding_liabilities, asset_disposal_plan,
-          current_stage, status, response_due_at)
-       VALUES ('dissolution',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-               'sector','pending_sector', NOW() + ($16 || ' days')::interval)
+          filed_as_role, current_stage, status, response_due_at, target_completion_at)
+       VALUES ('dissolution',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+               'sector','pending_sector',
+               NOW() + ($17 || ' days')::interval,
+               NOW() + ($18 || ' days')::interval)
        RETURNING id`,
       [
         reference, req.user!.userId,
@@ -289,21 +373,28 @@ router.post("/dissolution", async (req: Request, res: Response) => {
         votesAgainst != null ? Number(votesAgainst) : null,
         votesAbstain != null ? Number(votesAbstain) : null,
         outstandingLiabilities != null ? Number(outstandingLiabilities) : null,
-        String(assetDisposalPlan).trim(), String(STAGE_RESPONSE_DAYS),
+        String(assetDisposalPlan).trim(), filedAsRole,
+        String(dissolutionStageDays), String(DISSOLUTION_TARGET_DAYS),
       ]
     );
 
     const notified = await notifyStage(
       "sector", c.sector,
       "Cooperative dissolution request",
-      `A request to dissolve ${c.name} (${c.sector} sector) has been filed — ${reference}.`
+      `The president of ${c.name} (${c.sector} sector) has requested its dissolution — ${reference}. ` +
+        `The RCA targets ${DISSOLUTION_TARGET_DAYS} days end-to-end.`
     );
 
     const created = await query(`${SELECT_REQUEST} WHERE r.id = $1`, [inserted.rows[0].id]);
     res.status(201).json({
       success: true,
-      message: `Dissolution request ${reference} submitted to the ${c.sector} sector cooperative officer.`,
+      message:
+        `Dissolution request ${reference} submitted to the ${c.sector} sector cooperative officer. ` +
+        `It escalates to the RCA, which will audit the grounds before the cooperative can be ` +
+        `struck off. Target turnaround is ${DISSOLUTION_TARGET_DAYS} days, though a contested ` +
+        "case or unsettled accounts will take longer.",
       data: created.rows[0],
+      targetDays: DISSOLUTION_TARGET_DAYS,
       notifiedOfficers: notified,
     });
   } catch (err) {
@@ -511,10 +602,233 @@ router.post("/:id/assess", async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /:id/audit ──────────────────────────────────────────────────────────
+// The RCA opens its audit of a dissolution request.
+//
+// This is the step that stops a cooperative being closed on a president's word.
+// The audit checks that the members actually resolved on it, that the money is
+// accounted for, and that a cooperative which is still trading is not being
+// abandoned. Only once it concludes may the RCA approve the strike-off.
+router.post("/:id/audit", async (req: Request, res: Response) => {
+  try {
+    const actor = await loadActor(req.user!.userId);
+    if (!actor) return res.status(401).json({ success: false, message: "Not authenticated" });
+    const stage = reviewerStage(actor);
+    if (stage !== "rca" && stage !== "any") {
+      return res.status(403).json({
+        success: false,
+        message: "Only the RCA audits a dissolution request.",
+      });
+    }
+
+    const found = await query(
+      `SELECT r.*, c.name AS cooperative_name FROM cooperative_requests r
+         LEFT JOIN cooperatives c ON c.id = r.cooperative_id WHERE r.id = $1`,
+      [req.params.id]
+    );
+    if (found.rowCount === 0) {
+      return res.status(404).json({ success: false, message: "Request not found" });
+    }
+    const r = found.rows[0];
+    if (r.request_type !== "dissolution") {
+      return res.status(400).json({
+        success: false,
+        message: "Only dissolution requests carry an RCA audit.",
+      });
+    }
+    if (!String(r.status).startsWith("pending")) {
+      return res.status(409).json({ success: false, message: `This request is already ${r.status}.` });
+    }
+
+    const open = await query(
+      `SELECT reference FROM rca_audits WHERE request_id = $1 AND status IN ('scheduled','in_progress')`,
+      [r.id]
+    );
+    if ((open.rowCount ?? 0) > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Audit ${open.rows[0].reference} is already open on this request.`,
+      });
+    }
+
+    const facts = await gatherDissolutionFacts(r);
+    const assessment = assessDissolution(facts);
+
+    const year = new Date().getFullYear();
+    const seq = await query(
+      `SELECT COUNT(*) AS n FROM rca_audits WHERE EXTRACT(YEAR FROM created_at) = $1`,
+      [year]
+    );
+    const reference = `AUD/${year}/${String(parseInt(seq.rows[0].n, 10) + 1).padStart(4, "0")}`;
+
+    const inserted = await query(
+      `INSERT INTO rca_audits
+         (reference, audit_type, cooperative_id, request_id, status, due_on,
+          opened_by, ai_assessment, score)
+       VALUES ($1,'dissolution',$2,$3,'in_progress',
+               COALESCE($4::date, CURRENT_DATE + 7), $5, $6, $7)
+       RETURNING id`,
+      [
+        reference,
+        r.cooperative_id,
+        r.id,
+        r.target_completion_at ? new Date(r.target_completion_at).toISOString().slice(0, 10) : null,
+        actor.id,
+        JSON.stringify({ facts, assessment }),
+        assessment.score,
+      ]
+    );
+
+    await notifyApplicant(
+      r.submitted_by,
+      "RCA audit opened on your dissolution request",
+      `The RCA has opened audit ${reference} on ${r.reference}. An officer will verify the ` +
+        "assembly resolution, the outstanding liabilities and the asset disposal plan before a " +
+        "decision is made."
+    );
+
+    res.status(201).json({
+      success: true,
+      message: `RCA audit ${reference} opened on ${r.reference}.`,
+      data: { id: inserted.rows[0].id, reference, facts, assessment },
+      criteria: DISSOLUTION_AUDIT_CRITERIA,
+    });
+  } catch (err) {
+    console.error("POST /cooperative-requests/:id/audit error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── PATCH /:id/audit ─────────────────────────────────────────────────────────
+// Conclude the RCA audit. The recommendation does not itself dissolve anything —
+// the officer still records the decision below — but approval is refused until
+// this has been done.
+router.patch("/:id/audit", async (req: Request, res: Response) => {
+  try {
+    const actor = await loadActor(req.user!.userId);
+    if (!actor) return res.status(401).json({ success: false, message: "Not authenticated" });
+    const stage = reviewerStage(actor);
+    if (stage !== "rca" && stage !== "any") {
+      return res.status(403).json({ success: false, message: "Only the RCA concludes this audit." });
+    }
+
+    const { recommendation, findings, outcomeNote } = req.body;
+    if (!["allow_dissolution", "refuse_dissolution"].includes(recommendation)) {
+      return res.status(400).json({
+        success: false,
+        message: "recommendation must be allow_dissolution or refuse_dissolution",
+      });
+    }
+    if (!findings || String(findings).trim().length < 20) {
+      return res.status(400).json({
+        success: false,
+        message: "Record what the audit found, in at least 20 characters.",
+      });
+    }
+
+    const audit = await query(
+      `SELECT * FROM rca_audits
+        WHERE request_id = $1 AND audit_type = 'dissolution' AND status IN ('scheduled','in_progress')
+        ORDER BY opened_at DESC LIMIT 1`,
+      [req.params.id]
+    );
+    if (audit.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No open RCA audit was found on this request.",
+      });
+    }
+
+    await query(
+      `UPDATE rca_audits
+          SET status = $1, recommendation = $2, findings = $3, outcome_note = $4,
+              concluded_by = $5, concluded_at = NOW(), updated_at = NOW()
+        WHERE id = $6`,
+      [
+        recommendation === "allow_dissolution" ? "passed" : "failed",
+        recommendation,
+        String(findings).trim(),
+        outcomeNote ? String(outcomeNote).trim() : null,
+        actor.id,
+        audit.rows[0].id,
+      ]
+    );
+
+    res.json({
+      success: true,
+      message:
+        recommendation === "allow_dissolution"
+          ? "Audit concluded: the grounds hold. Record the decision to strike the cooperative off."
+          : "Audit concluded: the grounds do not hold. Reject the request, giving the findings as the reason.",
+      data: { recommendation, findings: String(findings).trim() },
+    });
+  } catch (err) {
+    console.error("PATCH /cooperative-requests/:id/audit error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+/**
+ * Assembles what the dissolution audit scores against. Kept next to the audit
+ * endpoints rather than in the rules service so the SQL stays with the other
+ * request queries, and the rules stay pure and testable.
+ */
+async function gatherDissolutionFacts(r: any) {
+  const [members, finances, income, support] = await Promise.all([
+    query(
+      `SELECT COUNT(*) AS n FROM members WHERE cooperative_id = $1 AND deleted_at IS NULL`,
+      [r.cooperative_id]
+    ),
+    // Bounded to the last twelve *complete* calendar months. A rolling window
+    // from today's date straddles thirteen of them, which is how a count meant
+    // to be "out of 12" comes back as 13.
+    query(
+      `SELECT
+         COALESCE(SUM(amount) FILTER (WHERE type = 'income'), 0)  AS income,
+         COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0) AS expense
+         FROM transactions
+        WHERE cooperative_id = $1 AND status = 'completed'
+          AND date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '12 months'
+          AND date <  DATE_TRUNC('month', CURRENT_DATE)`,
+      [r.cooperative_id]
+    ),
+    query(
+      `SELECT COUNT(DISTINCT DATE_TRUNC('month', date)) AS n FROM transactions
+        WHERE cooperative_id = $1 AND status = 'completed' AND type = 'income'
+          AND date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '12 months'
+          AND date <  DATE_TRUNC('month', CURRENT_DATE)`,
+      [r.cooperative_id]
+    ),
+    // Was anything tried before accepting that the cooperative should close?
+    query(
+      `SELECT
+         (SELECT COUNT(*) FROM cooperative_field_visits
+           WHERE cooperative_id = $1 AND status = 'completed') AS visits,
+         (SELECT COUNT(*) FROM funding_requests
+           WHERE cooperative_id = $1) AS funding_requests`,
+      [r.cooperative_id]
+    ),
+  ]);
+
+  return {
+    votesFor: r.votes_for != null ? Number(r.votes_for) : null,
+    votesAgainst: r.votes_against != null ? Number(r.votes_against) : null,
+    votesAbstain: r.votes_abstain != null ? Number(r.votes_abstain) : null,
+    memberCount: parseInt(members.rows[0].n, 10),
+    reasonLength: String(r.dissolution_reason ?? "").trim().length,
+    liabilitiesDeclared: r.outstanding_liabilities != null,
+    assetPlanLength: String(r.asset_disposal_plan ?? "").trim().length,
+    recentSurplus: Number(finances.rows[0].income) - Number(finances.rows[0].expense),
+    monthsWithIncome: parseInt(income.rows[0].n, 10),
+    supportAttempts:
+      parseInt(support.rows[0].visits, 10) + parseInt(support.rows[0].funding_requests, 10),
+  };
+}
+
 // ─── PATCH /:id/decision ──────────────────────────────────────────────────────
 // One level's yes/no. Approving at sector sends it to district, at district to
-// RCA, and at RCA it takes effect: a formation creates the cooperative, a
-// dissolution closes it.
+// RCA, and at RCA it takes effect: a formation registers the cooperative and
+// issues its first permit, a dissolution strikes it off.
 router.patch("/:id/decision", async (req: Request, res: Response) => {
   try {
     const actor = await loadActor(req.user!.userId);
@@ -566,6 +880,38 @@ router.patch("/:id/decision", async (req: Request, res: Response) => {
       });
     }
 
+    // ── A dissolution is not decided at RCA level until the audit has run ────
+    const finalStage = STAGE_ORDER.indexOf(currentStage) === STAGE_ORDER.length - 1;
+    if (r.request_type === "dissolution" && finalStage && decision !== "returned") {
+      const audit = await query(
+        `SELECT reference, status, recommendation, findings FROM rca_audits
+          WHERE request_id = $1 AND audit_type = 'dissolution'
+            AND status IN ('passed','failed')
+          ORDER BY concluded_at DESC LIMIT 1`,
+        [r.id]
+      );
+      if (audit.rowCount === 0) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "A cooperative cannot be struck off before the RCA has audited the grounds. " +
+            "Open the audit on this request, conclude it, then record the decision.",
+          requiresAudit: true,
+        });
+      }
+      const concluded = audit.rows[0];
+      const allows = concluded.recommendation === "allow_dissolution";
+      if (decision === "approved" && !allows) {
+        return res.status(409).json({
+          success: false,
+          message:
+            `Audit ${concluded.reference} found the grounds do not hold, so the dissolution ` +
+            "cannot be approved. Reject the request, or reopen the audit.",
+          auditRecommendation: concluded.recommendation,
+        });
+      }
+    }
+
     await query(
       `INSERT INTO cooperative_request_reviews (request_id, stage, decision, note, reviewed_by)
        VALUES ($1,$2,$3,$4,$5)`,
@@ -576,6 +922,7 @@ router.patch("/:id/decision", async (req: Request, res: Response) => {
     let newStage = currentStage as Stage | "closed";
     let outcomeMessage = "";
     let createdCooperativeId: string | null = null;
+    let issuedPermit: { id: string; permitNumber: string; expiresOn: string } | null = null;
 
     if (decision === "rejected") {
       newStatus = "rejected";
@@ -617,7 +964,32 @@ router.patch("/:id/decision", async (req: Request, res: Response) => {
             ]
           );
           createdCooperativeId = created.rows[0]?.id ?? null;
-          outcomeMessage = `${r.reference} has been approved by the RCA. ${r.proposed_name} is now on the register.`;
+
+          // Registration and the first permit are the same act. A cooperative
+          // must never sit on the register with no licence to operate, so the
+          // one-year temporary permit is issued here rather than left to a
+          // separate step somebody can forget.
+          if (createdCooperativeId) {
+            issuedPermit = await issuePermit({
+              cooperativeId: createdCooperativeId,
+              permitType: "temporary",
+              termYears: PERMIT_TERMS.temporaryYears,
+              termRule: "temporary_first_year",
+              basis:
+                `Issued on registration under ${r.reference}. Valid for ` +
+                `${PERMIT_TERMS.temporaryYears} year, after which an RCA maturity audit decides ` +
+                "whether it converts to a permanent permit.",
+              issuedBy: actor.id,
+              sourceRequestId: r.id,
+            });
+          }
+
+          outcomeMessage =
+            `${r.reference} has been approved by the RCA. ${r.proposed_name} is now on the register` +
+            (issuedPermit
+              ? `, holding temporary permit ${issuedPermit.permitNumber} until ` +
+                `${new Date(issuedPermit.expiresOn).toLocaleDateString()}.`
+              : ".");
         } else {
           await query(
             `UPDATE cooperatives
@@ -625,8 +997,24 @@ router.patch("/:id/decision", async (req: Request, res: Response) => {
               WHERE id = $1`,
             [r.cooperative_id]
           );
+          // The permit dies with the cooperative. Leaving it active would let a
+          // dissolved cooperative show a valid licence.
+          await query(
+            `UPDATE cooperative_permits
+                SET status = 'revoked', revoked_at = NOW(),
+                    revocation_reason = $2, updated_at = NOW()
+              WHERE cooperative_id = $1 AND status = 'active'`,
+            [r.cooperative_id, `Cooperative dissolved under ${r.reference}.`]
+          );
           await query(`UPDATE users SET cooperative_id = NULL WHERE cooperative_id = $1`, [r.cooperative_id]);
-          outcomeMessage = `${r.reference} has been approved by the RCA. The cooperative has been dissolved and removed from the active register.`;
+          // Any field visit still queued for it is moot.
+          await query(
+            `UPDATE cooperative_field_visits
+                SET status = 'cancelled', updated_at = NOW()
+              WHERE cooperative_id = $1 AND status IN ('pending','scheduled')`,
+            [r.cooperative_id]
+          );
+          outcomeMessage = `${r.reference} has been approved by the RCA. The cooperative has been dissolved, its operating permit revoked, and it has been removed from the active register.`;
         }
       }
     }
@@ -656,6 +1044,7 @@ router.patch("/:id/decision", async (req: Request, res: Response) => {
       message: outcomeMessage,
       data: updated.rows[0],
       createdCooperativeId,
+      issuedPermit,
     });
   } catch (err) {
     console.error("PATCH /cooperative-requests/:id/decision error:", err);

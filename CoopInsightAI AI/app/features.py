@@ -289,3 +289,167 @@ def isoformat(value: Any) -> str:
     if isinstance(value, date):
         return value.isoformat()
     return str(value)
+
+
+# ─── Monthly functionality audit ─────────────────────────────────────────────
+
+def get_functionality_features(period_end: date) -> list[dict[str, Any]]:
+    """
+    Per-cooperative operating signals as at the end of `period_end`'s month.
+
+    This is the evidence behind the monthly audit: is the cooperative trading, is
+    it meeting, are its members putting money in and turning up, and are its
+    records being kept. Everything is bounded by the period end, so re-running the
+    audit for an old month reproduces the answer that month actually gave.
+    """
+    return db.fetch_all(
+        """
+        WITH bounds AS (
+          SELECT DATE_TRUNC('month', %s::date)::date                        AS period_start,
+                 (DATE_TRUNC('month', %s::date) + INTERVAL '1 month')::date AS next_month
+        )
+        SELECT c.id,
+               c.name,
+               c.type,
+               c.sector,
+               c.status,
+               c.health_score,
+               c.registration_date,
+               c.total_savings,
+
+               (SELECT COUNT(*) FROM members m
+                 WHERE m.cooperative_id = c.id AND m.deleted_at IS NULL) AS member_count,
+               (SELECT COUNT(*) FROM members m
+                 WHERE m.cooperative_id = c.id AND m.deleted_at IS NULL
+                   AND m.status = 'active') AS active_member_count,
+
+               -- Trading: how recently, and how much in the audited month.
+               (SELECT MAX(t.date) FROM transactions t
+                 WHERE t.cooperative_id = c.id AND t.status = 'completed'
+                   AND t.date < b.next_month) AS last_transaction_on,
+               (SELECT COUNT(*) FROM transactions t
+                 WHERE t.cooperative_id = c.id AND t.status = 'completed'
+                   AND t.date >= b.period_start AND t.date < b.next_month) AS transactions_in_month,
+               (SELECT COALESCE(SUM(t.amount), 0) FROM transactions t
+                 WHERE t.cooperative_id = c.id AND t.status = 'completed' AND t.type = 'income'
+                   AND t.date >= b.period_start AND t.date < b.next_month) AS income_in_month,
+               (SELECT COALESCE(SUM(t.amount), 0) FROM transactions t
+                 WHERE t.cooperative_id = c.id AND t.status = 'completed' AND t.type = 'expense'
+                   AND t.date >= b.period_start AND t.date < b.next_month) AS expense_in_month,
+               (SELECT COUNT(DISTINCT DATE_TRUNC('month', t.date)) FROM transactions t
+                 WHERE t.cooperative_id = c.id AND t.status = 'completed' AND t.type = 'income'
+                   AND t.date >= b.next_month - INTERVAL '6 months'
+                   AND t.date < b.next_month) AS trading_months_of_6,
+
+               -- Meeting and delivering.
+               (SELECT MAX(a.date) FROM activities a
+                 WHERE a.cooperative_id = c.id AND a.deleted_at IS NULL
+                   AND a.status = 'completed' AND a.date < b.next_month) AS last_activity_on,
+               (SELECT COUNT(*) FROM activities a
+                 WHERE a.cooperative_id = c.id AND a.deleted_at IS NULL
+                   AND a.date >= b.period_start AND a.date < b.next_month) AS activities_in_month,
+               (SELECT COUNT(*) FROM activities a
+                 WHERE a.cooperative_id = c.id AND a.deleted_at IS NULL AND a.status = 'completed'
+                   AND a.date >= b.period_start AND a.date < b.next_month) AS activities_completed,
+               (SELECT COUNT(*) FROM activities a
+                 WHERE a.cooperative_id = c.id AND a.deleted_at IS NULL
+                   AND a.type = 'meeting' AND a.status = 'completed'
+                   AND a.date >= b.next_month - INTERVAL '6 months'
+                   AND a.date < b.next_month) AS meetings_last_6_months,
+
+               -- Members actually taking part, measured over a quarter so that one
+               -- quiet month does not on its own condemn a cooperative.
+               (SELECT COUNT(DISTINCT mc.member_id) FROM member_contributions mc
+                  JOIN members m ON m.id = mc.member_id
+                 WHERE m.cooperative_id = c.id AND m.deleted_at IS NULL
+                   AND mc.date >= b.next_month - INTERVAL '3 months'
+                   AND mc.date < b.next_month) AS contributors_last_quarter,
+               (SELECT COUNT(DISTINCT ap.member_id) FROM activity_participants ap
+                  JOIN activities a ON a.id = ap.activity_id
+                  JOIN members m ON m.id = ap.member_id
+                 WHERE m.cooperative_id = c.id AND m.deleted_at IS NULL AND ap.attended
+                   AND a.date >= b.next_month - INTERVAL '3 months'
+                   AND a.date < b.next_month) AS attendees_last_quarter,
+               (SELECT COUNT(*) FROM activity_participants ap
+                  JOIN activities a ON a.id = ap.activity_id
+                 WHERE a.cooperative_id = c.id
+                   AND a.date >= b.next_month - INTERVAL '3 months'
+                   AND a.date < b.next_month) AS participation_slots_last_quarter,
+
+               -- Membership churn: people leaving is the loudest early signal.
+               (SELECT COUNT(*) FROM members m
+                 WHERE m.cooperative_id = c.id AND m.deleted_at IS NULL
+                   AND m.membership_date >= b.next_month - INTERVAL '12 months'
+                   AND m.membership_date < b.next_month) AS members_joined_12m,
+               (SELECT COUNT(*) FROM membership_exit_requests e
+                 WHERE e.cooperative_id = c.id AND e.status = 'approved'
+                   AND e.decided_at < b.next_month
+                   AND e.decided_at >= b.next_month - INTERVAL '12 months') AS members_exited_12m,
+               (SELECT COUNT(*) FROM membership_exit_requests e
+                 WHERE e.cooperative_id = c.id
+                   AND e.status IN ('pending','under_review','meeting_scheduled','meeting_held')
+                 ) AS open_exit_requests,
+
+               -- Record-keeping.
+               (SELECT MAX(bs.period_end) FROM balance_sheets bs
+                 WHERE bs.cooperative_id = c.id
+                   AND bs.period_end < b.next_month) AS last_balance_sheet_on,
+               (SELECT COUNT(*) FROM cooperative_documents d
+                 WHERE d.cooperative_id = c.id) AS document_count,
+               (SELECT COUNT(*) FROM cooperative_leadership l
+                 WHERE l.cooperative_id = c.id
+                   AND l.role IN ('President','Vice President','Secretary')
+                   AND l.name IS NOT NULL AND l.name <> '(Name not recorded)') AS leaders_recorded,
+
+               -- Licence to operate.
+               (SELECT p.permit_type FROM cooperative_permits p
+                 WHERE p.cooperative_id = c.id AND p.status = 'active'
+                 ORDER BY p.issued_on DESC LIMIT 1) AS permit_type,
+               (SELECT p.expires_on FROM cooperative_permits p
+                 WHERE p.cooperative_id = c.id AND p.status = 'active'
+                 ORDER BY p.issued_on DESC LIMIT 1) AS permit_expires_on,
+
+               -- Support already in flight, so the visit list does not re-flag a
+               -- cooperative somebody is already out helping.
+               (SELECT COUNT(*) FROM cooperative_field_visits v
+                 WHERE v.cooperative_id = c.id
+                   AND v.status IN ('pending','scheduled')) AS open_visits,
+               (SELECT COUNT(*) FROM funding_requests fr
+                 WHERE fr.cooperative_id = c.id
+                   AND fr.status IN ('submitted','under_review','approved')) AS open_funding_requests
+          FROM cooperatives c
+          CROSS JOIN bounds b
+         WHERE c.deleted_at IS NULL
+         ORDER BY c.name
+        """,
+        (period_end, period_end),
+    )
+
+
+def latest_period_with_data() -> date | None:
+    """
+    The most recent month in which something actually happened.
+
+    Future-dated rows are excluded on purpose. The activities calendar carries
+    planned meetings weeks ahead, and taking the maximum date without a bound
+    would point the audit at a month that has not happened yet — where every
+    cooperative looks as though it has stopped trading because the month is
+    empty.
+    """
+    row = db.fetch_one(
+        """
+        SELECT GREATEST(
+                 COALESCE((SELECT MAX(date) FROM transactions
+                            WHERE status = 'completed' AND date <= CURRENT_DATE),
+                          '1900-01-01'::date),
+                 COALESCE((SELECT MAX(date) FROM activities
+                            WHERE deleted_at IS NULL AND status = 'completed'
+                              AND date <= CURRENT_DATE),
+                          '1900-01-01'::date)
+               ) AS latest
+        """
+    )
+    latest = row["latest"] if row else None
+    if latest is None or latest.year < 1901:
+        return None
+    return latest

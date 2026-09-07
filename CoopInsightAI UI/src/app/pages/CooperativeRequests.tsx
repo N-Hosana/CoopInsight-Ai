@@ -14,6 +14,7 @@ import {
   Clock,
   Undo2,
   Brain,
+  FileSearch,
   Upload,
   ListChecks,
   ArrowRight,
@@ -101,6 +102,37 @@ interface CoopRequest {
   created_at: string;
   documents: RequestDocument[];
   reviews: Review[];
+  audits: RcaAudit[];
+  filed_as_role: string | null;
+  target_completion_at: string | null;
+}
+
+/** The RCA's own audit of a dissolution request, which gates the strike-off. */
+interface RcaAudit {
+  id: string;
+  reference: string;
+  status: "scheduled" | "in_progress" | "passed" | "failed" | "deferred" | "cancelled";
+  recommendation: string | null;
+  findings: string | null;
+  outcomeNote: string | null;
+  score: string | null;
+  aiAssessment: { assessment?: DissolutionAssessment } | null;
+  dueOn: string;
+  openedAt: string;
+  concludedAt: string | null;
+  concludedByName: string | null;
+}
+
+interface DissolutionAssessment {
+  score: number;
+  passMark: number;
+  recommended: "allow_dissolution" | "refuse_dissolution";
+  met: string[];
+  unmet: string[];
+  failedMandatory: string[];
+  notes: string[];
+  model: string;
+  confidence: number;
 }
 
 const STAGE_ORDER = ["sector", "district", "rca"] as const;
@@ -240,6 +272,7 @@ export function CooperativeRequests() {
   const [message, setMessage] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [auditFindings, setAuditFindings] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const [mode, setMode] = useState<"none" | "formation" | "dissolution">("none");
@@ -259,6 +292,7 @@ export function CooperativeRequests() {
   });
 
   const isOfficer = viewerStage !== null;
+  const isRca = viewerStage === "rca" || viewerStage === "any";
   const canFileDissolution = ["manager", "cooperative", "admin", "generalManager"].includes(user?.role ?? "");
 
   const load = async () => {
@@ -366,6 +400,43 @@ export function CooperativeRequests() {
       await load();
     } catch (err: any) {
       setError(err?.message ?? "Could not record the decision.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const openDissolutionAudit = async (id: string) => {
+    setBusyId(id);
+    setError("");
+    try {
+      const res = await api.post<{ message: string }>(`/cooperative-requests/${id}/audit`, {});
+      setMessage(res.message);
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not open the audit.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const concludeDissolutionAudit = async (id: string, recommendation: string) => {
+    const findings = auditFindings[id]?.trim();
+    if (!findings || findings.length < 20) {
+      setError("Record what the audit found, in at least 20 characters.");
+      return;
+    }
+    setBusyId(id);
+    setError("");
+    try {
+      const res = await api.patch<{ message: string }>(`/cooperative-requests/${id}/audit`, {
+        recommendation,
+        findings,
+      });
+      setMessage(res.message);
+      setAuditFindings({ ...auditFindings, [id]: "" });
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not conclude the audit.");
     } finally {
       setBusyId(null);
     }
@@ -605,8 +676,11 @@ export function CooperativeRequests() {
           <div className="mt-3 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
             <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
             <p className="text-sm text-amber-900">
-              Dissolution is final once the RCA approves it. The cooperative is removed from the active register and
-              every member is unlinked. It must be backed by a general assembly resolution.
+              Dissolution is final once the RCA approves it. The cooperative is removed from the active register, its
+              operating permit is revoked and every member is unlinked. Only the president may file this request, it
+              must be backed by a general assembly resolution carried by two thirds of the votes cast, and the RCA
+              audits the grounds before anything takes effect. The whole chain targets 14 days, though a contested
+              case or unsettled accounts will take longer.
             </p>
           </div>
 
@@ -867,8 +941,162 @@ export function CooperativeRequests() {
                   )}
                 </div>
 
+                {/* The RCA audit that gates a strike-off */}
+                {r.request_type === "dissolution" &&
+                  (r.current_stage === "rca" || (r.audits ?? []).length > 0) && (
+                    <div className="mt-4 border-t border-gray-200 pt-4">
+                      <div className="flex items-center gap-2">
+                        <FileSearch className="w-4 h-4 text-gray-700" />
+                        <h4 className="font-medium text-gray-900">RCA audit of the grounds</h4>
+                      </div>
+                      <p className="text-sm text-gray-600 mt-1">
+                        A cooperative is not struck off on the word of its president. The RCA
+                        verifies that the members really did resolve on it, that the money is
+                        accounted for, and that a cooperative still trading is not being abandoned.
+                      </p>
+
+                      {(r.audits ?? []).map((a) => {
+                        const assessment = a.aiAssessment?.assessment;
+                        const stillOpen = ["scheduled", "in_progress"].includes(a.status);
+                        return (
+                          <div key={a.id} className="mt-4 rounded-xl border border-gray-200 p-4">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <p className="font-medium text-gray-900">{a.reference}</p>
+                              <span
+                                className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                  a.status === "passed"
+                                    ? "bg-green-100 text-green-800"
+                                    : a.status === "failed"
+                                      ? "bg-red-100 text-red-700"
+                                      : "bg-blue-100 text-blue-800"
+                                }`}
+                              >
+                                {a.recommendation
+                                  ? a.recommendation === "allow_dissolution"
+                                    ? "Grounds hold"
+                                    : "Grounds do not hold"
+                                  : "In progress"}
+                              </span>
+                            </div>
+
+                            {assessment && (
+                              <div className="mt-3 space-y-3">
+                                <p className="text-sm text-gray-700">
+                                  Automated pre-assessment:{" "}
+                                  <span className="font-semibold">
+                                    {Math.round(assessment.score * 100)}%
+                                  </span>{" "}
+                                  against a {Math.round(assessment.passMark * 100)}% pass mark, which
+                                  suggests{" "}
+                                  {assessment.recommended === "allow_dissolution"
+                                    ? "allowing the dissolution"
+                                    : "refusing it"}
+                                  .
+                                </p>
+                                {assessment.unmet.length > 0 && (
+                                  <div>
+                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1">
+                                      Not satisfied
+                                    </p>
+                                    <ul className="list-disc pl-5 text-sm text-gray-700">
+                                      {assessment.unmet.map((u) => (
+                                        <li key={u}>{u}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                                {assessment.notes.length > 0 && (
+                                  <ul className="space-y-1 text-sm text-gray-700">
+                                    {assessment.notes.map((n, i) => (
+                                      <li key={i}>{n}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            )}
+
+                            {a.findings && (
+                              <p className="mt-3 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                                <span className="font-medium">Findings: </span>
+                                {a.findings}
+                                {a.concludedByName && (
+                                  <span className="text-gray-500"> &mdash; {a.concludedByName}</span>
+                                )}
+                              </p>
+                            )}
+
+                            {stillOpen && isRca && (
+                              <div className="mt-4 space-y-3">
+                                <label className="block text-sm font-medium text-gray-700">
+                                  Findings * (shown to the applicant)
+                                </label>
+                                <textarea
+                                  rows={3}
+                                  value={auditFindings[r.id] ?? ""}
+                                  onChange={(e) =>
+                                    setAuditFindings({ ...auditFindings, [r.id]: e.target.value })
+                                  }
+                                  placeholder="What the audit established about the vote, the liabilities, and whether the cooperative is genuinely finished."
+                                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F]"
+                                />
+                                <div className="flex flex-wrap gap-3">
+                                  <Button
+                                    size="sm"
+                                    disabled={busyId === r.id}
+                                    onClick={() =>
+                                      concludeDissolutionAudit(r.id, "allow_dissolution")
+                                    }
+                                  >
+                                    The grounds hold
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="danger"
+                                    disabled={busyId === r.id}
+                                    onClick={() =>
+                                      concludeDissolutionAudit(r.id, "refuse_dissolution")
+                                    }
+                                  >
+                                    The grounds do not hold
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      {isRca &&
+                        r.current_stage === "rca" &&
+                        String(r.status).startsWith("pending") &&
+                        !(r.audits ?? []).some((a) =>
+                          ["scheduled", "in_progress", "passed", "failed"].includes(a.status)
+                        ) && (
+                          <Button
+                            className="mt-4"
+                            size="sm"
+                            disabled={busyId === r.id}
+                            onClick={() => openDissolutionAudit(r.id)}
+                          >
+                            <span className="flex items-center gap-2">
+                              <FileSearch className="w-4 h-4" />
+                              Open the RCA audit
+                            </span>
+                          </Button>
+                        )}
+                    </div>
+                  )}
+
                 {canActOn(r) && (
                   <div className="mt-4 border-t border-gray-200 pt-4">
+                    {r.request_type === "dissolution" &&
+                      r.current_stage === "rca" &&
+                      !(r.audits ?? []).some((a) => ["passed", "failed"].includes(a.status)) && (
+                        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                          This request cannot be decided until the RCA audit above has been
+                          concluded.
+                        </div>
+                      )}
                     <label className="block text-sm font-medium text-gray-700 mb-1">
                       Decision note (required to reject or return)
                     </label>

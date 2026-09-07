@@ -1,42 +1,10 @@
 import { Router, Request, Response } from "express";
 import { query } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
-import https from "https";
-import http from "http";
+import { callAIService, AI_SERVICE_URL } from "../services/aiClient";
 
 const router = Router();
 router.use(authenticate);
-
-const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
-
-const callAIService = async (path: string, method = "GET", body?: object): Promise<any> => {
-  const url = new URL(path, AI_SERVICE_URL);
-  const mod = url.protocol === "https:" ? https : http;
-  return new Promise<any>((resolve, reject) => {
-    const bodyStr = body ? JSON.stringify(body) : undefined;
-    const options = {
-      hostname: url.hostname,
-      port: url.port || (url.protocol === "https:" ? 443 : 80),
-      path: url.pathname + url.search,
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        ...(bodyStr ? { "Content-Length": Buffer.byteLength(bodyStr) } : {}),
-      },
-    };
-    const req = mod.request(options, (res) => {
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(10000, () => { req.destroy(); reject(new Error("AI service timeout")); });
-    if (bodyStr) req.write(bodyStr);
-    req.end();
-  });
-};
 
 // GET /health
 router.get("/health", async (_req: Request, res: Response) => {

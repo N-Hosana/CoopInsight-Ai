@@ -18,7 +18,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import db, registry
 from .config import get_settings
-from .routers import admin, anomalies, benchmarks, engagement, forecasts, health, rankings
+from .routers import (
+    admin,
+    anomalies,
+    benchmarks,
+    engagement,
+    forecasts,
+    health,
+    monthly_audit,
+    rankings,
+)
 
 settings = get_settings()
 
@@ -71,4 +80,5 @@ app.include_router(forecasts.router, tags=["forecasts"])
 app.include_router(engagement.router, tags=["engagement"])
 app.include_router(benchmarks.router, tags=["benchmarks"])
 app.include_router(rankings.router, tags=["rankings"])
+app.include_router(monthly_audit.router, tags=["monthly audit"])
 app.include_router(admin.router, tags=["models"])

@@ -23,6 +23,9 @@ import {
   UserMinus,
   ClipboardCheck,
   Trophy,
+  BadgeCheck,
+  Stethoscope,
+  HandCoins,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
@@ -59,6 +62,9 @@ import { CooperativeDocuments } from "./pages/CooperativeDocuments";
 import { Membership } from "./pages/Membership";
 import { CooperativeRequests } from "./pages/CooperativeRequests";
 import { CooperativeRankings } from "./pages/CooperativeRankings";
+import { Permits } from "./pages/Permits";
+import { MonthlyAudit } from "./pages/MonthlyAudit";
+import { Funding } from "./pages/Funding";
 import { NotificationBar } from "./components/NotificationBar";
 
 function ProfileDropdown() {
@@ -155,6 +161,9 @@ const getNavigationForUser = (user: { role: string; cooperativeId?: string } | n
     { name: "AI Insights", path: "/ai-insights", icon: Brain, roles: ["admin", "manager", "member", "generalManager"] },
     { name: "Government Monitoring", path: "/government-monitoring", icon: Building2, roles: ["government", "admin", "generalManager"] },
     { name: "League Table", path: "/rankings", icon: Trophy, roles: ["government", "admin", "generalManager"] },
+    { name: "Monthly Audit", path: "/monthly-audit", icon: Stethoscope, roles: ["government", "admin", "generalManager"] },
+    { name: "Operating Permits", path: "/permits", icon: BadgeCheck, roles: ["government", "admin", "generalManager", "manager", "member"] },
+    { name: "External Support", path: "/funding", icon: HandCoins, roles: ["government", "admin", "generalManager", "manager", "member"] },
     { name: "Reports", path: "/reports", icon: FileText, roles: ["admin", "manager", "government", "generalManager"] },
     { name: "Cooperative Profile", path: "/cooperative-profile", icon: Building2, roles: ["manager", "member"], requireCooperative: true },
     { name: "Documents", path: "/cooperative-documents", icon: FileText, roles: ["manager", "member", "government"] },
@@ -442,6 +451,16 @@ function AppRoutes() {
             </RoleRoute>
           }
         />
+        <Route
+          path="monthly-audit"
+          element={
+            <RoleRoute roles={["government", "admin", "generalManager"]}>
+              <MonthlyAudit />
+            </RoleRoute>
+          }
+        />
+        <Route path="permits" element={<Permits />} />
+        <Route path="funding" element={<Funding />} />
         <Route path="messages" element={<Messages />} />
         <Route path="notifications" element={<Notifications />} />
         <Route path="integrations" element={<Integrations />} />

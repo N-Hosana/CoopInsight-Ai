@@ -1,5 +1,6 @@
 import bcrypt from "bcrypt";
 import { query } from "../config/db";
+import { PERMIT_TERMS, permanentTerm, expiryFor } from "../services/permits";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -212,6 +213,17 @@ async function resetCooperativeData() {
   // and have to be cleared explicitly.
   await query(`DELETE FROM cooperative_requests`);
   await query(`DELETE FROM membership_exit_requests`);
+  // Support organisations and their published opportunities are not scoped to a
+  // cooperative, so the cascade below leaves them behind. They are upserted by
+  // name further down; the cooperative-scoped rows that point at them go here.
+  await query(`DELETE FROM funding_disbursements`);
+  await query(`DELETE FROM funding_requests`);
+  await query(`DELETE FROM cooperative_partnerships`);
+  await query(`DELETE FROM funding_opportunities`);
+  await query(`DELETE FROM cooperative_field_visits`);
+  await query(`DELETE FROM cooperative_monthly_audits`);
+  await query(`DELETE FROM rca_audits`);
+  await query(`DELETE FROM cooperative_permits`);
   await query(`DELETE FROM ai_insights WHERE cooperative_id IS NOT NULL`);
   await query(`DELETE FROM report_schedules WHERE cooperative_id IS NOT NULL`);
   await query(`DELETE FROM reports WHERE cooperative_id IS NOT NULL`);
@@ -915,6 +927,393 @@ const COOPERATIVES: CoopSeed[] = [
 /** The cooperative the demo manager/member accounts belong to. */
 const DEMO_COOPERATIVE_KEY = "TMC";
 
+/**
+ * How many months of silence to seed for the demo-dormant cooperative. Must be
+ * more than the AI service's dormancy threshold (6 months) or the monthly audit
+ * will not flag it and the visit list will come up empty.
+ */
+const DEMO_DORMANCY_MONTHS = 8;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Operating permits
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Reconstructs a cooperative's permit history from its real registration date:
+ * a temporary permit issued on registration, superseded a year later by the
+ * permanent one. The permanent term is not hardcoded here — it comes from
+ * `permanentTerm()`, the same function the live conversion uses, so the seeded
+ * history and a permit issued today are decided by identical rules.
+ *
+ * `keepTemporary` leaves a cooperative stuck on its temporary permit, which is
+ * what a cooperative that was never audited looks like. One is seeded that way
+ * on purpose so the RCA's conversion queue has a live case to work.
+ */
+async function seedPermits(
+  coopId: string,
+  c: CoopSeed,
+  seq: number,
+  opts: { keepTemporary?: boolean } = {}
+) {
+  const registered = new Date(c.registrationDate);
+  const year = registered.getFullYear();
+  const temporaryExpiry = expiryFor(registered, PERMIT_TERMS.temporaryYears);
+
+  if (opts.keepTemporary) {
+    // Extended repeatedly and still unconverted — the case the audit queue exists
+    // for. It is dated to expire soon so it lands in the "due" window on a fresh
+    // seed rather than being an already-lapsed permit nobody can act on.
+    const issuedOn = new Date();
+    issuedOn.setDate(issuedOn.getDate() - (365 - 45));
+    await query(
+      `INSERT INTO cooperative_permits
+         (cooperative_id, permit_number, permit_type, term_years, issued_on, expires_on,
+          status, term_rule, basis)
+       VALUES ($1,$2,'temporary',$3,$4,$5,'active','extension_after_audit',$6)
+       ON CONFLICT (permit_number) DO NOTHING`,
+      [
+        coopId,
+        `PMT/T/${year}/${String(seq).padStart(4, "0")}`,
+        PERMIT_TERMS.temporaryYears,
+        issuedOn.toISOString().slice(0, 10),
+        expiryFor(issuedOn, PERMIT_TERMS.temporaryYears).toISOString().slice(0, 10),
+        `[demo] ${c.name} was registered on ${c.registrationDate} but its temporary permit was ` +
+          "never converted; it has been extended instead. It is due for a maturity audit.",
+      ]
+    );
+    return;
+  }
+
+  await query(
+    `INSERT INTO cooperative_permits
+       (cooperative_id, permit_number, permit_type, term_years, issued_on, expires_on,
+        status, term_rule, basis)
+     VALUES ($1,$2,'temporary',$3,$4,$5,'superseded','temporary_first_year',$6)
+     ON CONFLICT (permit_number) DO NOTHING`,
+    [
+      coopId,
+      `PMT/T/${year}/${String(seq).padStart(4, "0")}`,
+      PERMIT_TERMS.temporaryYears,
+      c.registrationDate,
+      temporaryExpiry.toISOString().slice(0, 10),
+      `Temporary permit issued on registration under ${c.registrationNumber}.`,
+    ]
+  );
+
+  const term = permanentTerm({ type: c.type, name: c.name, description: c.description });
+  await query(
+    `INSERT INTO cooperative_permits
+       (cooperative_id, permit_number, permit_type, term_years, issued_on, expires_on,
+        status, term_rule, basis)
+     VALUES ($1,$2,'permanent',$3,$4,$5,'active',$6,$7)
+     ON CONFLICT (permit_number) DO NOTHING`,
+    [
+      coopId,
+      `PMT/P/${temporaryExpiry.getFullYear()}/${String(seq).padStart(4, "0")}`,
+      term.years,
+      temporaryExpiry.toISOString().slice(0, 10),
+      expiryFor(temporaryExpiry, term.years).toISOString().slice(0, 10),
+      term.rule,
+      `${term.basis} Converted after the first-year maturity audit.`,
+    ]
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// External support — the partner register
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// UNLIKE THE COOPERATIVES, THESE ORGANISATIONS ARE ILLUSTRATIVE. The seven
+// cooperatives above are real entries from the Gasabo RCA sector register. The
+// funders below are not: they are named after the *kind* of organisation they
+// represent, precisely so that nothing here can be read as a claim about a real
+// NGO's programmes, budgets or staff. What is real is the shape of the problem —
+// support for Rwandan cooperatives comes from NGOs, development partners,
+// government programmes, unions and banks, and it is allocated on specialisation,
+// on the state of the cooperative, and on who already knows whom.
+//
+// Between them these entries exercise every branch of the matcher: type
+// targeting, sector targeting, condition targeting in both directions (a growth
+// fund that wants healthy cooperatives and a rescue fund that wants failing
+// ones), a minimum-members rule and a permanent-permit requirement.
+
+interface OrganizationSeed {
+  name: string;
+  type: string;
+  description: string;
+  focusAreas: string[];
+  supportTypes: string[];
+  targetBands: string[];
+  minAmount: number | null;
+  maxAmount: number | null;
+  contactRole: string;
+  eligibilityNotes: string;
+  opportunities: Array<{
+    title: string;
+    description: string;
+    supportType: string;
+    amountAvailable: number | null;
+    targetTypes: string[];
+    targetSectors: string[];
+    targetBands: string[];
+    minMembers: number | null;
+    minHealthScore: number | null;
+    requiresPermanentPermit: boolean;
+    closesInDays: number;
+  }>;
+}
+
+const SUPPORT_ORGANIZATIONS: OrganizationSeed[] = [
+  {
+    name: "Marshland Agribusiness Support Programme",
+    type: "development_partner",
+    description:
+      "Works with farming cooperatives on marshland and shared-plot cultivation: inputs, " +
+      "post-harvest handling and collective marketing.",
+    focusAreas: ["Agriculture", "Farming", "Rice"],
+    supportTypes: ["grant", "equipment", "training", "market_access"],
+    targetBands: ["healthy", "monitor", "at_risk"],
+    minAmount: 500_000,
+    maxAmount: 15_000_000,
+    contactRole: "Programme Officer, Gasabo",
+    eligibilityNotes:
+      "Cooperatives cultivating shared or marshland plots. Priority to those already " +
+      "marketing collectively.",
+    opportunities: [
+      {
+        title: "Post-harvest handling equipment grant",
+        description:
+          "Drying, storage and grading equipment for farming cooperatives losing produce " +
+          "between harvest and market. Covers the equipment and one season of training in " +
+          "using it.",
+        supportType: "equipment",
+        amountAvailable: 8_000_000,
+        targetTypes: ["Agriculture"],
+        targetSectors: [],
+        targetBands: ["healthy", "monitor"],
+        minMembers: 30,
+        minHealthScore: null,
+        requiresPermanentPermit: false,
+        closesInDays: 75,
+      },
+    ],
+  },
+  {
+    name: "Urban Transport Cooperatives Development Fund",
+    type: "development_partner",
+    description:
+      "Supports taxi and transport cooperatives in Kigali on fleet renewal, route " +
+      "compliance and driver welfare schemes.",
+    focusAreas: ["Transport"],
+    supportTypes: ["working_capital", "training", "technical_assistance"],
+    targetBands: ["healthy", "monitor"],
+    minAmount: 1_000_000,
+    maxAmount: 40_000_000,
+    contactRole: "Fund Manager",
+    eligibilityNotes:
+      "Registered transport cooperatives holding a permanent operating permit and current " +
+      "route authorisations.",
+    opportunities: [
+      {
+        title: "Fleet renewal working capital facility",
+        description:
+          "Working capital against a fleet renewal plan, repayable over three years. Open to " +
+          "transport cooperatives with a permanent permit and audited accounts.",
+        supportType: "working_capital",
+        amountAvailable: 35_000_000,
+        targetTypes: ["Transport"],
+        targetSectors: [],
+        targetBands: ["healthy", "monitor"],
+        minMembers: 25,
+        minHealthScore: 60,
+        requiresPermanentPermit: true,
+        closesInDays: 40,
+      },
+    ],
+  },
+  {
+    name: "Artisan Trades Skills Foundation",
+    type: "ngo",
+    description:
+      "Skills and tooling for carpentry, construction and other artisan cooperatives, " +
+      "with an emphasis on bringing younger members into the trade.",
+    focusAreas: ["Carpentry", "Construction", "Services"],
+    supportTypes: ["training", "equipment", "technical_assistance"],
+    targetBands: ["monitor", "at_risk", "critical"],
+    minAmount: 300_000,
+    maxAmount: 6_000_000,
+    contactRole: "Training Coordinator",
+    eligibilityNotes:
+      "Artisan cooperatives sharing a workshop or worksite. No minimum health score — the " +
+      "programme exists for cooperatives that are struggling.",
+    opportunities: [
+      {
+        title: "Shared workshop tooling and apprenticeship grant",
+        description:
+          "Replaces worn shared tooling and funds an apprenticeship intake, so that a " +
+          "cooperative losing older members can bring new ones in.",
+        supportType: "equipment",
+        amountAvailable: 4_500_000,
+        targetTypes: ["Carpentry", "Construction"],
+        targetSectors: [],
+        targetBands: ["monitor", "at_risk", "critical"],
+        minMembers: null,
+        minHealthScore: null,
+        requiresPermanentPermit: false,
+        closesInDays: 90,
+      },
+    ],
+  },
+  {
+    name: "Cooperative Turnaround Facility",
+    type: "donor",
+    description:
+      "Exists specifically for cooperatives that have stopped functioning: bookkeeping " +
+      "rescue, governance support and bridging finance to restart trade.",
+    focusAreas: ["Any"],
+    supportTypes: ["technical_assistance", "grant", "training"],
+    targetBands: ["at_risk", "critical"],
+    minAmount: 200_000,
+    maxAmount: 5_000_000,
+    contactRole: "Turnaround Adviser",
+    eligibilityNotes:
+      "Referred by a sector cooperative officer following a field visit. Cooperatives " +
+      "assessed as healthy are not eligible — they should apply to a growth programme.",
+    opportunities: [
+      {
+        title: "Dormant cooperative rescue package",
+        description:
+          "For cooperatives that have gone quiet. Covers reconstruction of the books, a " +
+          "facilitated general assembly, and a small grant to restart trading. Referral from " +
+          "a field visit is expected.",
+        supportType: "technical_assistance",
+        amountAvailable: 3_000_000,
+        targetTypes: [],
+        targetSectors: [],
+        targetBands: ["at_risk", "critical"],
+        minMembers: null,
+        minHealthScore: null,
+        requiresPermanentPermit: false,
+        closesInDays: 120,
+      },
+    ],
+  },
+  {
+    name: "Gasabo Cooperative Union",
+    type: "cooperative_union",
+    description:
+      "Umbrella body for cooperatives in Gasabo District. Collective purchasing, shared " +
+      "market access and representation with the district.",
+    focusAreas: ["Trading", "Services", "Any"],
+    supportTypes: ["market_access", "training"],
+    targetBands: [],
+    minAmount: null,
+    maxAmount: 2_000_000,
+    contactRole: "Union Secretary",
+    eligibilityNotes: "Open to any cooperative on the Gasabo register in good standing.",
+    opportunities: [
+      {
+        title: "Collective purchasing and market linkage scheme",
+        description:
+          "Pools purchasing across member cooperatives and links them to buyers in the " +
+          "Remera and Kimironko commercial areas. No cash grant; the benefit is price and access.",
+        supportType: "market_access",
+        amountAvailable: null,
+        targetTypes: [],
+        targetSectors: ["Remera", "Kimihurura", "Gisozi", "Kinyinya", "Nduba"],
+        targetBands: [],
+        minMembers: null,
+        minHealthScore: null,
+        requiresPermanentPermit: false,
+        closesInDays: 200,
+      },
+    ],
+  },
+  {
+    name: "Community Savings Bank — Cooperative Lending Window",
+    type: "financial_institution",
+    description:
+      "Lending window for cooperatives with a trading record and audited accounts. " +
+      "Commercial terms, not grant funding.",
+    focusAreas: ["Any"],
+    supportTypes: ["working_capital"],
+    targetBands: ["healthy"],
+    minAmount: 2_000_000,
+    maxAmount: 50_000_000,
+    contactRole: "Cooperative Banking Officer",
+    eligibilityNotes:
+      "Requires a permanent operating permit, a filed balance sheet and twelve months of " +
+      "trading history.",
+    opportunities: [
+      {
+        title: "Cooperative trade finance line",
+        description:
+          "Revolving working capital for cooperatives with a demonstrated trading record. " +
+          "Priced commercially; a filed balance sheet and permanent permit are prerequisites.",
+        supportType: "working_capital",
+        amountAvailable: 50_000_000,
+        targetTypes: [],
+        targetSectors: [],
+        targetBands: ["healthy"],
+        minMembers: 20,
+        minHealthScore: 65,
+        requiresPermanentPermit: true,
+        closesInDays: 300,
+      },
+    ],
+  },
+];
+
+async function seedSupportOrganizations() {
+  const ids = new Map<string, string>();
+
+  for (const org of SUPPORT_ORGANIZATIONS) {
+    const inserted = await query(
+      `INSERT INTO support_organizations
+         (name, type, country, description, focus_areas, support_types, target_bands,
+          min_amount, max_amount, eligibility_notes, contact_name, contact_role, active)
+       VALUES ($1,$2,'Rwanda',$3,$4,$5,$6,$7,$8,$9,NULL,$10,TRUE)
+       ON CONFLICT (name) DO UPDATE SET
+         type = EXCLUDED.type, description = EXCLUDED.description,
+         focus_areas = EXCLUDED.focus_areas, support_types = EXCLUDED.support_types,
+         target_bands = EXCLUDED.target_bands, min_amount = EXCLUDED.min_amount,
+         max_amount = EXCLUDED.max_amount, eligibility_notes = EXCLUDED.eligibility_notes,
+         contact_role = EXCLUDED.contact_role, updated_at = NOW()
+       RETURNING id`,
+      [
+        org.name, org.type, org.description,
+        JSON.stringify(org.focusAreas), JSON.stringify(org.supportTypes),
+        JSON.stringify(org.targetBands), org.minAmount, org.maxAmount,
+        org.eligibilityNotes,
+        // A role, not a name. Inventing a person at an organisation is exactly the
+        // kind of unverifiable detail this project refuses to put on screen.
+        org.contactRole,
+      ]
+    );
+    const orgId = inserted.rows[0].id as string;
+    ids.set(org.name, orgId);
+
+    for (const o of org.opportunities) {
+      await query(
+        `INSERT INTO funding_opportunities
+           (organization_id, title, description, support_type, amount_available, currency,
+            target_types, target_sectors, target_bands, min_members, min_health_score,
+            requires_permanent_permit, opens_on, closes_on, status)
+         VALUES ($1,$2,$3,$4,$5,'RWF',$6,$7,$8,$9,$10,$11,
+                 CURRENT_DATE, CURRENT_DATE + ($12)::int, 'open')`,
+        [
+          orgId, o.title, o.description, o.supportType, o.amountAvailable,
+          JSON.stringify(o.targetTypes), JSON.stringify(o.targetSectors),
+          JSON.stringify(o.targetBands), o.minMembers, o.minHealthScore,
+          o.requiresPermanentPermit, o.closesInDays,
+        ]
+      );
+    }
+  }
+
+  return ids;
+}
+
 //  Main seed
 
 async function seed() {
@@ -1008,6 +1407,14 @@ async function seed() {
   // ─── Cooperatives ─────────────────────────────────────────────────────────
 
   const seededIds = new Map<string, string>();
+
+  // The weakest cooperative on the register is left on an unconverted temporary
+  // permit, which is what a cooperative nobody ever went back to audit looks
+  // like. It gives the RCA conversion queue a live case on a fresh seed.
+  const unconvertedKey = COOPERATIVES.reduce((worst, c) =>
+    c.healthScore < worst.healthScore ? c : worst
+  ).key;
+  let permitSeq = 0;
 
   for (const c of COOPERATIVES) {
     const coopId = await insertCooperative({
@@ -1141,8 +1548,119 @@ async function seed() {
     });
     await seedInsightsFor(c, coopId, memberCount, totalSavings);
 
+    // ── Demo dormancy ────────────────────────────────────────────────────────
+    // One cooperative is made to go quiet, the same way two of them carry a
+    // "[demo anomaly]" transaction so the anomaly detector has something to
+    // find. Without it the monthly audit's visit list is empty on a fresh seed
+    // and the feature cannot be demonstrated at all.
+    //
+    // The same cooperative is the one left on an unconverted permit, so the
+    // whole story hangs together: nobody audited it, it stopped trading, the
+    // monthly audit catches it, and a field visit is raised before it quietly
+    // dissolves itself.
+    if (c.key === unconvertedKey) {
+      const cutoff = monthsAgo(DEMO_DORMANCY_MONTHS);
+      const cutoffDate = ymd(cutoff, 1);
+      await query(
+        `DELETE FROM transactions WHERE cooperative_id = $1 AND date >= $2`,
+        [coopId, cutoffDate]
+      );
+      await query(
+        `DELETE FROM activities WHERE cooperative_id = $1 AND date >= $2`,
+        [coopId, cutoffDate]
+      );
+      await query(
+        `DELETE FROM member_contributions mc
+          USING members m
+          WHERE mc.member_id = m.id AND m.cooperative_id = $1 AND mc.date >= $2`,
+        [coopId, cutoffDate]
+      );
+      await insertInsight(coopId, {
+        type: "anomaly",
+        severity: "critical",
+        title: "No activity recorded since " + monthLabel(cutoff),
+        summary:
+          `[demo dormancy] ${c.name} has recorded no transaction, meeting or member ` +
+          `contribution since ${monthLabel(cutoff)}. A cooperative that goes quiet like this ` +
+          "usually is not discovered until its members have already lost their savings.",
+        detail:
+          "Seeded deliberately so the monthly functionality audit has a dormant cooperative to " +
+          "detect and a field visit to raise. The cooperative itself is real; this trading gap " +
+          "is not.",
+        confidence: 0.95,
+        affectedMetric: "Months Since Last Transaction",
+        currentValue: DEMO_DORMANCY_MONTHS,
+        expectedValue: 1,
+        recommendations: [
+          "Visit the cooperative and establish whether it still operates",
+          "Check whether the temporary operating permit was ever converted",
+          "Refer it for turnaround support before dissolution is considered",
+        ],
+        modelName: "SeedData v1.0",
+      });
+    }
+
+    // The licence to operate: a temporary permit on registration, converted a
+    // year later — except for the one cooperative deliberately left unconverted.
+    permitSeq += 1;
+    await seedPermits(coopId, c, permitSeq, { keepTemporary: c.key === unconvertedKey });
+
     console.log(`✓ ${c.name} — ${memberCount} members, RWF ${totalSavings.toLocaleString()} savings`);
   }
+
+  const permitSummary = await query(
+    `SELECT permit_type, term_years, COUNT(*) AS n FROM cooperative_permits
+      WHERE status = 'active' GROUP BY permit_type, term_years ORDER BY permit_type`
+  );
+  console.log(
+    `\n✓ Operating permits issued: ${permitSummary.rows
+      .map((r) => `${r.n} × ${r.permit_type} (${r.term_years}yr)`)
+      .join(", ")}`
+  );
+  console.log(
+    `  ${unconvertedKey} is left on an unconverted temporary permit — it appears in the ` +
+      "RCA's maturity-audit queue."
+  );
+
+  // ─── External support: funders, their programmes, and existing relations ──
+
+  const organizationIds = await seedSupportOrganizations();
+  console.log(
+    `✓ Partner register: ${organizationIds.size} support organisations with open programmes ` +
+      "(illustrative, not real organisations)"
+  );
+
+  // A couple of existing relationships, so the matcher's third factor is visible
+  // rather than every cooperative starting from a cold introduction.
+  const relationships: Array<[string, string, string, number, string]> = [
+    ["ZAMUKA", "Marshland Agribusiness Support Programme", "active", 78,
+      "Worked together on the last two planting seasons; the programme officer visits quarterly."],
+    ["COTAVOGA", "Urban Transport Cooperatives Development Fund", "introduced", 45,
+      "Introduced by the Kinyinya sector cooperative officer. No funding yet."],
+    ["FODECO", "Gasabo Cooperative Union", "active", 65,
+      "Founder member of the union's collective purchasing scheme."],
+    ["ADARWA", "Artisan Trades Skills Foundation", "completed", 55,
+      "Completed a tooling grant two years ago; the relationship has since gone quiet."],
+  ];
+  let relationshipCount = 0;
+  for (const [coopKey, orgName, status, strength, notes] of relationships) {
+    const coopId = seededIds.get(coopKey);
+    const orgId = organizationIds.get(orgName);
+    if (!coopId || !orgId) continue;
+    await query(
+      `INSERT INTO cooperative_partnerships
+         (organization_id, cooperative_id, status, relationship_strength,
+          liaison_role, since, last_contact_on, notes)
+       VALUES ($1,$2,$3,$4,'Programme Officer',
+               CURRENT_DATE - INTERVAL '2 years', CURRENT_DATE - INTERVAL '3 months',$5)
+       ON CONFLICT (organization_id, cooperative_id) DO UPDATE SET
+         status = EXCLUDED.status, relationship_strength = EXCLUDED.relationship_strength,
+         notes = EXCLUDED.notes, updated_at = NOW()`,
+      [orgId, coopId, status, strength, notes]
+    );
+    relationshipCount += 1;
+  }
+  console.log(`✓ ${relationshipCount} existing funder relationships recorded\n`);
 
   // ─── Demo cooperative accounts ────────────────────────────────────────────
   // The manager and member logins belong to a real cooperative in the register

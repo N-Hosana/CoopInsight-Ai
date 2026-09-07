@@ -17,6 +17,9 @@ import notificationRoutes from "./routes/notifications";
 import securityRoutes from "./routes/security";
 import settingsRoutes from "./routes/settings";
 import integrationRoutes from "./routes/integrations";
+import permitRoutes from "./routes/permits";
+import auditRoutes from "./routes/audits";
+import fundingRoutes from "./routes/funding";
 import aiRoutes from "./routes/ai";
 
 dotenv.config();
@@ -60,6 +63,11 @@ app.use("/api/membership", membershipRoutes);
 app.use("/api/cooperative-requests", cooperativeRequestRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/activities", activityRoutes);
+
+// ── Licensing, audits & external support ─────
+app.use("/api/permits", permitRoutes);
+app.use("/api/audits", auditRoutes);
+app.use("/api/funding", fundingRoutes);
 
 // ── Dashboard & Monitoring ───────────────────
 app.use("/api/dashboard", dashboardRoutes);

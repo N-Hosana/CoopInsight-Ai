@@ -18,12 +18,15 @@ demonstration, or dipped into for a single feature.
 7. [Activities](#7-activities)
 8. [Membership exit and share settlement](#8-membership-exit-and-share-settlement)
 9. [Forming and dissolving cooperatives](#9-forming-and-dissolving-cooperatives)
-10. [The district league table](#10-the-district-league-table)
-11. [AI insights](#11-ai-insights)
-12. [Government oversight](#12-government-oversight)
-13. [Supporting features](#13-supporting-features)
-14. [Failure modes worth demonstrating](#14-failure-modes-worth-demonstrating)
-15. [Suggested 15-minute demo script](#15-suggested-15-minute-demo-script)
+10. [Operating permits and the maturity audit](#10-operating-permits-and-the-maturity-audit)
+11. [The monthly audit and the field-visit list](#11-the-monthly-audit-and-the-field-visit-list)
+12. [External support and funding matches](#12-external-support-and-funding-matches)
+13. [The district league table](#13-the-district-league-table)
+14. [AI insights](#14-ai-insights)
+15. [Government oversight](#15-government-oversight)
+16. [Supporting features](#16-supporting-features)
+17. [Failure modes worth demonstrating](#17-failure-modes-worth-demonstrating)
+18. [Suggested 15-minute demo script](#18-suggested-15-minute-demo-script)
 
 ---
 
@@ -68,15 +71,17 @@ Run these first. If any fail, fix that before demonstrating anything.
 
 | Check | Command | Expected |
 |---|---|---|
-| AI unit tests | `cd "CoopInsightAI AI" && .\.venv\Scripts\python.exe -m pytest tests/ -q` | 29 passed |
+| AI unit tests | `cd "CoopInsightAI AI" && .\.venv\Scripts\python.exe -m pytest tests/ -q` | 54 passed |
 | Backend types | `cd "CoopInsightAI Backend" && npx tsc --noEmit` | no output |
 | Frontend types | `cd "CoopInsightAI UI" && npx tsc --noEmit` | no output |
 | Backend build | `cd "CoopInsightAI Backend" && pnpm build` | `dist/` created |
 | Frontend build | `cd "CoopInsightAI UI" && pnpm build` | `dist/` created |
 
-The 29 unit tests cover the statistical core without needing a database — outlier
-detection, forecast damping, percentile fairness, and two regression tests for
-bugs that were found and fixed during development.
+The 54 unit tests cover the statistical core without needing a database —
+outlier detection, forecast damping, percentile fairness, the monthly audit's
+scoring rules and period selection, and several regression tests for bugs found
+and fixed during development (including an audit that defaulted to a month which
+had not happened yet).
 
 ---
 
@@ -240,22 +245,59 @@ history and **says so**, which is the honest behaviour to demonstrate.
 |---|---|---|
 | Validation — short reason | Enter under 20 characters | Rejected with a clear message |
 | Validation — no acknowledgement | Leave the checkbox unticked | Rejected |
-| Submit | Full reason, exit date, savings instruction, tick the box | "TMC has 14 days to respond" |
+| Submit | Full reason, exit date, savings instruction, tick the box | "TMC must call a general assembly to decide it and respond within 14 days" |
 | Countdown | Look at the tracker | "Response due in 14 days" with the deadline date |
 | Duplicate guard | Submit a second request | "You already have a request awaiting a response" |
-| Withdraw | Withdraw this request | Returns to no open request |
+| Withdraw | Withdraw this request | Returns to no open request, and any assembly called for it is cancelled |
 
-### Manager side
+### The general assembly decides it — not the manager
 
-Log in as **manager** → Membership. The request is in the queue.
+This is the part worth demonstrating carefully. Log in as **manager** →
+Membership; the request is in the queue.
 
-| Test | Expected |
+**Test A — the office cannot decide alone.** With no assembly called, there is no
+approve button; the panel says an assembly must be convened first. Via the API:
+
+```bash
+curl -X PATCH http://localhost:5000/api/membership/exit-requests/<id>/decision \
+  -H "Authorization: Bearer <manager token>" -H 'Content-Type: application/json' \
+  -d '{"decision":"approved","note":"Fine by me"}'
+# → "No general assembly has resolved on this request yet…"  requiresMeeting: true
+```
+
+**Test B — notice period.** Call an assembly for three days' time.
+Expected: *"Members must be given at least 7 days' notice."*
+
+**Test C — call it properly.** Pick a date at least 7 days out and a location.
+
+Expected: *"General assembly called for … 25 of 49 members must attend for the
+vote to stand."* Then check two things:
+
+- **Activities** now shows *"General Assembly — removal request: UWIHOREYE
+  Josephine"* on that date. The meeting is a real calendar entry, not a hidden
+  record.
+- Every member of the cooperative has a notification.
+
+**Test D — the vote is checked, not trusted.** Try each of these when recording
+the outcome:
+
+| Figures entered | Expected |
 |---|---|
-| Reject without a note | Rejected — a note is required |
-| Mark under review | Status changes, member notified |
-| Approve | Member removed from the register, login unlinked from the cooperative |
+| 9 present, 8 for, resolution *approve* | Refused — quorum is 25 of 49; record it as deferred |
+| 30 present, 40 votes cast | Refused — more votes than attendees |
+| 30 present, 10 for / 18 against, minuted as *approve* | Refused — the vote does not carry |
+| Any resolution with no minute of the reasoning | Refused — the member is entitled to know why |
+| 31 present, 24 for / 5 against / 2 abstain, *approve*, with a minute | Accepted, quorum met |
 
-Confirm afterwards: the member no longer appears in the Members list.
+**Test E — the decision must match the resolution.** With the assembly having
+voted to release her, try to record a rejection.
+
+Expected: *"The general assembly resolved to approve exit (24 for, 5 against), so
+this request can only be recorded as approved."*
+
+Now record the approval. Confirm afterwards: she no longer appears in the Members
+list, her login is unlinked from TMC, and `member_status_log` carries the
+assembly's reasoning as the stated reason.
 
 > Run `pnpm seed` afterwards to restore her.
 
@@ -310,18 +352,245 @@ registration number derived from the application reference.
 Also test **Reject** (note required) and **Return for more information**
 (stays at the same stage for the applicant to fix).
 
-### Dissolution
+Note what final RCA approval also does now: it **issues the new cooperative's
+first operating permit**, a temporary one valid for a year. The response carries
+`issuedPermit`, and the cooperative appears on the Operating Permits page.
 
-As **manager** → Cooperative Requests → *Request dissolution*. Provide grounds,
-the assembly vote, liabilities and an asset-disposal plan. Run it through the
-same three stages. Final RCA approval **strikes the cooperative off** and unlinks
-its members.
+### Dissolution — deliberately harder than formation
 
-> This genuinely deletes TMC from the active register. Run `pnpm seed` afterwards.
+As **manager** (*RUKUNDO Emmanuel*, who is TMC's president) → Cooperative
+Requests → *Request dissolution*. Provide grounds, the assembly vote, liabilities
+and an asset-disposal plan.
+
+**Test A — only the president may file it.** Log in as any member who is not
+recorded as president in the cooperative's leadership record and try.
+
+Expected: *"Only the president of … may request its dissolution. Your account is
+not recorded as holding that office…"*
+
+**Test B — the shorter clock.** On submission the response says the target is
+**14 days end-to-end**, and each stage gets a third of that rather than the three
+weeks a formation enjoys. The request carries both a per-stage `response_due_at`
+and an end-to-end `target_completion_at`.
+
+**Test C — the RCA cannot approve before it audits.** Run it through sector
+(`remera.officer@`) and district (`district.officer@`), then as
+`gov@coopinsight.rw` try to approve.
+
+Expected: *"A cooperative cannot be struck off before the RCA has audited the
+grounds."* (`requiresAudit: true`)
+
+**Test D — the audit catches a cooperative that is still trading.** Press
+**Open the RCA audit**. Against seeded TMC the pre-assessment reads about **73%**
+and flags, in plain words:
+
+```
+The cooperative traded in 12 of the last 12 complete months and ran a surplus of
+RWF 5,350,000. Dissolving a cooperative that is still trading needs a stronger
+explanation.
+No field visit or funding referral was recorded before dissolution was requested.
+```
+
+> Money figures shift a little between seeds, because the seed generates 18
+> months of history relative to the day you ran it. The *shape* of the finding —
+> traded in every month, still in surplus, no support attempted — is stable.
+
+It also confirms the vote carried: *"38 for, 6 against, 2 abstained (83% in
+favour; two-thirds required)."*
+
+**Test E — a refused audit blocks the approval.** Conclude the audit as *the
+grounds do not hold*, then try to approve anyway.
+
+Expected: *"Audit AUD/… found the grounds do not hold, so the dissolution cannot
+be approved. Reject the request, or reopen the audit."*
+
+**Test F — the full path.** Conclude the audit as *the grounds hold*, then
+approve at RCA. This **strikes the cooperative off**, revokes its operating
+permit, unlinks its members and cancels any queued field visit.
+
+> This genuinely removes TMC from the active register. Run `pnpm seed` afterwards.
 
 ---
 
-## 10. The district league table
+## 10. Operating permits and the maturity audit
+
+Registration does not hand a cooperative a licence for life. The RCA issues a
+one-year temporary permit; a maturity audit before it lapses converts it to a
+permanent permit of 30 years — or 50 for industrial and rice-growing
+cooperatives.
+
+### What the seed gives you
+
+Log in as **gov@coopinsight.rw** → **Operating Permits**.
+
+Six cooperatives hold permanent 30-year permits, each with the superseded
+temporary permit that preceded it, dated from its real registration. **UNITAX is
+deliberately left on an unconverted temporary permit** expiring in about 45 days —
+that is the case the queue exists for.
+
+| Test | Expected |
+|---|---|
+| Conversion queue | UNITAX appears under *Temporary permits falling due*, with days remaining |
+| Term rule is visible | Each permanent permit shows the rule that set its term and the reason |
+| Cooperative view | Log in as **manager** → Operating Permits: TMC sees its own permit and a readiness score against the same criteria the RCA will use |
+| Self-service | Press *Ask the RCA to audit us* — RCA officers are notified with the pre-assessment |
+
+### Running the maturity audit
+
+As the RCA officer, press **Open maturity audit** on UNITAX.
+
+Expected against seeded data: roughly **50%**, recommending *extend the temporary
+permit*, with the mandatory failures named — *the cooperative actually traded*
+and *general assembly held* — and the evidence spelled out:
+
+```
+Income recorded in 3 month(s) since the permit was issued.
+0 general assembly meeting(s) recorded in the permit year.
+81% of members participated.
+Balance sheet on file.
+```
+
+| Test | Expected |
+|---|---|
+| Conclude with no findings | Refused — at least 20 characters required |
+| Conclude as *extend temporary* | A fresh one-year temporary permit is issued and the old one superseded |
+| Conclude as *issue permanent* | A 30-year permanent permit is issued (50 for industry/rice), with its basis recorded |
+| Conclude as *revoke* | The permit is revoked and the cooperative suspended on the register |
+| Either way | The cooperative is notified, and the outcome appears in AI Insights |
+| Double-open guard | Try to open a second audit — refused, one is already in progress |
+
+### The 30 / 50-year rule
+
+The term is decided by `services/permits.ts` from the cooperative's registered
+type, falling back to its name and description — a rice cooperative is usually
+registered under the general "Agriculture" type with the crop named only in its
+narrative. None of the seven seeded cooperatives is recorded as rice-growing or
+industrial, so all seven take the standard 30 years, and the stored basis says
+exactly why. To see the extended term fire, register a formation request with a
+type such as *Rice Growing* or *Agro-processing Industry* and convert it.
+
+---
+
+## 11. The monthly audit and the field-visit list
+
+This is the feature that exists because cooperatives do not announce that they
+have stopped working — they go quiet, and are found out a year later.
+
+**The AI service must be running.** Log in as **gov@coopinsight.rw** →
+**Monthly Audit** → *Run this month's audit*.
+
+Expected: *"Monthly audit for 2026-08 complete: 7 cooperative(s) assessed,
+1 field visit(s) raised."*
+
+### District standings
+
+Switch to the **District standings** tab. Six cooperatives sit in *healthy*;
+**UNITAX scores about 18/100 and is banded *critical* and *dormant***, because
+the seed stops its trading eight months back on purpose.
+
+Expand UNITAX. It should list, in plain language:
+
+```
+Nothing has been recorded for 8 months — the cooperative looks dormant.
+Income was recorded in only 0 of the last 6 months.
+No meeting has been held in the last 6 months.
+2 of 3 office-bearers are recorded by name.
+The temporary operating permit expires in 52 days.
+```
+
+Note the last line — the audit reads the permit too, so one screen connects the
+dormancy to the licence that was never converted.
+
+### The visit list
+
+The **Visit list** tab carries one priority-1 visit, automatically assigned to
+the **Kimihurura sector officer** who covers UNITAX, with recommended actions
+including *"Visit and establish whether the cooperative still operates at all. If
+it does not, advise the president on the dissolution process before members lose
+their savings."*
+
+| Test | Expected |
+|---|---|
+| Re-run the audit | *"0 field visit(s) raised"* — the standings are updated in place, the open visit is not duplicated |
+| Close a visit with no findings | Refused — at least 20 characters, and an outcome is required |
+| Sector officer scope | Log in as `kimihurura.officer@` — sees the visit; `gisozi.officer@` does not |
+| Close as *referred for funding* | TMC-style managers of that cooperative are notified to open their funding matches |
+
+### Two honesty checks worth showing
+
+**Evidence quality.** Expand any row: it reports how much of the band rests on
+records that exist rather than on their absence. A cooperative flagged mainly on
+silence is labelled *"Flagged on missing records"* — it may simply not be using
+the system, and the officer is told to verify on the visit rather than conclude.
+
+**The period default.** The audit defaults to the **last completed month**, never
+the one in progress. Ask for the current month explicitly and the `note` warns
+that the scores understate every cooperative that trades later in the month.
+`tests/test_monthly_audit.py` pins this behaviour, including the January
+roll-back into the previous year.
+
+---
+
+## 12. External support and funding matches
+
+Log in as **gov@coopinsight.rw** → **External Support**.
+
+### Who funds cooperatives
+
+The **Who funds cooperatives** tab lists six organisations. Read the banner: they
+are **illustrative**, named after the kind of funder they represent rather than
+after real NGOs, so nothing on screen is a claim about a real organisation. The
+seven cooperatives are real; these funders are not.
+
+### The three-factor match
+
+Open **Matches** and pick a cooperative. The ranking weights specialisation 45%,
+the cooperative's current condition 35% and the existing relationship 20%, and
+every score comes back with a reason for each factor.
+
+**Test A — the rescue fund finds the dormant cooperative.** Pick **UNITAX**
+(critical). Top match ≈ **84/100**: *Dormant cooperative rescue package* — the
+programme funds any type, and *"UNITAX is currently assessed as 'critical', which
+is exactly who this programme is for."*
+
+**Test B — blockers are separated from the score.** Further down, *Fleet renewal
+working capital facility* scores 0.54 but is marked **not eligible**, with what
+would have to change:
+
+```
+requires a health score of at least 60; UNITAX is at 54.
+is open only to cooperatives holding a permanent permit. UNITAX is still on a
+temporary permit.
+```
+
+That second line ties the funding page back to the permits page — the permit that
+was never converted is costing them money.
+
+**Test C — relationship counts.** Pick **ZAMUKA**. Top match ≈ **99/100** for the
+*Post-harvest handling equipment grant*: right specialisation, right condition,
+and a seeded relationship at 78/100 with the programme officer. Compare it with a
+cooperative that has no relationship with that funder — same specialisation, a
+visibly lower score, and the reason says so.
+
+**Test D — specialisation is not given away.** A programme that targets only
+*Agriculture* scores **0** on specialisation for a Transport cooperative, not
+partial credit. An empty target list means the funder did not filter on that
+dimension, which is not the same as a match.
+
+### Applying, deciding, disbursing
+
+| Test | Expected |
+|---|---|
+| Apply with a two-word purpose | Refused — at least 40 characters |
+| Apply to a programme you are blocked from | Refused up front, with the blockers listed — not filed to be rejected later |
+| Duplicate application | Refused while the first is still open |
+| Reject without a note | Refused — the funder's reason is required |
+| Approve | The relationship is upgraded to *active* at strength 70, which lifts that cooperative's next match |
+| Record a disbursement | The amount is **posted to the cooperative's income** at the same time; check Financials for a "Grants & Donations" transaction referencing the application |
+
+---
+
+## 13. The district league table
 
 Log in as **gov@coopinsight.rw** → **League Table**.
 
@@ -357,7 +626,7 @@ shown alongside, so absolute movement stays visible.
 
 ---
 
-## 11. AI insights
+## 14. AI insights
 
 Log in as **manager** → **AI Insights**.
 
@@ -401,7 +670,7 @@ curl -X POST http://localhost:8000/retrain -H "Content-Type: application/json" -
 
 ---
 
-## 12. Government oversight
+## 15. Government oversight
 
 Log in as **gov@coopinsight.rw**.
 
@@ -419,7 +688,7 @@ the register — UMULISA (Gisozi), CARINE (Kimihurura), KASINE Dorothee
 
 ---
 
-## 13. Supporting features
+## 16. Supporting features
 
 | Feature | Test | Expected |
 |---|---|---|
@@ -434,7 +703,7 @@ the register — UMULISA (Gisozi), CARINE (Kimihurura), KASINE Dorothee
 
 ---
 
-## 14. Failure modes worth demonstrating
+## 17. Failure modes worth demonstrating
 
 Showing graceful degradation is stronger than showing only the happy path.
 
@@ -457,30 +726,60 @@ Restart it and the pages recover with no page reload logic beyond a refresh.
 | Direct URL to a forbidden page | Redirected home by `RoleRoute` |
 | Cancel a transaction with no reason | Rejected by the backend |
 | Reject an exit request with no note | Rejected by the backend |
+| Approve an exit with no assembly resolution | Rejected — `requiresMeeting: true` |
+| Record a vote that did not reach quorum as carried | Rejected — record it as deferred |
+| Approve a dissolution before the RCA audit | Rejected — `requiresAudit: true` |
+| Approve a dissolution the audit refused | Rejected, naming the audit reference |
+| Apply for funding you are blocked from | Rejected up front, with the blockers |
+| Run the monthly audit with the AI service down | `503`, and **nothing is written** — no partial results |
 
 ---
 
-## 15. Suggested 15-minute demo script
+## 18. Suggested 20-minute demo script
+
+The strongest version of this demo follows **one cooperative — UNITAX — all the
+way through**, because the seed deliberately makes it the cooperative that fell
+through the cracks: never audited, still on a temporary permit, and silent for
+eight months. Every feature then has a reason to exist rather than being a tab.
 
 1. **(1 min)** Log in as **member**. Membership → *Calculate my settlement*.
    Show the breakdown and the disclaimer.
-2. **(2 min)** Request removal. Show the 14-day countdown and the duplicate
-   guard.
-3. **(1 min)** Log in as **manager**. Show the request in the queue; try to
-   reject without a note.
-4. **(3 min)** Cooperative Requests. File a weak formation application — show it
-   predicted **not eligible at 17%** with reasons. File a strong one, attach
+2. **(3 min)** Request removal. Then as **manager**, try to approve it — the
+   system refuses: members decide, not the office. Call a general assembly, show
+   it appear on the **Activities** calendar, then try to minute a vote that did
+   not reach quorum. Record a proper vote and only then the decision. This is the
+   sharpest governance point in the system.
+3. **(3 min)** As **RCA**, open **Monthly Audit** → *Run this month's audit*.
+   Six healthy, **UNITAX critical and dormant**. Expand it and read the reasons
+   aloud — including that its temporary permit expires in 52 days. One priority-1
+   visit is raised and auto-assigned to the Kimihurura sector officer.
+4. **(2 min)** Open **Operating Permits**. UNITAX is the one temporary permit in
+   the conversion queue. Open the maturity audit: ~50%, mandatory failures named
+   with the evidence. Extend it, and show the new permit supersede the old.
+5. **(2 min)** Open **External Support** → Matches for UNITAX. Top match is the
+   turnaround fund because it is *critical*. Then show the fleet-renewal facility
+   marked **not eligible** — *"open only to cooperatives holding a permanent
+   permit"*. The permit nobody converted is costing them money. Then show ZAMUKA
+   at 99/100 and point at the relationship factor.
+6. **(3 min)** **Cooperative Requests**. File a weak formation application — show
+   it predicted **not eligible at 17%** with reasons. File a strong one, attach
    documents, watch it climb to **100% eligible**. Note the confidence stays at
    0.78 and say why.
-5. **(3 min)** Log in as **sector officer** → approve. Then **district** →
-   approve. Then **RCA** → approve, and show the new cooperative appear on the
-   register.
-6. **(3 min)** As RCA, open the **League Table**. Podium, dimensions, expand a
-   row for the evidence, change the month to show movement. Point out the `—`
-   cells and explain why missing data is excluded rather than zeroed.
-7. **(2 min)** Run anomaly detection on UNITAX; show the z-score +5.36 finding.
-   Open Model Performance and explain why each model reports a different metric.
+7. **(2 min)** Approve it through **sector → district → RCA**. Show the new
+   cooperative appear on the register **with a temporary permit issued in the
+   same act**.
+8. **(2 min)** File a dissolution as TMC's president. Try to approve it at RCA —
+   blocked until the audit runs. Open the audit and read what it caught: *"the
+   cooperative traded in 12 of the last 12 complete months and ran a surplus of
+   RWF 5.35m"*. Refuse it, and show that approval is now impossible.
+9. **(2 min)** As RCA, open the **League Table** — podium, dimensions, expand a
+   row for the evidence, change the month for movement. Point out the `—` cells
+   and explain why missing data is excluded rather than zeroed.
 
 Close on the honest limitations from the README — that the demo data is
-generated, that the eligibility assessor checks presence not content, and that
-the statistics were chosen because the dataset has no labels to learn from.
+generated, that the partner register is illustrative while the cooperatives are
+real, that the eligibility assessor checks presence not content, and that the
+statistics were chosen because the dataset has no labels to learn from. Then say
+the thing that makes the monthly audit defensible: it counts silence against a
+cooperative, which the rest of the system deliberately never does, and it is only
+allowed to because its output is a **visit**, not a verdict.

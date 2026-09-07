@@ -14,7 +14,7 @@ import logging
 from fastapi import APIRouter
 
 from .. import features, registry
-from ..analytics import anomalies, benchmarks, engagement, forecasting, rankings
+from ..analytics import anomalies, benchmarks, engagement, forecasting, monthly_audit, rankings
 from ..schemas import (
     ModelInfo,
     ModelPerformanceResponse,
@@ -33,6 +33,7 @@ FITTERS = {
     engagement.MODEL_NAME: engagement.fit,
     benchmarks.MODEL_NAME: benchmarks.fit,
     rankings.MODEL_NAME: rankings.fit,
+    monthly_audit.MODEL_NAME: monthly_audit.fit,
 }
 
 

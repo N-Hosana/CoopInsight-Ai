@@ -23,6 +23,13 @@
  * audit workflow and the UI all read from it.
  */
 
+import {
+  BOARD,
+  ORDINARY_ASSEMBLY_MONTHS,
+  ORDINARY_ASSEMBLY_MONTH_NAMES,
+  voteCarries,
+} from "./governance";
+
 export const PERMIT_TERMS = {
   /** Length of the first permit every new cooperative receives, in years. */
   temporaryYears: 1,
@@ -168,9 +175,10 @@ export const MATURITY_AUDIT_CRITERIA: AuditCriterion[] = [
   },
   {
     id: "general_assembly",
-    label: "General assembly held",
+    label: "Ordinary general assemblies held",
     requirement:
-      "At least one general assembly meeting was held and minuted during the permit year.",
+      `The ordinary general assembly sat in ${ORDINARY_ASSEMBLY_MONTH_NAMES} as the RCA rules ` +
+      "require, and the meetings were minuted.",
     mandatory: true,
     weight: 2,
   },
@@ -190,8 +198,10 @@ export const MATURITY_AUDIT_CRITERIA: AuditCriterion[] = [
   },
   {
     id: "leadership_complete",
-    label: "Leadership in place",
-    requirement: "President, vice president and secretary are all recorded and reachable.",
+    label: "Board of Directors in place",
+    requirement:
+      `All ${BOARD.standardSize} board seats are filled and recorded — ` +
+      `${BOARD.namedOffices.join(", ")} and two advisors.`,
     mandatory: false,
     weight: 1,
   },
@@ -231,7 +241,12 @@ export interface MaturityFacts {
   monthsWithIncome: number;
   memberCount: number;
   minMembers: number;
+  /** Every assembly meeting recorded in the period. */
   generalAssemblies: number;
+  /** Those that fell in March or October — the RCA's ordinary sittings. */
+  ordinaryAssemblies: number;
+  /** Filled seats on the Board of Directors; the RCA expects five. */
+  boardSeatsFilled: number;
   /** Share of members with any attendance or contribution; null when unmeasurable. */
   participationRate: number | null;
   hasTransactions: boolean;
@@ -264,10 +279,14 @@ export function assessMaturity(facts: MaturityFacts): MaturityAssessment {
     facts.memberCount >= facts.minMembers,
     `${facts.memberCount} members on the register (minimum ${facts.minMembers}).`
   );
+  // The RCA expects an ordinary assembly in each of March and October. A
+  // permit year spans both, so one is a partial failure and none is a clear one.
   check(
     "general_assembly",
-    facts.generalAssemblies >= 1,
-    `${facts.generalAssemblies} general assembly meeting(s) recorded in the permit year.`
+    facts.ordinaryAssemblies >= ORDINARY_ASSEMBLY_MONTHS.length,
+    `${facts.ordinaryAssemblies} of ${ORDINARY_ASSEMBLY_MONTHS.length} ordinary assemblies ` +
+      `(${ORDINARY_ASSEMBLY_MONTH_NAMES}) recorded in the permit year; ` +
+      `${facts.generalAssemblies} assembly meeting(s) in total.`
   );
   check(
     "member_participation",
@@ -281,7 +300,11 @@ export function assessMaturity(facts: MaturityFacts): MaturityAssessment {
     facts.hasTransactions && facts.hasBalanceSheet,
     facts.hasBalanceSheet ? "Balance sheet on file." : "No balance sheet has been filed."
   );
-  check("leadership_complete", facts.leadershipComplete);
+  check(
+    "leadership_complete",
+    facts.boardSeatsFilled >= BOARD.standardSize,
+    `${facts.boardSeatsFilled} of ${BOARD.standardSize} board seats recorded.`
+  );
   check(
     "governance_documents",
     facts.governanceDocuments >= 2,
@@ -424,18 +447,19 @@ export function assessDissolution(facts: DissolutionFacts): DissolutionAssessmen
   const votesFor = facts.votesFor ?? 0;
   const votesAgainst = facts.votesAgainst ?? 0;
   const votesAbstain = facts.votesAbstain ?? 0;
-  const cast = votesFor + votesAgainst + votesAbstain;
-  // Rwandan cooperative bylaws generally require a two-thirds majority of the
-  // members present to dissolve. Recorded here as configuration, not law.
-  const carried = cast > 0 && votesFor / cast >= 2 / 3;
+
+  // Dissolution is one of the matters the RCA brochure reserves to a
+  // REINFORCED majority: "decisions on ... dissolving the cooperative require
+  // an Assembly attended and voted on by at least three-quarters of the members
+  // or representatives present." The threshold therefore comes from
+  // governance.ts rather than being guessed at here.
+  const resolution = voteCarries("dissolve", votesFor, votesAgainst, votesAbstain);
+  const cast = resolution.cast;
 
   check(
     "member_resolution",
-    carried,
-    cast === 0
-      ? "No general assembly vote was recorded on the request."
-      : `${votesFor} for, ${votesAgainst} against, ${votesAbstain} abstained ` +
-        `(${Math.round((votesFor / cast) * 100)}% in favour; two-thirds required).`
+    resolution.carried,
+    cast === 0 ? "No general assembly vote was recorded on the request." : resolution.basis
   );
   check("grounds_stated", facts.reasonLength >= 30);
   check(

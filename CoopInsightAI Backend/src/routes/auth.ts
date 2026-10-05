@@ -184,7 +184,8 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
     await query("DELETE FROM otp_codes WHERE id = $1", [otpRecord.id]);
 
     const userResult = await query(
-      `SELECT u.id, u.name, u.email, u.role, u.cooperative_id, u.sector, u.email_verified,
+      `SELECT u.id, u.name, u.email, u.role, u.cooperative_id, u.sector, u.cell,
+              u.oversight_level, u.email_verified,
               c.name AS cooperative_name
        FROM users u
        LEFT JOIN cooperatives c ON c.id = u.cooperative_id
@@ -198,7 +199,19 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
     }
 
     const accessToken = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role, cooperativeId: user.cooperative_id, name: user.name },
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        cooperativeId: user.cooperative_id,
+        name: user.name,
+        // Which tier of the oversight chain this account acts at, if any. It
+        // belongs in the token because authorisation turns on it: `government`
+        // alone does not say whether the holder decides at sector, district or
+        // RCA level, and the request chain needs to know which.
+        oversightLevel: user.oversight_level,
+        sector: user.sector,
+      },
       process.env.JWT_SECRET!,
       { expiresIn: "30m" }
     );
@@ -218,6 +231,8 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
         cooperativeId: user.cooperative_id,
         cooperativeName: user.cooperative_name,
         sector: user.sector,
+        cell: user.cell,
+        oversightLevel: user.oversight_level,
         emailVerified: user.email_verified,
       },
     });
@@ -500,7 +515,19 @@ router.post("/refresh-token", async (req: Request, res: Response) => {
     }
 
     const accessToken = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role, cooperativeId: user.cooperative_id, name: user.name },
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        cooperativeId: user.cooperative_id,
+        name: user.name,
+        // Which tier of the oversight chain this account acts at, if any. It
+        // belongs in the token because authorisation turns on it: `government`
+        // alone does not say whether the holder decides at sector, district or
+        // RCA level, and the request chain needs to know which.
+        oversightLevel: user.oversight_level,
+        sector: user.sector,
+      },
       process.env.JWT_SECRET!,
       { expiresIn: "30m" }
     );
@@ -528,7 +555,7 @@ router.get("/me", authenticate, async (req: Request, res: Response) => {
   try {
     const result = await query(
       `SELECT u.id, u.name, u.email, u.phone, u.role, u.sector, u.cell, u.cooperative_id,
-              u.email_verified, u.created_at, c.name AS cooperative_name
+              u.oversight_level, u.email_verified, u.created_at, c.name AS cooperative_name
        FROM users u
        LEFT JOIN cooperatives c ON c.id = u.cooperative_id
        WHERE u.id = $1`,
@@ -550,6 +577,7 @@ router.get("/me", authenticate, async (req: Request, res: Response) => {
       cell: user.cell,
       cooperativeId: user.cooperative_id,
       cooperativeName: user.cooperative_name,
+      oversightLevel: user.oversight_level,
       emailVerified: user.email_verified,
       createdAt: user.created_at,
     });

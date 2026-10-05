@@ -1,11 +1,12 @@
 import { Router, Request, Response } from "express";
 import { query, getClient } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
+import { writableCooperative } from "../services/cooperativeAccess";
 
 const router = Router();
 
 const INCOME_CATEGORIES = ["member_contributions", "loan_repayments", "grants", "product_sales", "service_fees", "donations"];
-const EXPENSE_CATEGORIES = ["loan_disbursements", "operational_costs", "salaries", "training", "equipment", "utilities"];
+const EXPENSE_CATEGORIES = ["loan_disbursements", "dividends", "operational_costs", "salaries", "training", "equipment", "utilities"];
 const ALL_CATEGORIES = [...INCOME_CATEGORIES, ...EXPENSE_CATEGORIES];
 
 // GET / — list transactions
@@ -27,8 +28,11 @@ router.get("/", authenticate, async (req: Request, res: Response) => {
       conditions.push(`t.cooperative_id = $${params.length + 1}`);
       params.push(userCoopId);
     } else if (role === "member") {
-      conditions.push(`t.member_id = (SELECT id FROM members WHERE cooperative_id = $${params.length + 1} AND deleted_at IS NULL LIMIT 1)`);
-      params.push(userCoopId);
+      // The member's own entries only, through the stored login→member link.
+      // This used to pick "the first member found in the cooperative", so a
+      // member was shown somebody else's transactions.
+      conditions.push(`t.member_id = (SELECT member_id FROM users WHERE id = $${params.length + 1})`);
+      params.push(req.user!.userId);
     } else if (cooperativeId) {
       conditions.push(`t.cooperative_id = $${params.length + 1}`);
       params.push(cooperativeId);
@@ -106,6 +110,10 @@ router.get("/summary", authenticate, async (req: Request, res: Response) => {
     if (role === "manager" || role === "cooperative") {
       conditions.push(`cooperative_id = $${params.length + 1}`);
       params.push(userCoopId);
+    } else if (role === "member") {
+      // A member's summary is their own money, not the district's.
+      conditions.push(`member_id = (SELECT member_id FROM users WHERE id = $${params.length + 1})`);
+      params.push(req.user!.userId);
     } else if (cooperativeId) {
       conditions.push(`cooperative_id = $${params.length + 1}`);
       params.push(cooperativeId);
@@ -229,6 +237,139 @@ router.get("/balance-sheet", authenticate, async (req: Request, res: Response) =
   }
 });
 
+// ─── Balance sheets, as the manager files them ───────────────────────────────
+//
+// The audit asks "when was the last balance sheet filed?" and the RCA brochure
+// expects one a year. Until now the table could be read but never written, so
+// every cooperative was told it had never filed one and could do nothing about
+// it. The manager enters the closing figures; the sheet must balance.
+
+const BALANCE_SHEET_FIELDS = {
+  assets: ["cash", "bankBalance", "loansOutstanding", "inventory", "fixedAssets"],
+  liabilities: ["memberSavings", "externalLoans", "accountsPayable"],
+  equity: ["shareCapital", "retainedEarnings"],
+} as const;
+
+const COLUMN: Record<string, string> = {
+  cash: "cash",
+  bankBalance: "bank_balance",
+  loansOutstanding: "loans_outstanding",
+  inventory: "inventory",
+  fixedAssets: "fixed_assets",
+  memberSavings: "member_savings",
+  externalLoans: "external_loans",
+  accountsPayable: "accounts_payable",
+  shareCapital: "share_capital",
+  retainedEarnings: "retained_earnings",
+};
+
+// GET /balance-sheets — every sheet the cooperative has filed, newest first.
+router.get("/balance-sheets", authenticate, async (req: Request, res: Response) => {
+  try {
+    const role = req.user!.role;
+    const coopId =
+      ["manager", "cooperative", "member"].includes(role)
+        ? req.user!.cooperativeId
+        : (req.query.cooperativeId as string | undefined);
+    if (!coopId) return res.status(400).json({ success: false, message: "cooperativeId is required" });
+
+    const result = await query(
+      `SELECT * FROM balance_sheets WHERE cooperative_id = $1 ORDER BY period_end DESC`,
+      [coopId]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error("GET /transactions/balance-sheets error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// POST /balance-sheet — file (or correct) the balance sheet for a period.
+router.post("/balance-sheet", authenticate, async (req: Request, res: Response) => {
+  try {
+    const access = writableCooperative(req, req.body.cooperativeId);
+    if (!access.ok) return res.status(access.status).json({ success: false, message: access.message });
+
+    const { periodStart, periodEnd } = req.body;
+    if (!periodStart || !periodEnd || !/^\d{4}-\d{2}-\d{2}$/.test(periodStart) || !/^\d{4}-\d{2}-\d{2}$/.test(periodEnd)) {
+      return res.status(400).json({ success: false, message: "periodStart and periodEnd (YYYY-MM-DD) are required." });
+    }
+    if (periodEnd <= periodStart) {
+      return res.status(400).json({ success: false, message: "The period must end after it starts." });
+    }
+    if (periodEnd > new Date().toISOString().slice(0, 10)) {
+      return res.status(400).json({ success: false, message: "A balance sheet is drawn up at the close of a period that has ended." });
+    }
+
+    const values: Record<string, number> = {};
+    for (const key of Object.keys(COLUMN)) {
+      const raw = req.body[key];
+      const n = raw == null || raw === "" ? 0 : Number(raw);
+      if (!Number.isFinite(n)) {
+        return res.status(400).json({ success: false, message: `${key} must be a number.` });
+      }
+      // Retained earnings go negative after a loss; nothing else can.
+      if (n < 0 && key !== "retainedEarnings") {
+        return res.status(400).json({ success: false, message: `${key} cannot be negative.` });
+      }
+      values[key] = n;
+    }
+
+    const sum = (keys: readonly string[]) => keys.reduce((a, k) => a + values[k], 0);
+    const assets = sum(BALANCE_SHEET_FIELDS.assets);
+    const liabilities = sum(BALANCE_SHEET_FIELDS.liabilities);
+    const equity = sum(BALANCE_SHEET_FIELDS.equity);
+    if (Math.abs(assets - (liabilities + equity)) > 1) {
+      return res.status(400).json({
+        success: false,
+        message:
+          `The sheet does not balance: assets ${assets.toLocaleString()} RWF against liabilities and ` +
+          `equity ${(liabilities + equity).toLocaleString()} RWF (a difference of ` +
+          `${(assets - liabilities - equity).toLocaleString()} RWF).`,
+        totals: { assets, liabilities, equity },
+      });
+    }
+
+    // One sheet per period end: filing again for the same date corrects it.
+    const existing = await query(
+      `SELECT id FROM balance_sheets WHERE cooperative_id = $1 AND period_end = $2`,
+      [access.cooperativeId, periodEnd]
+    );
+    const columns = Object.values(COLUMN);
+    const ordered = Object.keys(COLUMN).map((k) => values[k]);
+    let saved;
+    if (existing.rowCount) {
+      saved = await query(
+        `UPDATE balance_sheets
+            SET period_start = $1, ${columns.map((c, i) => `${c} = $${i + 2}`).join(", ")},
+                generated_at = NOW()
+          WHERE id = $${columns.length + 2}
+          RETURNING *`,
+        [periodStart, ...ordered, existing.rows[0].id]
+      );
+    } else {
+      saved = await query(
+        `INSERT INTO balance_sheets (cooperative_id, period_start, period_end, ${columns.join(", ")}, generated_at)
+         VALUES ($1, $2, $3, ${columns.map((_, i) => `$${i + 4}`).join(", ")}, NOW())
+         RETURNING *`,
+        [access.cooperativeId, periodStart, periodEnd, ...ordered]
+      );
+    }
+
+    res.status(existing.rowCount ? 200 : 201).json({
+      success: true,
+      message: existing.rowCount
+        ? `Balance sheet to ${periodEnd} corrected.`
+        : `Balance sheet to ${periodEnd} filed.`,
+      data: saved.rows[0],
+      totals: { assets, liabilities, equity },
+    });
+  } catch (err) {
+    console.error("POST /transactions/balance-sheet error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // GET /periods
 router.get("/periods", authenticate, async (req: Request, res: Response) => {
   try {
@@ -284,6 +425,114 @@ router.get("/savings", authenticate, async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("GET /transactions/savings error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── Member money, cooperative-wide ──────────────────────────────────────────
+//
+// Loans, dividends and savings are recorded per member, but the Financials page
+// reads them per cooperative — and it had nothing to read, so its three tabs
+// showed sample data. These list them across the caller's scope: a cooperative
+// sees its own, a sector officer their sector, everyone above the district (or
+// one cooperative when `cooperativeId` is given).
+
+async function memberMoneyScope(
+  req: Request,
+  memberColumn: string
+): Promise<{ clause: string; params: unknown[] } | null> {
+  const role = req.user!.role;
+  if (role === "member") {
+    // A member sees their own loans, dividends and savings — never a colleague's.
+    return {
+      clause: `${memberColumn} = (SELECT member_id FROM users WHERE id = $1)`,
+      params: [req.user!.userId],
+    };
+  }
+  if (["manager", "cooperative"].includes(role)) {
+    if (!req.user!.cooperativeId) return null;
+    return { clause: "c.id = $1", params: [req.user!.cooperativeId] };
+  }
+  const me = await query(`SELECT sector, oversight_level FROM users WHERE id = $1`, [req.user!.userId]);
+  const params: unknown[] = [];
+  const parts: string[] = ["c.deleted_at IS NULL"];
+  if (role === "government" && me.rows[0]?.oversight_level === "sector") {
+    params.push(me.rows[0].sector);
+    parts.push(`c.sector = $${params.length}`);
+  }
+  if (req.query.cooperativeId) {
+    params.push(req.query.cooperativeId);
+    parts.push(`c.id = $${params.length}`);
+  }
+  return { clause: parts.join(" AND "), params };
+}
+
+// GET /loans — every loan to a member, with what has been repaid.
+router.get("/loans", authenticate, async (req: Request, res: Response) => {
+  try {
+    const scope = await memberMoneyScope(req, "l.member_id");
+    if (!scope) return res.json({ success: true, data: [] });
+    const result = await query(
+      `SELECT l.id, l.member_id, m.full_name AS member_name, l.cooperative_id, c.name AS cooperative_name,
+              l.amount, l.balance, l.purpose, l.interest_rate, l.issued_at, l.due_at, l.closed_at,
+              COALESCE((SELECT SUM(r.amount) FROM loan_repayments r WHERE r.loan_id = l.id), 0) AS amount_paid,
+              CASE WHEN l.status = 'active' AND l.due_at < CURRENT_DATE THEN 'overdue' ELSE l.status END AS status
+         FROM loan_records l
+         JOIN members m ON m.id = l.member_id
+         JOIN cooperatives c ON c.id = l.cooperative_id
+        WHERE ${scope.clause}
+        ORDER BY CASE WHEN l.status = 'active' THEN 0 ELSE 1 END, l.due_at`,
+      scope.params
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error("GET /transactions/loans error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// GET /dividends — every dividend paid to a member.
+router.get("/dividends", authenticate, async (req: Request, res: Response) => {
+  try {
+    const scope = await memberMoneyScope(req, "d.member_id");
+    if (!scope) return res.json({ success: true, data: [] });
+    const result = await query(
+      `SELECT d.id, d.member_id, m.full_name AS member_name, d.cooperative_id, c.name AS cooperative_name,
+              d.amount, d.period, d.paid_at, d.notes, d.created_at
+         FROM dividend_records d
+         JOIN members m ON m.id = d.member_id
+         JOIN cooperatives c ON c.id = d.cooperative_id
+        WHERE ${scope.clause}
+        ORDER BY d.period DESC, m.full_name`,
+      scope.params
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error("GET /transactions/dividends error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// GET /savings/accounts — each member's savings, last contribution and loan balance.
+router.get("/savings/accounts", authenticate, async (req: Request, res: Response) => {
+  try {
+    const scope = await memberMoneyScope(req, "m.id");
+    if (!scope) return res.json({ success: true, data: [] });
+    const result = await query(
+      `SELECT m.id, m.full_name, m.role, m.status, m.phone, m.membership_date,
+              m.total_savings, m.total_contributions, m.cooperative_id, c.name AS cooperative_name,
+              (SELECT MAX(mc.date) FROM member_contributions mc WHERE mc.member_id = m.id) AS last_contribution,
+              COALESCE((SELECT SUM(l.balance) FROM loan_records l
+                         WHERE l.member_id = m.id AND l.status IN ('active','overdue')), 0) AS loan_balance
+         FROM members m
+         JOIN cooperatives c ON c.id = m.cooperative_id
+        WHERE m.deleted_at IS NULL AND ${scope.clause}
+        ORDER BY m.total_savings DESC`,
+      scope.params
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error("GET /transactions/savings/accounts error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
@@ -364,8 +613,12 @@ router.post("/", authenticate, async (req: Request, res: Response) => {
       attachmentUrl, notes, periodId,
     } = req.body;
 
-    if (!cooperativeId || !type || !category || !amount || !date || !description) {
-      return res.status(400).json({ message: "cooperativeId, type, category, amount, date, and description are required" });
+    // A manager records for their own cooperative whatever the body says.
+    const access = writableCooperative(req, cooperativeId);
+    if (!access.ok) return res.status(access.status).json({ success: false, message: access.message });
+
+    if (!type || !category || !amount || !date || !description) {
+      return res.status(400).json({ message: "type, category, amount, date, and description are required" });
     }
     if (!["income", "expense"].includes(type)) {
       return res.status(400).json({ message: "type must be income or expense" });
@@ -390,7 +643,7 @@ router.post("/", authenticate, async (req: Request, res: Response) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'completed',NOW(),NOW())
        RETURNING *`,
       [
-        cooperativeId, type, category, amount, date, description,
+        access.cooperativeId, type, category, amount, date, description,
         reference || null, memberId || null, paymentMethod || null,
         mobileMoneyRef || null, bankRef || null, attachmentUrl || null,
         notes || null, periodId || null, req.user!.userId,

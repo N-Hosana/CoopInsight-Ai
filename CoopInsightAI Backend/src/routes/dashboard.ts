@@ -11,6 +11,59 @@ const GASABO_SECTORS = [
 ];
 
 // GET /stats
+// ─── GET /financial-trends ───────────────────────────────────────────────────
+// Income, expenses and savings paid in, month by month, from the same
+// transactions and contributions ledger the Financials page reads — so the
+// dashboard chart and the books can be laid side by side and agree. The chart
+// used to fall back to six invented months because nothing supplied it.
+router.get("/financial-trends", authenticate, async (req: Request, res: Response) => {
+  try {
+    const months = Math.min(24, Math.max(3, Number(req.query.months ?? 6)));
+    const role = req.user!.role;
+    const params: unknown[] = [months];
+    let scope = "c.deleted_at IS NULL";
+    if (["manager", "cooperative", "member"].includes(role)) {
+      params.push(req.user!.cooperativeId);
+      scope += ` AND c.id = $${params.length}`;
+    } else if (req.query.cooperativeId) {
+      params.push(req.query.cooperativeId);
+      scope += ` AND c.id = $${params.length}`;
+    }
+    const result = await query(
+      `WITH m AS (
+         SELECT GENERATE_SERIES(DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) || ' months')::interval,
+                                DATE_TRUNC('month', CURRENT_DATE), INTERVAL '1 month')::date AS month
+       )
+       SELECT TO_CHAR(m.month, 'YYYY-MM') AS month,
+              COALESCE((SELECT SUM(t.amount) FROM transactions t JOIN cooperatives c ON c.id = t.cooperative_id
+                         WHERE ${scope} AND t.status = 'completed' AND t.type = 'income'
+                           AND DATE_TRUNC('month', t.date) = m.month), 0) AS income,
+              COALESCE((SELECT SUM(t.amount) FROM transactions t JOIN cooperatives c ON c.id = t.cooperative_id
+                         WHERE ${scope} AND t.status = 'completed' AND t.type = 'expense'
+                           AND DATE_TRUNC('month', t.date) = m.month), 0) AS expense,
+              COALESCE((SELECT SUM(mc.amount) FROM member_contributions mc
+                          JOIN members mb ON mb.id = mc.member_id JOIN cooperatives c ON c.id = mb.cooperative_id
+                         WHERE ${scope} AND mc.type = 'savings'
+                           AND mc.notes IS DISTINCT FROM 'Opening balance (reconciliation)'
+                           AND DATE_TRUNC('month', mc.date) = m.month), 0) AS savings
+         FROM m ORDER BY m.month`,
+      params
+    );
+    res.json({
+      success: true,
+      data: result.rows.map((r) => ({
+        month: r.month,
+        income: Number(r.income),
+        expense: Number(r.expense),
+        savings: Number(r.savings),
+      })),
+    });
+  } catch (err) {
+    console.error("GET /dashboard/financial-trends error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 router.get("/stats", authenticate, async (req: Request, res: Response) => {
   try {
     const role = req.user!.role;
@@ -26,7 +79,8 @@ router.get("/stats", authenticate, async (req: Request, res: Response) => {
     const txnParams: any[] = [];
     const actParams: any[] = [];
 
-    if (role === "manager" || role === "cooperative") {
+    // A member's dashboard figures are their cooperative's, never the district's.
+    if (role === "manager" || role === "cooperative" || role === "member") {
       coopScope = `AND id = $1`;
       coopParams.push(userCoopId);
       memberScope = `AND cooperative_id = $1`;
@@ -58,6 +112,8 @@ router.get("/stats", authenticate, async (req: Request, res: Response) => {
       query(
         `SELECT
           COALESCE(SUM(CASE WHEN type = 'income' AND date >= DATE_TRUNC('month', NOW()) THEN amount ELSE 0 END), 0) AS monthly_revenue,
+          COALESCE(SUM(CASE WHEN type = 'income' AND date >= DATE_TRUNC('month', NOW()) - INTERVAL '1 month'
+                             AND date < DATE_TRUNC('month', NOW()) THEN amount ELSE 0 END), 0) AS previous_month_revenue,
           COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) AS total_income,
           COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) AS total_expenses
          FROM transactions WHERE status = 'completed' ${txnScope}`,
@@ -66,7 +122,9 @@ router.get("/stats", authenticate, async (req: Request, res: Response) => {
       query(
         `SELECT
           COUNT(*) FILTER (WHERE date BETWEEN NOW() AND NOW() + INTERVAL '7 days' AND status = 'planned') AS upcoming,
-          COUNT(*) FILTER (WHERE date >= DATE_TRUNC('month', NOW()) AND status = 'completed') AS completed_this_month
+          COUNT(*) FILTER (WHERE date >= DATE_TRUNC('month', NOW()) AND status = 'completed') AS completed_this_month,
+          COUNT(*) AS total_activities,
+          COUNT(*) FILTER (WHERE status = 'completed') AS completed_total
          FROM activities WHERE deleted_at IS NULL ${actScope}`,
         actParams
       ),
@@ -77,9 +135,32 @@ router.get("/stats", authenticate, async (req: Request, res: Response) => {
     const trans = transResult.rows[0];
     const activ = activResult.rows[0];
 
-    // Savings from cooperatives table
+    // Loans to members — the same rows the Financials page lists, so the two
+    // pages report the same balance. These were hardcoded to 0.
+    const loansResult = await query(
+      `SELECT COALESCE(SUM(balance) FILTER (WHERE status IN ('active','overdue')), 0) AS outstanding,
+              COUNT(*) FILTER (WHERE status = 'overdue'
+                                  OR (status = 'active' AND due_at < CURRENT_DATE)) AS overdue
+         FROM loan_records WHERE cooperative_id IN (SELECT id FROM cooperatives WHERE deleted_at IS NULL ${coopScope})`,
+      coopParams
+    );
+
+    // Savings: cooperatives.total_savings, which database triggers hold equal to
+    // the sum of members' balances, which in turn equal their contributions
+    // ledger — so this matches the Financials page and every member's record.
     const savingsResult = await query(
       `SELECT COALESCE(SUM(total_savings), 0) AS total_savings FROM cooperatives WHERE deleted_at IS NULL ${coopScope}`,
+      coopParams
+    );
+
+    // Savings paid in this calendar month, from the same ledger the balances
+    // are built from. The reconciliation's opening entries are not deposits.
+    const savingsMonthResult = await query(
+      `SELECT COALESCE(SUM(mc.amount), 0) AS amount
+         FROM member_contributions mc JOIN members m ON m.id = mc.member_id
+        WHERE mc.type = 'savings' AND mc.date >= DATE_TRUNC('month', NOW())
+          AND mc.notes IS DISTINCT FROM 'Opening balance (reconciliation)'
+          AND m.cooperative_id IN (SELECT id FROM cooperatives WHERE deleted_at IS NULL ${coopScope})`,
       coopParams
     );
 
@@ -98,12 +179,19 @@ router.get("/stats", authenticate, async (req: Request, res: Response) => {
         activeMembers: parseInt(members.active, 10),
         newMembersThisMonth: parseInt(members.new_this_month, 10),
         monthlyRevenue: parseFloat(trans.monthly_revenue),
+        previousMonthRevenue: parseFloat(trans.previous_month_revenue),
+        totalIncome: parseFloat(trans.total_income),
+        totalExpenses: parseFloat(trans.total_expenses),
+        savingsThisMonth: parseFloat(savingsMonthResult.rows[0].amount),
+        totalActivities: parseInt(activ.total_activities, 10),
         totalSavings: parseFloat(savingsResult.rows[0].total_savings),
-        activeLoanBalance: 0,
-        overdueLoans: 0,
+        activeLoanBalance: parseFloat(loansResult.rows[0].outstanding),
+        overdueLoans: parseInt(loansResult.rows[0].overdue, 10),
         upcomingActivities: parseInt(activ.upcoming, 10),
         activitiesThisMonth: parseInt(activ.completed_this_month, 10),
-        completionRate: 0,
+        completionRate: parseInt(activ.total_activities, 10)
+          ? Math.round((parseInt(activ.completed_total, 10) / parseInt(activ.total_activities, 10)) * 100)
+          : 0,
         averageHealthScore: parseFloat(coops.avg_health),
         cooperativesAtRisk: parseInt(atRiskResult.rows[0].count, 10),
       },
@@ -171,7 +259,8 @@ router.get("/alerts", authenticate, async (req: Request, res: Response) => {
     const coopParams: any[] = [];
     const actParams: any[] = [];
 
-    if (role === "manager" || role === "cooperative") {
+    // A member's dashboard figures are their cooperative's, never the district's.
+    if (role === "manager" || role === "cooperative" || role === "member") {
       coopScope = `AND id = $1`;
       coopParams.push(userCoopId);
       actScope = `AND cooperative_id = $1`;

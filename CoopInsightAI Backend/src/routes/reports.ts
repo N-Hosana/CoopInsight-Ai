@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { query } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
+import { buildReport, toCsv } from "../services/reportBuilder";
 
 const router = Router();
 router.use(authenticate);
@@ -231,20 +232,52 @@ router.get("/:id", async (req: Request, res: Response) => {
 });
 
 // GET /:id/download
+// GET /:id/download — the report itself, as a file.
+//
+// `?format=csv` streams a spreadsheet; `json` returns the structured content
+// the viewer renders. Reports generated before the builder existed have no
+// content and say so, rather than serving an empty file that looks like a
+// report with nothing in it.
 router.get("/:id/download", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const result = await query(`SELECT file_url FROM reports WHERE id = $1`, [id]);
+    const format = String(req.query.format ?? "csv").toLowerCase();
+
+    const result = await query(
+      `SELECT title, type, content, format, generated_at FROM reports WHERE id = $1`,
+      [id]
+    );
     if (!result.rows.length) {
       return res.status(404).json({ success: false, message: "Report not found" });
     }
-    const { file_url } = result.rows[0];
-    if (!file_url || file_url === "pending") {
-      return res.status(202).json({ success: false, message: "Report file is not yet generated" });
+
+    const row = result.rows[0];
+    if (!row.content) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "This report was recorded before report contents were stored, so there is nothing to " +
+          "download. Generate it again to produce a file.",
+        regenerate: true,
+      });
     }
-    res.json({ success: true, data: { fileUrl: file_url } });
+
+    const safeName = String(row.title).replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+    const stamp = row.generated_at
+      ? new Date(row.generated_at).toISOString().slice(0, 10)
+      : "report";
+
+    if (format === "json") {
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName}-${stamp}.json"`);
+      return res.send(JSON.stringify(row.content, null, 2));
+    }
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}-${stamp}.csv"`);
+    return res.send(toCsv(row.content));
   } catch (err) {
-    console.error(err);
+    console.error("GET /reports/:id/download error:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -268,20 +301,51 @@ router.post("/generate", async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: "Invalid format" });
     }
 
+    // ── Build it now, rather than queueing something nothing consumes ──────
+    // This endpoint used to insert file_url = 'pending' and return. There was
+    // no worker, so "pending" was permanent and every download button on the
+    // page led nowhere. The figures are queried here and stored with the row,
+    // which is what makes the download real — and what freezes the report at
+    // the moment it was run, instead of silently recomputing later.
+    const scopedCooperativeId = cooperativeId || req.user!.cooperativeId || null;
+    const resolvedTitle = title || TEMPLATES.find((t) => t.type === type)?.name || `${type} report`;
+
+    const content = await buildReport({
+      type,
+      title: resolvedTitle,
+      cooperativeId: scopedCooperativeId,
+      from,
+      to,
+    });
+
     const result = await query(
-      `INSERT INTO reports (title, type, cooperative_id, parameters, file_url, format, generated_by)
-       VALUES ($1, $2, $3, $4, 'pending', $5, $6) RETURNING *`,
+      `INSERT INTO reports
+         (title, type, cooperative_id, parameters, file_url, format, generated_by,
+          content, row_count, period_from, period_to, generated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW()) RETURNING *`,
       [
-        title || `${type} report`,
+        resolvedTitle,
         type,
-        cooperativeId || req.user!.cooperativeId || null,
+        scopedCooperativeId,
         JSON.stringify({ from, to }),
+        "generated",
         format,
         userId,
+        JSON.stringify(content),
+        content.rowCount,
+        from,
+        to,
       ]
     );
 
-    res.status(201).json({ success: true, data: result.rows[0], message: "Report generation queued" });
+    res.status(201).json({
+      success: true,
+      data: result.rows[0],
+      message:
+        content.rowCount > 0
+          ? `Report generated — ${content.rowCount} row(s). Open or download it from the list.`
+          : "Report generated, but there was no data in that period.",
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: "Server error" });

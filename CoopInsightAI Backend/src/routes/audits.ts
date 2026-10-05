@@ -2,6 +2,16 @@ import { Router, Request, Response } from "express";
 import { query } from "../config/db";
 import { authenticate } from "../middleware/auth";
 import { callAIService } from "../services/aiClient";
+import {
+  rollup,
+  placeSectors,
+  AuditRowInput,
+  PreviousRow,
+  VisitState,
+  SYSTEMIC_PREVALENCE,
+  SYSTEMIC_MIN_COOPERATIVES,
+  OUTLIER_Z,
+} from "../services/auditRollup";
 
 const router = Router();
 router.use(authenticate);
@@ -28,13 +38,29 @@ router.use(authenticate);
 
 const OVERSIGHT_ROLES = ["admin", "generalManager", "government"];
 
-/** Who may commission a run: the RCA and district levels, and administrators. */
+/**
+ * Who may commission a run, at every level of the oversight chain. A sector
+ * officer audits their own sector; the district office and the RCA audit the
+ * whole district or any one sector; administrators may do either.
+ */
 function canRunAudit(actor: { role: string; oversightLevel: string | null }) {
   return (
     ["admin", "generalManager"].includes(actor.role) ||
-    (actor.role === "government" && ["rca", "district"].includes(actor.oversightLevel ?? ""))
+    (actor.role === "government" &&
+      ["rca", "district", "sector"].includes(actor.oversightLevel ?? ""))
   );
 }
+
+/** The level an actor audits at, as recorded on the run. */
+function auditLevel(actor: { role: string; oversightLevel: string | null }) {
+  return actor.role === "government" ? actor.oversightLevel ?? "government" : actor.role;
+}
+
+const isSectorOfficer = (actor: { role: string; oversightLevel: string | null; sector: string | null }) =>
+  actor.role === "government" && actor.oversightLevel === "sector";
+
+const sameSector = (a: string | null | undefined, b: string | null | undefined) =>
+  !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
 
 async function loadActor(userId: string) {
   const res = await query(
@@ -95,7 +121,9 @@ router.post("/monthly/run", async (req: Request, res: Response) => {
     if (!actor || !canRunAudit(actor)) {
       return res.status(403).json({
         success: false,
-        message: "Only the RCA, the district office or an administrator may run the monthly audit.",
+        message:
+          "Only an oversight officer (sector, district or RCA) or an administrator may run the " +
+          "monthly audit.",
       });
     }
 
@@ -103,6 +131,27 @@ router.post("/monthly/run", async (req: Request, res: Response) => {
     if (period && !/^\d{4}-\d{2}$/.test(period)) {
       return res.status(400).json({ success: false, message: "period must be YYYY-MM." });
     }
+
+    // Scope. A sector officer is held to their own sector whatever they send;
+    // everyone above may pick one sector or leave it at the whole district.
+    const requestedSector = (req.body.sector as string | undefined)?.trim() || null;
+    let scopeSector: string | null = requestedSector;
+    if (isSectorOfficer(actor)) {
+      if (!actor.sector) {
+        return res.status(400).json({
+          success: false,
+          message: "Your account has no sector recorded, so there is nothing to scope the audit to.",
+        });
+      }
+      if (requestedSector && !sameSector(requestedSector, actor.sector)) {
+        return res.status(403).json({
+          success: false,
+          message: `A sector officer may only audit their own sector (${actor.sector}).`,
+        });
+      }
+      scopeSector = actor.sector;
+    }
+    const scopeLabel = scopeSector ? `${scopeSector} sector` : "the district";
 
     let aiData: any = null;
     try {
@@ -117,11 +166,18 @@ router.post("/monthly/run", async (req: Request, res: Response) => {
       });
     }
 
-    const results: any[] = Array.isArray(aiData?.results) ? aiData.results : [];
+    // The AI service always scores the whole district, so the peer context is
+    // the same whoever runs it; only what gets written is narrowed to the scope.
+    const allResults: any[] = Array.isArray(aiData?.results) ? aiData.results : [];
+    const results = scopeSector
+      ? allResults.filter((r) => sameSector(r.sector, scopeSector))
+      : allResults;
     if (results.length === 0) {
       return res.json({
         success: true,
-        message: aiData?.note ?? "The audit returned no cooperatives.",
+        message: scopeSector
+          ? `The audit found no active cooperatives in ${scopeLabel}.`
+          : aiData?.note ?? "The audit returned no cooperatives.",
         data: { period: aiData?.period ?? period ?? null, persisted: 0, visitsRaised: 0 },
       });
     }
@@ -173,6 +229,7 @@ router.post("/monthly/run", async (req: Request, res: Response) => {
             permitType: r.permitType,
             permitExpiresOn: r.permitExpiresOn,
             openFundingRequests: r.openFundingRequests,
+            issues: Array.isArray(r.issues) ? r.issues : undefined,
           }),
           JSON.stringify(r.reasons ?? []),
           JSON.stringify(r.recommendedActions ?? []),
@@ -255,16 +312,42 @@ router.post("/monthly/run", async (req: Request, res: Response) => {
       );
     }
 
+    await query(
+      `INSERT INTO monthly_audit_runs
+         (period, scope, sector, run_by, run_by_level, cooperatives_assessed, visits_raised, model_version)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [
+        periodDate,
+        scopeSector ? "sector" : "district",
+        scopeSector,
+        actor.id,
+        auditLevel(actor),
+        persisted,
+        visitsRaised,
+        aiData.model_version ?? null,
+      ]
+    );
+
     res.json({
       success: true,
       message:
-        `Monthly audit for ${aiData.period} complete: ${persisted} cooperative(s) assessed, ` +
-        `${visitsRaised} field visit(s) raised.`,
+        `Monthly audit of ${scopeLabel} for ${aiData.period} complete: ${persisted} cooperative(s) ` +
+        `assessed, ${visitsRaised} field visit(s) raised.`,
       data: {
         period: aiData.period,
+        scope: scopeSector ? "sector" : "district",
+        sector: scopeSector,
         persisted,
         visitsRaised,
-        summary: aiData.summary,
+        summary: {
+          total: results.length,
+          healthy: results.filter((r) => r.band === "healthy").length,
+          monitor: results.filter((r) => r.band === "monitor").length,
+          atRisk: results.filter((r) => r.band === "at_risk").length,
+          critical: results.filter((r) => r.band === "critical").length,
+          dormant: results.filter((r) => r.dormant).length,
+          visitsRecommended: results.filter((r) => r.visitRecommended).length,
+        },
         note: aiData.note,
         weights: aiData.weights,
         thresholds: aiData.thresholds,
@@ -342,6 +425,133 @@ router.get("/monthly", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("GET /audits/monthly error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── GET /monthly/rollup ──────────────────────────────────────────────────────
+// The month's results aggregated to sector and district level, with the issues
+// that recur across cooperatives called out as systemic.
+//
+// The district office and the RCA see every sector. A sector officer sees their
+// own sector in full and the district only as a benchmark — its figures, never
+// the names of cooperatives in other sectors.
+router.get("/monthly/rollup", async (req: Request, res: Response) => {
+  try {
+    const actor = await loadActor(req.user!.userId);
+    if (!actor || !OVERSIGHT_ROLES.includes(actor.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Sector and district roll-ups are for oversight officers.",
+      });
+    }
+
+    const periods = await query(
+      `SELECT DISTINCT TO_CHAR(period, 'YYYY-MM') AS period FROM cooperative_monthly_audits
+        ORDER BY period DESC`
+    );
+    const available = periods.rows.map((p) => p.period as string);
+    const period = (req.query.period as string | undefined) ?? available[0] ?? null;
+    if (!period) {
+      return res.json({
+        success: true,
+        data: null,
+        availablePeriods: [],
+        note: "No monthly audit has been run yet.",
+      });
+    }
+    const previousPeriod = available.find((p) => p < period) ?? null;
+
+    const rows = (
+      await query(`${SELECT_AUDIT_ROW} WHERE TO_CHAR(a.period, 'YYYY-MM') = $1`, [period])
+    ).rows as AuditRowInput[];
+
+    const previous = new Map<string, PreviousRow>();
+    if (previousPeriod) {
+      const prev = await query(
+        `SELECT cooperative_id, composite_score, band FROM cooperative_monthly_audits
+          WHERE TO_CHAR(period, 'YYYY-MM') = $1`,
+        [previousPeriod]
+      );
+      for (const p of prev.rows) {
+        previous.set(p.cooperative_id, { composite: Number(p.composite_score), band: p.band });
+      }
+    }
+
+    const visits = new Map<string, VisitState>();
+    const visitRows = await query(
+      `SELECT cooperative_id, status FROM cooperative_field_visits
+        WHERE TO_CHAR(period, 'YYYY-MM') = $1 AND status <> 'cancelled'`,
+      [period]
+    );
+    for (const v of visitRows.rows) {
+      const state: VisitState = v.status === "completed" ? "completed" : "open";
+      if (visits.get(v.cooperative_id) !== "completed") visits.set(v.cooperative_id, state);
+    }
+
+    const [year, month] = period.split("-").map(Number);
+    const periodEnd = new Date(Date.UTC(year, month, 0));
+
+    const bySector = new Map<string, AuditRowInput[]>();
+    for (const r of rows) {
+      const key = r.cooperative_sector ?? "Unassigned";
+      bySector.set(key, [...(bySector.get(key) ?? []), r]);
+    }
+
+    const district = rollup("district", "Gasabo District", rows, previous, visits, periodEnd);
+    let sectors = [...bySector.entries()]
+      .map(([name, sectorRows]) => rollup("sector", name, sectorRows, previous, visits, periodEnd))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    placeSectors(district, sectors);
+
+    const sectorOfficer = isSectorOfficer(actor);
+    const focus = sectorOfficer ? actor.sector : ((req.query.sector as string | undefined) ?? null);
+    if (focus) sectors = sectors.filter((s) => sameSector(s.name, focus));
+
+    if (sectorOfficer) {
+      // Benchmark only: strip anything that names a cooperative outside the sector.
+      district.issues = district.issues.map((i) => ({ ...i, affected: [] }));
+      district.outliers = [];
+      district.trend = { ...district.trend, newlyCritical: [] };
+      district.highlights = district.highlights.filter(
+        (h) => !h.text.startsWith("Newly critical") && !/sector\(s\) rated/.test(h.text)
+      );
+    }
+
+    const runs = await query(
+      `SELECT r.scope, r.sector, r.run_by_level, r.cooperatives_assessed, r.visits_raised,
+              r.created_at, u.name AS run_by_name
+         FROM monthly_audit_runs r LEFT JOIN users u ON u.id = r.run_by
+        WHERE TO_CHAR(r.period, 'YYYY-MM') = $1
+        ORDER BY r.created_at DESC`,
+      [period]
+    );
+    const visibleRuns = sectorOfficer
+      ? runs.rows.filter((r) => r.scope === "district" || sameSector(r.sector, actor.sector))
+      : runs.rows;
+
+    res.json({
+      success: true,
+      data: {
+        period,
+        previousPeriod,
+        viewer: { level: auditLevel(actor), sector: sectorOfficer ? actor.sector : null },
+        district,
+        sectors,
+        runs: visibleRuns,
+        method: {
+          systemicPrevalence: SYSTEMIC_PREVALENCE,
+          systemicMinCooperatives: SYSTEMIC_MIN_COOPERATIVES,
+          outlierZ: OUTLIER_Z,
+          riskRating:
+            "severe: ≥50% at risk/critical, ≥30% dormant or weighted mean <30 · high: ≥30% at " +
+            "risk/critical or weighted mean <50 · elevated: ≥15% at risk/critical or any critical",
+        },
+      },
+      availablePeriods: available,
+    });
+  } catch (err) {
+    console.error("GET /audits/monthly/rollup error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });

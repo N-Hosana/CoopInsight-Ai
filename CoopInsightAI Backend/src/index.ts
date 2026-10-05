@@ -17,6 +17,7 @@ import notificationRoutes from "./routes/notifications";
 import securityRoutes from "./routes/security";
 import settingsRoutes from "./routes/settings";
 import integrationRoutes from "./routes/integrations";
+import serviceRequestRoutes from "./routes/serviceRequests";
 import permitRoutes from "./routes/permits";
 import auditRoutes from "./routes/audits";
 import fundingRoutes from "./routes/funding";
@@ -65,6 +66,7 @@ app.use("/api/transactions", transactionRoutes);
 app.use("/api/activities", activityRoutes);
 
 // ── Licensing, audits & external support ─────
+app.use("/api/service-requests", serviceRequestRoutes);
 app.use("/api/permits", permitRoutes);
 app.use("/api/audits", auditRoutes);
 app.use("/api/funding", fundingRoutes);

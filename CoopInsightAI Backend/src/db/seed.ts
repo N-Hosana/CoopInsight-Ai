@@ -113,7 +113,17 @@ async function insertMember(coopId: string, m: {
        membership_number = EXCLUDED.membership_number,
        cooperative_id = EXCLUDED.cooperative_id,
        role = EXCLUDED.role,
-       total_savings = EXCLUDED.total_savings
+       total_savings = EXCLUDED.total_savings,
+       -- A reseed is meant to produce a known-clean register. Without these
+       -- three, a member who was archived by the exit process stayed archived
+       -- and soft-deleted forever: the upsert restored their name and savings
+       -- but left deleted_at set, so every register query kept skipping them
+       -- and the account they belong to could never be matched again. The
+       -- seed silently could not undo its own demo data.
+       status = 'active',
+       deleted_at = NULL,
+       archived_at = NULL,
+       archive_reason = NULL
      RETURNING id`,
     [coopId, m.fullName, m.phone, m.nationalId, m.gender, m.sector, m.cell ?? null,
      m.membershipNumber, m.membershipDate, m.role ?? "member", m.totalSavings ?? 0]
@@ -122,9 +132,127 @@ async function insertMember(coopId: string, m: {
 }
 
 /**
- * Fills a cooperative's roster up to `count` with clearly-labelled placeholder
- * members. `idBlock` must be unique per cooperative — it seeds the national ID
- * and phone ranges so two cooperatives never collide.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE MEMBER REGISTER
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The seven cooperatives and their office-bearers are real, taken from the
+ * Gasabo RCA sector register. Their rank-and-file members are not published
+ * anywhere, so the rest of each roster has to be generated — but it has to look
+ * like a real register, because half the screens in this app are only
+ * meaningful against one.
+ *
+ * It previously generated "TMC Member 1" … "TMC Member 48", each holding
+ * exactly n × 5,000 in savings. That produced a register nobody could read as
+ * plausible and, worse, a perfectly linear savings curve that made every chart,
+ * every average and every anomaly detector behave in ways real data never does.
+ *
+ * What follows generates Rwandan names in the usual form — family name first,
+ * then a given name — and a savings distribution with the shape real
+ * cooperative savings actually have: most members modest, a long tail of
+ * committed savers, and a handful of recent joiners with almost nothing yet.
+ *
+ * Everything is DETERMINISTIC, seeded from the cooperative's id block and the
+ * member's position. That matters: `pnpm seed` is run repeatedly, and a
+ * register that reshuffled every time would churn every downstream figure and
+ * make any screenshot or test unreproducible.
+ */
+
+/** Family names, as they appear first and usually capitalised in Rwanda. */
+const FAMILY_NAMES = [
+  "UWIMANA", "MUKAMANA", "NIYONZIMA", "HABIMANA", "NSHIMIYIMANA", "BIZIMANA",
+  "UWAMAHORO", "NDAYISABA", "IRADUKUNDA", "MUGISHA", "GASANA", "KAYITESI",
+  "NIYIGENA", "TUYISHIME", "INGABIRE", "MUNYANEZA", "HAKIZIMANA", "DUSABIMANA",
+  "NYIRAHABIMANA", "MURENZI", "RUKUNDO", "KAMANZI", "UMUTONI", "ISHIMWE",
+  "KWIZERA", "SHEMA", "MANZI", "KEZA", "GANZA", "RWEMA", "CYUSA", "MUTONI",
+  "GATETE", "RUGAMBA", "NKURUNZIZA", "KAGABO", "MUTESI", "UWASE", "AKIMANA",
+  "BYIRINGIRO", "NTWALI", "MUHIRE", "NDAYAMBAJE", "TWAGIRAYEZU", "HARERIMANA",
+  "MUKESHIMANA", "UWIRINGIYIMANA", "BAMPORIKI", "RUSANGANWA", "MUKANDAYISENGA",
+  "NSENGIYUMVA", "BYUKUSENGE", "NIYOMUGABO", "UWICYEZA", "MBONYUMUVUNYI",
+  "SEBAHIRE", "NIRERE", "MUKANTAGANDA", "RWIGEMA", "KAREKEZI", "UMULISA",
+  "NTAGANDA", "MUKARUGWIZA", "HITIMANA", "NDUWAYEZU", "MUKANTWARI",
+  "BIMENYIMANA", "NYIRAMANA", "TWIZEYIMANA", "MUKARUKUNDO", "SIBOMANA",
+];
+
+/** Given names follow the family name. Split by gender, as the register does. */
+const MALE_GIVEN_NAMES = [
+  "Jean", "Emmanuel", "Eric", "Patrick", "Innocent", "Theoneste", "Vedaste",
+  "Celestin", "Fidele", "Anastase", "Valens", "Pascal", "Felicien", "Aimable",
+  "Xavier", "Venuste", "Thacien", "Alphonse", "Olivier", "Damascene", "Bosco",
+  "Fabrice", "Cedric", "Arsene", "Elysee", "Straton", "Jean Baptiste",
+  "Jean Claude", "Come", "Gaston", "Deogratias", "Evariste", "Protais",
+  "Silas", "Moses", "Samuel", "Claude", "Augustin", "Faustin", "Gerard",
+];
+
+const FEMALE_GIVEN_NAMES = [
+  "Marie", "Claudine", "Josephine", "Vestine", "Diane", "Aline", "Providence",
+  "Donatha", "Clementine", "Sylvie", "Chantal", "Francine", "Epiphanie",
+  "Immaculee", "Beatrice", "Jeanne", "Consolee", "Solange", "Yvonne",
+  "Esperance", "Speciose", "Drocella", "Seraphine", "Jacqueline", "Agnes",
+  "Divine", "Sandrine", "Gloria", "Marie Claire", "Gaudence", "Alphonsine",
+  "Dative", "Mediatrice", "Nadine", "Jolie", "Liliane", "Odette", "Christine",
+  "Bernadette", "Peace",
+];
+
+/**
+ * Deterministic 0–1 generator (mulberry32).
+ *
+ * Seeded per member, so the same cooperative produces the same register on
+ * every run. `Math.random()` here would mean the roster, the savings, the
+ * contributions ledger and every chart drawn from them changed on each seed.
+ */
+function seededRandom(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Savings for one member, in RWF.
+ *
+ * Shaped rather than uniform: roughly a tenth of any cooperative's register are
+ * recent joiners with very little in, most sit in a broad middle band, and a
+ * few long-standing members hold several times the average. Real registers look
+ * like this; an arithmetic ramp does not, and an anomaly detector trained
+ * against a ramp learns nothing.
+ */
+function generateSavings(rand: () => number, yearsInMembership: number): number {
+  const roll = rand();
+  let amount: number;
+
+  if (roll < 0.12) {
+    // Recent joiners, or members who have fallen behind.
+    amount = 2_000 + rand() * 18_000;
+  } else if (roll < 0.82) {
+    // The broad middle: steady monthly contributions over a few years.
+    amount = 25_000 + rand() * 135_000;
+  } else if (roll < 0.97) {
+    // Committed savers.
+    amount = 160_000 + rand() * 190_000;
+  } else {
+    // The handful who have been in since the beginning and saved throughout.
+    amount = 350_000 + rand() * 320_000;
+  }
+
+  // Longer membership means more time to accumulate, but not proportionally —
+  // people join, pause, and resume.
+  amount *= 0.72 + Math.min(yearsInMembership, 10) * 0.055;
+
+  // Cooperatives record savings in round figures.
+  return Math.round(amount / 500) * 500;
+}
+
+/**
+ * Fills a cooperative's roster up to `count`.
+ *
+ * `idBlock` must be unique per cooperative — it seeds the national ID and phone
+ * ranges so two cooperatives never collide, and it seeds the name generator so
+ * two cooperatives do not end up with identical registers.
  */
 async function seedPlaceholderMembers(coopId: string, options: {
   count: number; sector: string; cell: string; namePrefix: string;
@@ -137,20 +265,71 @@ async function seedPlaceholderMembers(coopId: string, options: {
   const existingCount = parseInt(existingCountResult.rows[0].count, 10);
   const remaining = Math.max(0, options.count - existingCount);
 
+  // Names already used in this cooperative, so one register does not list the
+  // same person twice.
+  const used = new Set<string>();
+  const taken = await query(
+    `SELECT full_name FROM members WHERE cooperative_id = $1`,
+    [coopId]
+  );
+  for (const row of taken.rows) used.add(String(row.full_name).toLowerCase());
+
+  const thisYear = new Date().getFullYear();
+
   for (let i = 1; i <= remaining; i += 1) {
     const n = existingCount + i;
-    const gender = n % 2 === 0 ? "female" : "male";
+    const rand = seededRandom(options.idBlock * 100_003 + n * 31);
+
+    const gender = rand() < 0.52 ? "female" : "male";
+    const givenPool = gender === "female" ? FEMALE_GIVEN_NAMES : MALE_GIVEN_NAMES;
+
+    // "Nyira-" and "Muka-" mean "mother of" and "wife of", so those names
+    // belong to women. Handing one to a man is the sort of detail a Rwandan
+    // reader notices immediately and everyone else never sees.
+    const familyPool =
+      gender === "female"
+        ? FAMILY_NAMES
+        : FAMILY_NAMES.filter((f) => !f.startsWith("NYIRA") && !f.startsWith("MUKA"));
+
+    // Draw a name, stepping through the lists on collision rather than
+    // re-rolling, so the result stays deterministic.
+    let fullName = "";
+    const familyStart = Math.floor(rand() * familyPool.length);
+    const givenStart = Math.floor(rand() * givenPool.length);
+    for (let attempt = 0; attempt < familyPool.length * givenPool.length; attempt += 1) {
+      const family = familyPool[(familyStart + attempt) % familyPool.length];
+      const given =
+        givenPool[(givenStart + Math.floor(attempt / familyPool.length)) % givenPool.length];
+      const candidate = `${family} ${given}`;
+      if (!used.has(candidate.toLowerCase())) {
+        fullName = candidate;
+        used.add(candidate.toLowerCase());
+        break;
+      }
+    }
+    if (!fullName) fullName = `${familyPool[n % familyPool.length]} ${givenPool[n % givenPool.length]}`;
+
+    // Members joined over the cooperative's life, not all on one morning.
+    const joinYear = options.baseYear + Math.floor(rand() * Math.max(1, thisYear - options.baseYear));
+    const joinMonth = 1 + Math.floor(rand() * 12);
+    const joinDay = 1 + Math.floor(rand() * 28);
+    const membershipDate = `${joinYear}-${String(joinMonth).padStart(2, "0")}-${String(joinDay).padStart(2, "0")}`;
+
+    // Rwandan mobile numbers are 078/079 (MTN) and 072/073 (Airtel).
+    const prefix = ["78", "79", "72", "73"][Math.floor(rand() * 4)];
+    const line = String(options.idBlock * 10000 + n).padStart(7, "0").slice(-7);
+
     await insertMember(coopId, {
-      fullName: `${options.namePrefix} ${n}`,
-      phone: `+250780${String(options.idBlock * 10000 + n).padStart(6, "0")}`,
+      fullName,
+      phone: `+2507${prefix.slice(1)}${line}`,
       nationalId: `119${String(options.idBlock * 100000 + n).padStart(9, "0")}`,
       gender,
       sector: options.sector,
       cell: options.cell,
       membershipNumber: `${options.codePrefix}-${String(n).padStart(3, "0")}`,
-      membershipDate: `${options.baseYear}-01-15`,
+      membershipDate,
       role: "member",
-      totalSavings: n * 5000,
+      totalSavings: generateSavings(rand, thisYear - joinYear),
     });
   }
 }
@@ -159,7 +338,8 @@ async function insertDocument(coopId: string, d: { name: string; type: string; d
   await query(
     `INSERT INTO cooperative_documents (cooperative_id, name, type, description, url, uploaded_at)
      VALUES ($1,$2,$3,$4,$5,NOW())`,
-    [coopId, d.name, d.type, d.description, d.url ?? "https://storage-placeholder.com/pending-upload.pdf"]
+    // No file yet is recorded as no file (NULL), never as a link to nowhere.
+    [coopId, d.name, d.type, d.description, d.url ?? null]
   );
 }
 
@@ -211,11 +391,15 @@ async function insertHealthScore(coopId: string, s: {
 async function resetCooperativeData() {
   // Formation requests carry no cooperative_id, so they survive the cascade below
   // and have to be cleared explicitly.
+  // Documents are re-inserted below rather than upserted, so without this the
+  // file doubles in size on every reseed.
+  await query(`DELETE FROM cooperative_documents`);
   await query(`DELETE FROM cooperative_requests`);
   await query(`DELETE FROM membership_exit_requests`);
   // Support organisations and their published opportunities are not scoped to a
   // cooperative, so the cascade below leaves them behind. They are upserted by
   // name further down; the cooperative-scoped rows that point at them go here.
+  await query(`DELETE FROM auditor_engagements`);
   await query(`DELETE FROM funding_disbursements`);
   await query(`DELETE FROM funding_requests`);
   await query(`DELETE FROM cooperative_partnerships`);
@@ -227,11 +411,11 @@ async function resetCooperativeData() {
   await query(`DELETE FROM ai_insights WHERE cooperative_id IS NOT NULL`);
   await query(`DELETE FROM report_schedules WHERE cooperative_id IS NOT NULL`);
   await query(`DELETE FROM reports WHERE cooperative_id IS NOT NULL`);
-  await query(
-    `DELETE FROM message_replies
-      WHERE message_id IN (SELECT id FROM messages WHERE cooperative_id IS NOT NULL)`
-  );
-  await query(`DELETE FROM messages WHERE cooperative_id IS NOT NULL`);
+  // Broadcasts carry no cooperative_id, so the cooperative-scoped delete below
+  // used to leave them behind and a "fresh" seed still had old announcements
+  // sitting in every inbox.
+  await query(`DELETE FROM message_replies`);
+  await query(`DELETE FROM messages`);
   await query(`DELETE FROM loan_repayments`);
   await query(`DELETE FROM loan_records`);
   await query(`DELETE FROM dividend_records`);
@@ -649,6 +833,41 @@ function activitiesFor(c: CoopSeed) {
     });
   }
 
+  // ── The statutory ordinary assemblies ────────────────────────────────────
+  // The RCA brochure fixes the ordinary general assembly in March and October,
+  // and the monthly audit scores governance against exactly that. A functioning
+  // cooperative holds them, so the seed has to, or every cooperative in the
+  // district would read as non-compliant and the signal would be worthless.
+  //
+  // Weaker cooperatives miss one, which is the realistic failure and gives the
+  // governance dimension something to separate on.
+  for (let back = MONTHS_OF_HISTORY - 1; back >= 0; back -= 1) {
+    const month = monthsAgo(back);
+    const monthNumber = month.getMonth() + 1;
+    if (monthNumber !== 3 && monthNumber !== 10) continue;
+
+    // The October sitting is the one a struggling cooperative lets slip; the
+    // March one carries the audited accounts and is rarely skipped.
+    const skipped = monthNumber === 10 && rng() > 0.45 + q * 0.5;
+    if (skipped) continue;
+
+    out.push({
+      title: `Ordinary General Assembly — ${monthLabel(month)}`,
+      type: "meeting",
+      status: "completed",
+      date: ymd(month, 12 + Math.floor(rng() * 8)),
+      location: `${c.sector} Sector Office`,
+      description:
+        monthNumber === 3
+          ? `Ordinary general assembly of ${c.name}: audited accounts for the past year, ` +
+            "distribution of surplus, and the action plan and budget for the year ahead."
+          : `Ordinary general assembly of ${c.name}: reports of the organs, membership ` +
+            "admissions and the implementation of the action plan.",
+      budget: 120000,
+      actualCost: Math.round(120000 * (0.8 + rng() * 0.25)),
+    });
+  }
+
   // Always give every cooperative one upcoming item so the calendar is not empty.
   out.push({
     title: "Annual General Assembly",
@@ -792,14 +1011,13 @@ const COOPERATIVES: CoopSeed[] = [
     healthScore: 68,
     health: { financial: 70, engagement: 68, compliance: 72, docs: 58 },
     sectorOfficer: { name: "UMULISA", phone: "+250788677019" },
-    // The register records the president's phone but not their name.
-    president: { name: "(Name not recorded)", phone: "+250788416896", gender: null, isMember: false },
+    // The sector register held only this telephone number; the name was
+    // supplied afterwards by the district and matches the number on file.
+    president: { name: "MUHOZA Pierre Celestin", phone: "+250788416896", gender: "male", isMember: true },
     vicePresident: { name: "MUKAMANA Emerthe", phone: "+250788749105", gender: "female", isMember: true },
     secretary: { name: "SHUMBUSHO Jean Pierre", phone: "+250788762056", gender: "male", isMember: true },
     recordKeeping: "Site logbooks and spreadsheets",
-    dataGaps: [
-      "President: telephone +250788416896 is on file but the name was not recorded in the sector register.",
-    ],
+    dataGaps: [],
   },
   {
     key: "UNITAX",
@@ -821,12 +1039,14 @@ const COOPERATIVES: CoopSeed[] = [
     president: { name: "Mugiraneza Venuste", phone: "+250786540031", gender: "male", isMember: true },
     // Phone number is truncated in the source register, so it is left unset.
     vicePresident: { name: "Nyirantezimana Marie Chantal", phone: null, gender: "female", isMember: false },
-    // Post vacant — the previous holder resigned shortly before the survey.
+    // Post vacant — the holder left the duties recently and no successor has
+    // been elected. A vacant board seat is not a record-keeping gap: it is a
+    // governance one, and the RCA expects the General Assembly to fill it.
     secretary: null,
     recordKeeping: "Physical membership books",
     dataGaps: [
       "Vice President: Nyirantezimana Marie Chantal's telephone number is truncated in the sector register and could not be recorded.",
-      "Secretary: the post is vacant — the previous holder resigned shortly before the survey.",
+      "Secretary: the post is vacant — the holder left the duties recently and the General Assembly has not yet elected a successor.",
     ],
   },
   {
@@ -1264,6 +1484,34 @@ const SUPPORT_ORGANIZATIONS: OrganizationSeed[] = [
   },
 ];
 
+/**
+ * The RCA keeps a list of auditors cooperatives may appoint. These entries are
+ * ILLUSTRATIVE, like the partner register: named as practices rather than as
+ * real firms, so nothing here is a claim about a real auditor. One is
+ * deliberately left off the approved list so the eligibility gate has
+ * something to refuse.
+ */
+async function seedIndependentAuditors() {
+  const auditors: Array<[string, string, string, boolean]> = [
+    ["MUKAMANA Grace", "Gasabo Audit Partners", "ICPAR/2019/0442", true],
+    ["RWIGEMA Olivier", "Kigali Cooperative Audit Services", "ICPAR/2017/0188", true],
+    ["UWIMANA Chantal", "Northern Province Accountancy", "ICPAR/2021/0733", true],
+    ["Umurerwa & Co (pending RCA approval)", "Umurerwa & Co", "-", false],
+  ];
+  for (const [name, firm, registration, approved] of auditors) {
+    await query(
+      `INSERT INTO independent_auditors (name, firm, registration_number, on_rca_approved_list)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (name, firm) DO UPDATE SET
+         registration_number = EXCLUDED.registration_number,
+         on_rca_approved_list = EXCLUDED.on_rca_approved_list,
+         updated_at = NOW()`,
+      [name, firm, registration, approved]
+    );
+  }
+  return auditors.length;
+}
+
 async function seedSupportOrganizations() {
   const ids = new Map<string, string>();
 
@@ -1318,6 +1566,15 @@ async function seedSupportOrganizations() {
 
 async function seed() {
   console.log("Seeding database…\n");
+
+  // ─── Money triggers off while seeding ───────────────────────────────────
+  // The triggers keep every member's balance equal to their contributions
+  // ledger. The seed writes target balances first and the ledger after, so
+  // with the triggers on, each balance would be overwritten by the partial
+  // ledger before reconcile_member_money() could record the difference as an
+  // opening balance. They come back on, and everything is reconciled, at the end.
+  await query(`ALTER TABLE member_contributions DISABLE TRIGGER member_contributions_money`);
+  await query(`ALTER TABLE members DISABLE TRIGGER members_cooperative_savings`);
 
   // ─── Reset ────────────────────────────────────────────────────────────────
   // Every cooperative is replaced, so cooperative-scoped data is cleared first.
@@ -1384,10 +1641,14 @@ async function seed() {
     });
   }
 
+  // The district cooperative officer for Gasabo. Named, with a working line,
+  // because every formation and dissolution in the district passes through this
+  // one desk and "District Cooperative Officer" is not somebody a cooperative
+  // can telephone.
   await upsertOfficer({
-    name: "Gasabo District Cooperative Officer",
+    name: "Froduard",
     email: "district.officer@coopinsight.rw",
-    phone: null,
+    phone: "+250788821659",
     level: "district",
     sector: null,
     hash: officerHash,
@@ -1402,7 +1663,7 @@ async function seed() {
     hash: govHash,
   });
 
-  console.log(`✓ Admin ready; oversight hierarchy: ${sectorOfficers.size} sector officers, 1 district, 1 RCA\n`);
+  console.log(`✓ Admin ready; oversight hierarchy: ${sectorOfficers.size} sector officers, 1 district (Froduard), 1 RCA\n`);
 
   // ─── Cooperatives ─────────────────────────────────────────────────────────
 
@@ -1478,7 +1739,13 @@ async function seed() {
         membershipNumber: `${c.key}-${String(seq).padStart(3, "0")}`,
         membershipDate: c.registrationDate,
         role,
-        totalSavings: 45000 - seq * 5000,
+        // Office-bearers are founding members who have been contributing since
+        // registration, so they sit near the top of their own register rather
+        // than on the 45,000 / 40,000 / 35,000 ramp this used to produce.
+        totalSavings: generateSavings(
+          seededRandom(c.idBlock * 7919 + seq),
+          new Date().getFullYear() - new Date(c.registrationDate).getFullYear()
+        ),
       });
     }
 
@@ -1500,11 +1767,70 @@ async function seed() {
     );
     const memberCount = parseInt(memberCountRes.rows[0].count, 10);
 
-    await insertDocument(coopId, {
-      name: "Membership Register",
-      type: "other",
-      description: `Current record-keeping method: ${c.recordKeeping}. Digital copy pending upload.`,
-    });
+    // ── The books a cooperative is actually expected to keep ─────────────
+    // These were all filed as "other", which meant the Documents page showed
+    // every cooperative as holding nothing but miscellany — and every category
+    // an officer might filter by came back empty. A real cooperative's file
+    // holds its constituting documents, its accounts, its minutes and its
+    // returns, so the register reflects that.
+    const registrationYear = new Date(c.registrationDate).getFullYear();
+    const lastYear = new Date().getFullYear() - 1;
+
+    const documents: Array<{ name: string; type: string; description: string }> = [
+      {
+        name: `Certificate of Legal Personality — ${c.registrationNumber}`,
+        type: "registration",
+        description:
+          `Issued by the Rwanda Cooperative Agency on ${c.registrationDate}, establishing ` +
+          `${c.name} as a legal person.`,
+      },
+      {
+        name: "Bylaws (Amategeko Ngengamikorere)",
+        type: "policy",
+        description:
+          `Adopted by the constituting General Assembly in ${registrationYear}. Governs ` +
+          "membership, the organs, and how decisions are taken.",
+      },
+      {
+        name: "Membership Register",
+        type: "other",
+        description: `Current record-keeping method: ${c.recordKeeping}. Digital copy pending upload.`,
+      },
+      {
+        name: `Annual Financial Statements ${lastYear}`,
+        type: "financial",
+        description:
+          `Income, expenditure and balance sheet for the year ending 31 December ${lastYear}, ` +
+          "as presented to the General Assembly.",
+      },
+      {
+        name: "Members' Savings and Shares Ledger",
+        type: "financial",
+        description:
+          "Running record of each member's savings, share capital and special levies.",
+      },
+      {
+        name: `Minutes — Ordinary General Assembly, March ${lastYear}`,
+        type: "minutes",
+        description:
+          "Attendance, quorum, the accounts as approved, and the resolutions taken. Signed by " +
+          "the chair and the secretary.",
+      },
+      {
+        name: `Minutes — Ordinary General Assembly, October ${lastYear}`,
+        type: "minutes",
+        description: "Second ordinary assembly of the year, as required by the RCA rulebook.",
+      },
+      {
+        name: `Annual Return to the ${c.sector} Sector Cooperative Officer`,
+        type: "report",
+        description:
+          `Membership, activity and financial return filed for ${lastYear}.`,
+      },
+    ];
+
+    for (const doc of documents) await insertDocument(coopId, doc);
+
     if (c.dataGaps.length > 0) {
       await insertDocument(coopId, {
         name: "RCA Register — Outstanding Details",
@@ -1624,6 +1950,11 @@ async function seed() {
 
   // ─── External support: funders, their programmes, and existing relations ──
 
+  const auditorCount = await seedIndependentAuditors();
+  console.log(
+    `✓ Independent auditor register: ${auditorCount} entries (illustrative; one awaiting RCA approval)`
+  );
+
   const organizationIds = await seedSupportOrganizations();
   console.log(
     `✓ Partner register: ${organizationIds.size} support organisations with open programmes ` +
@@ -1711,23 +2042,40 @@ async function seed() {
     console.log("✓ Near-term activities (dashboard alerts)");
   }
 
+  // ─── One source of truth for the money ──────────────────────────────────
+  // Balances, cooperative totals and the cash book's contribution income are
+  // all brought into line with the contributions ledger, then the triggers that
+  // keep them there are switched back on.
+  const reconciled = await query(`SELECT reconcile_member_money() AS r`);
+  await query(`ALTER TABLE member_contributions ENABLE TRIGGER member_contributions_money`);
+  await query(`ALTER TABLE members ENABLE TRIGGER members_cooperative_savings`);
+  console.log("✓ Money reconciled to the ledger", JSON.stringify(reconciled.rows[0].r));
+
   console.log("\n─────────────────────────────────────────────────");
   console.log(`Seeding complete — ${COOPERATIVES.length} cooperatives.\n`);
   console.log("Test Accounts:");
   console.log("  Admin:   admin@coopinsight.rw   / Admin@1234");
   console.log(`  Manager: manager@coopinsight.rw / Manager@1234  (${demo.president!.name} — ${demo.name})`);
   console.log(`  Member:  member@coopinsight.rw  / Member@1234   (${demo.secretary!.name} — ${demo.name})`);
-  console.log("\nCooperative oversight chain (formation & dissolution requests):");
+  console.log("\nCooperative oversight chain — every request climbs it in this order:");
+  console.log(
+    `  1. Sector   ${`${demo.sector.toLowerCase()}.officer@coopinsight.rw`.padEnd(34)}/ Officer@1234  ` +
+      `(${demo.sector} — the sector ${demo.key} is in)`
+  );
   for (const [sector] of sectorOfficers) {
-    console.log(`  Sector:   ${`${sector.toLowerCase()}.officer@coopinsight.rw`.padEnd(34)}/ Officer@1234  (${sector})`);
+    if (sector === demo.sector) continue;
+    console.log(`     other sector officers: ${`${sector.toLowerCase()}.officer@coopinsight.rw`.padEnd(31)}/ Officer@1234  (${sector})`);
   }
-  console.log("  District: district.officer@coopinsight.rw     / Officer@1234");
-  console.log("  RCA:      gov@coopinsight.rw                  / Gov@1234!");
+  console.log("  2. District district.officer@coopinsight.rw     / Officer@1234  (Froduard, +250788821659)");
+  console.log("  3. RCA      gov@coopinsight.rw                  / Gov@1234!");
   console.log("\nRun backend: pnpm dev");
   process.exit(0);
 }
 
-seed().catch((err) => {
+seed().catch(async (err) => {
   console.error("Seed failed:", err);
+  // Never leave the money triggers off: balances would silently drift.
+  await query(`ALTER TABLE member_contributions ENABLE TRIGGER member_contributions_money`).catch(() => undefined);
+  await query(`ALTER TABLE members ENABLE TRIGGER members_cooperative_savings`).catch(() => undefined);
   process.exit(1);
 });

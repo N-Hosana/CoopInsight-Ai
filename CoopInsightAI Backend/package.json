@@ -9,7 +9,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "migrate": "npx ts-node src/db/migrate.ts",
-    "sync-schema": "npx ts-node src/db/syncSchema.ts"
+    "sync-schema": "npx ts-node src/db/syncSchema.ts",
+    "verify:exit": "node scripts/verify-exit-process.mjs",
+    "verify:dissolution": "node scripts/verify-dissolution.mjs",
+    "verify:session": "npx ts-node scripts/verify-stale-session.ts"
   },
   "dependencies": {
     "@types/bcrypt": "^6.0.0",

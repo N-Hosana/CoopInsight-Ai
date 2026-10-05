@@ -14,6 +14,7 @@ import {
   daysUntil,
   MaturityFacts,
 } from "../services/permits";
+import { BOARD, ORDINARY_ASSEMBLY_MONTHS } from "../services/governance";
 
 const router = Router();
 router.use(authenticate);
@@ -209,11 +210,18 @@ export async function gatherMaturityFacts(
           WHERE cooperative_id = $1 AND deleted_at IS NULL`,
         [cooperativeId]
       ),
+      // Every assembly, and separately those that fell in the months the RCA
+      // sets aside for the ordinary general assembly.
       query(
-        `SELECT COUNT(*) AS n FROM activities
+        `SELECT
+           COUNT(*) AS total,
+           COUNT(*) FILTER (
+             WHERE EXTRACT(MONTH FROM date)::int = ANY($3::int[])
+           ) AS ordinary
+           FROM activities
           WHERE cooperative_id = $1 AND deleted_at IS NULL
             AND type = 'meeting' AND status = 'completed' AND date >= $2`,
-        [cooperativeId, since]
+        [cooperativeId, since, [...ORDINARY_ASSEMBLY_MONTHS]]
       ),
       query(
         `SELECT
@@ -231,10 +239,14 @@ export async function gatherMaturityFacts(
         [cooperativeId, since]
       ),
       query(`SELECT COUNT(*) AS n FROM balance_sheets WHERE cooperative_id = $1`, [cooperativeId]),
+      // The RCA brochure puts five people on the Board: President, Vice
+      // President, Secretary and two advisors. The sector cooperative officer
+      // recorded alongside them is not a board seat and is excluded.
       query(
         `SELECT COUNT(*) AS n FROM cooperative_leadership
           WHERE cooperative_id = $1
-            AND role IN ('President','Vice President','Secretary')
+            AND (end_date IS NULL OR end_date > CURRENT_DATE)
+            AND role <> 'Sector Cooperative Officer'
             AND name IS NOT NULL AND name <> '(Name not recorded)'`,
         [cooperativeId]
       ),
@@ -258,11 +270,13 @@ export async function gatherMaturityFacts(
     monthsWithIncome: parseInt(income.rows[0].n, 10),
     memberCount: parseInt(members.rows[0].n, 10),
     minMembers: FORMATION_THRESHOLDS.minMembers,
-    generalAssemblies: parseInt(assemblies.rows[0].n, 10),
+    generalAssemblies: parseInt(assemblies.rows[0].total, 10),
+    ordinaryAssemblies: parseInt(assemblies.rows[0].ordinary, 10),
     participationRate: total > 0 ? engaged / total : null,
     hasTransactions: parseInt(txns.rows[0].n, 10) > 0,
     hasBalanceSheet: parseInt(balance.rows[0].n, 10) > 0,
-    leadershipComplete: parseInt(leadership.rows[0].n, 10) >= 3,
+    boardSeatsFilled: parseInt(leadership.rows[0].n, 10),
+    leadershipComplete: parseInt(leadership.rows[0].n, 10) >= BOARD.standardSize,
     governanceDocuments: parseInt(docs.rows[0].n, 10),
   };
 }

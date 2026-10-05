@@ -1,6 +1,34 @@
 import { Router, Request, Response } from "express";
-import { query } from "../config/db";
+import { query, getClient } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
+import {
+  AssemblyCall,
+  CONVENER_TITLE_KEYWORDS,
+  DELEGATE_THRESHOLD_MEMBERS,
+  NOTICE_DAYS,
+  QUORUM_FRACTION,
+  SECOND_CALL_WINDOW,
+  addDays,
+  addWorkingDays,
+  assemblyPolicy,
+  quorumBasis,
+  quorumRequired,
+  reportDeadlines,
+  voteCarries,
+} from "../services/governance";
+import {
+  INSTRUCTION_TO_METHOD,
+  SETTLEMENT_METHODS,
+  SETTLEMENT_METHOD_LABELS,
+  calculateSettlement,
+} from "../services/settlement";
+import {
+  EXIT_STEP_DEFINITIONS,
+  buildExitProcess,
+  certificateStatement,
+} from "../services/exitProcess";
+import { broadcastToCooperative } from "../services/broadcast";
+import { assemblyDateTime, registerAllMembers } from "../services/assemblies";
 
 const router = Router();
 
@@ -24,17 +52,23 @@ export const RESPONSE_WINDOW_DAYS = 14;
  * records the decision the assembly actually reached — which is why the decision
  * endpoint below refuses to approve a removal that no meeting resolved on.
  *
- * THESE ARE CONFIGURATION, NOT LAW. Cooperative bylaws differ; confirm the
- * quorum and majority against the bylaws in force and change them here.
+ * The rules that govern that assembly are NOT local configuration. They come
+ * from the RCA brochure and live in `services/governance.ts`; this route only
+ * applies them. Specifically:
+ *
+ *   • A removal request cannot wait for the March or October ordinary assembly,
+ *     so it is convened as an EXTRAORDINARY assembly — 3 days' notice, and a
+ *     three-quarters quorum on the first call.
+ *   • If the first call fails, a second is called within 3 working days and
+ *     needs only one half.
+ *   • If two calls fail, the matter goes to the National Agency for direction.
+ *   • Releasing a member is ordinary business, not one of the matters the
+ *     brochure reserves to a three-quarters majority, so it carries on an
+ *     absolute majority of the votes cast.
  */
-export const MEETING_RULES = {
-  /** Minimum notice, in days, between convening the assembly and it sitting. */
-  minimumNoticeDays: 7,
-  /** Share of the register that must attend for the meeting to be competent. */
-  quorumFraction: 0.5,
-  /** Share of votes cast that must be in favour for a resolution to carry. */
-  majorityFraction: 0.5,
-};
+const ASSEMBLY_KIND = "extraordinary" as const;
+/** Releasing a member is not among the brochure's reserved matters. */
+const ASSEMBLY_MATTER = "ordinary_business" as const;
 
 const MEETING_RESOLUTIONS = ["approve_exit", "reject_exit", "deferred"];
 
@@ -100,16 +134,65 @@ const SELECT_REQUEST = `
               'cancellationReason', g.cancellation_reason,
               'convenedByName', cb.name,
               'activityId', g.activity_id,
+              'assemblyKind', g.assembly_kind,
+              'callNumber', g.call_number,
+              'secondCallDueBy', g.second_call_due_by,
+              'referredToAgencyAt', g.referred_to_agency_at,
+              'reportDueLocalAt', g.report_due_local_at,
+              'reportDueAgencyAt', g.report_due_agency_at,
+              'reportedLocalAt', g.reported_local_at,
+              'reportedAgencyAt', g.reported_agency_at,
+              'eligibleBasis', g.eligible_basis,
+              'chairedByName', g.chaired_by_name,
+              'minutedByName', g.minuted_by_name,
               'createdAt', g.created_at) ORDER BY g.created_at)
               FROM membership_exit_meetings g
               LEFT JOIN users cb ON cb.id = g.convened_by
-             WHERE g.exit_request_id = r.id), '[]') AS meetings
+             WHERE g.exit_request_id = r.id), '[]') AS meetings,
+         m.archived_at AS member_archived_at,
+         (SELECT row_to_json(s) FROM (
+            SELECT st.*, ru.name AS recorded_by_name
+              FROM membership_exit_settlements st
+              LEFT JOIN users ru ON ru.id = st.recorded_by
+             WHERE st.exit_request_id = r.id) s) AS settlement,
+         (SELECT row_to_json(cert) FROM (
+            SELECT mc.id, mc.certificate_number, mc.verification_code, mc.issued_at,
+                   mc.issued_by_name, mc.statement, mc.months_of_membership,
+                   mc.joined_on, mc.left_on, mc.roles_held, mc.total_contributions,
+                   mc.settlement_amount, mc.cooperative_name, mc.registration_number,
+                   mc.member_name, mc.membership_number, mc.revoked_at
+              FROM membership_certificates mc
+             WHERE mc.exit_request_id = r.id AND mc.revoked_at IS NULL
+             ORDER BY mc.issued_at DESC LIMIT 1) cert) AS certificate
     FROM membership_exit_requests r
     JOIN cooperatives c ON c.id = r.cooperative_id
     JOIN users u        ON u.id = r.requested_by
     LEFT JOIN members m ON m.id = r.member_id
     LEFT JOIN users d   ON d.id = r.decided_by
 `;
+
+/**
+ * Attaches the seven-step process to a request row.
+ *
+ * Every response that carries a request carries its process, because the whole
+ * point of the rework is that nobody — member or manager — has to infer what
+ * happens next from a bare status string.
+ */
+function withProcess<T extends Record<string, any>>(row: T) {
+  if (!row) return row;
+  return {
+    ...row,
+    process: buildExitProcess({
+      status: row.status,
+      createdAt: row.created_at ?? null,
+      decidedAt: row.decided_at ?? null,
+      meetings: Array.isArray(row.meetings) ? row.meetings : [],
+      settlement: row.settlement ?? null,
+      certificate: row.certificate ?? null,
+      memberArchivedAt: row.member_archived_at ?? null,
+    }),
+  };
+}
 
 /**
  * A `member` user and their row in the members register are separate records
@@ -172,15 +255,38 @@ router.get("/policy", (_req: Request, res: Response) => {
       reasonCategories: REASON_CATEGORIES,
       savingsInstructions: SAVINGS_INSTRUCTIONS,
       minReasonLength: MIN_REASON_LENGTH,
+      // The published procedure. The portal renders this, so a member reads the
+      // same seven steps the server enforces.
+      process: {
+        steps: EXIT_STEP_DEFINITIONS,
+        summary:
+          "A member cannot be signed out of a cooperative by the office. The request convenes a " +
+          "general assembly, the members vote, the cooperative settles the member's savings, " +
+          "shares and loans, the release is recorded, and the cooperative issues a certificate " +
+          "of past membership before the register entry is archived.",
+      },
+      settlement: {
+        methods: SETTLEMENT_METHODS,
+        methodLabels: SETTLEMENT_METHOD_LABELS,
+        explanation:
+          "What the member walks away with is their own savings, share capital and special " +
+          "levies, plus their share of the cooperative's distributable net worth, less any " +
+          "outstanding loans. The figure must be recorded against the request before the " +
+          "release can be entered.",
+      },
       meeting: {
-        ...MEETING_RULES,
+        ...assemblyPolicy(ASSEMBLY_KIND, ASSEMBLY_MATTER),
         resolutions: MEETING_RESOLUTIONS,
         explanation:
           "A member's request to leave is decided by the general assembly, not by the office. " +
-          `The assembly must be called at least ${MEETING_RULES.minimumNoticeDays} days ahead, ` +
-          `is competent once ${Math.round(MEETING_RULES.quorumFraction * 100)}% of the register ` +
-          `attends, and carries a resolution on more than ` +
-          `${Math.round(MEETING_RULES.majorityFraction * 100)}% of the votes cast.`,
+          "Because it cannot wait for the March or October ordinary assembly it is convened as " +
+          `an extraordinary assembly: at least ${NOTICE_DAYS.extraordinary} days' notice, and ` +
+          `${Math.round(QUORUM_FRACTION.extraordinary.first * 100)}% of those entitled to sit ` +
+          "must attend for the first call to be competent. If that fails, a second call within " +
+          `${SECOND_CALL_WINDOW.extraordinary.amount} ${SECOND_CALL_WINDOW.extraordinary.unit} ` +
+          `needs ${Math.round(QUORUM_FRACTION.extraordinary.second * 100)}%. Releasing a member ` +
+          "is ordinary business, so it carries on an absolute majority of the votes cast. If two " +
+          "calls fail to reach quorum the matter goes to the RCA for direction.",
       },
     },
   });
@@ -202,7 +308,7 @@ router.get("/exit-requests/mine", async (req: Request, res: Response) => {
 
     res.json({
       success: true,
-      data: result.rows,
+      data: result.rows.map(withProcess),
       memberRecord,
       responseWindowDays: RESPONSE_WINDOW_DAYS,
     });
@@ -216,23 +322,15 @@ router.get("/exit-requests/mine", async (req: Request, res: Response) => {
 // What a departing member would walk away with. Members get their own figure;
 // reviewers may pass ?memberId= to price any member of their cooperative.
 //
-// The calculation, in order:
-//   1. Own money      = savings + share capital + special levies paid in
-//   2. Share of value = (member share capital / cooperative share capital)
-//                       × distributable net worth
-//   3. Deductions     = outstanding loan balances
-//   4. Net payable    = 1 + 2 − 3   (floored at zero)
-//
-// Distributable net worth comes from the latest balance sheet when one exists.
-// Otherwise it is estimated as lifetime surplus (completed income − expense)
-// less the members' own savings, since those are a liability owed back to
-// members, not cooperative equity. That fallback is flagged in the response.
+// The arithmetic lives in services/settlement.ts, because the same calculation
+// has to produce the estimate shown here AND the settlement the cooperative
+// records against the exit. Two copies of it would eventually disagree, and the
+// member would be the one to discover that.
 router.get("/settlement", async (req: Request, res: Response) => {
   try {
-    const actor = await query(
-      `SELECT role, cooperative_id FROM users WHERE id = $1`,
-      [req.user!.userId]
-    );
+    const actor = await query(`SELECT role, cooperative_id FROM users WHERE id = $1`, [
+      req.user!.userId,
+    ]);
     const role = actor.rows[0]?.role as string;
     const isReviewer = REVIEWER_ROLES.includes(role);
     const requestedMemberId = req.query.memberId as string | undefined;
@@ -244,14 +342,16 @@ router.get("/settlement", async (req: Request, res: Response) => {
       if (!isReviewer) {
         return res.status(403).json({ success: false, message: "Access denied" });
       }
-      const m = await query(
-        `SELECT id, cooperative_id FROM members WHERE id = $1`,
-        [requestedMemberId]
-      );
+      const m = await query(`SELECT id, cooperative_id FROM members WHERE id = $1`, [
+        requestedMemberId,
+      ]);
       if (m.rowCount === 0) {
         return res.status(404).json({ success: false, message: "Member not found" });
       }
-      if (["manager", "cooperative"].includes(role) && m.rows[0].cooperative_id !== req.user!.cooperativeId) {
+      if (
+        ["manager", "cooperative"].includes(role) &&
+        m.rows[0].cooperative_id !== req.user!.cooperativeId
+      ) {
         return res.status(403).json({ success: false, message: "Access denied" });
       }
       memberId = m.rows[0].id;
@@ -267,184 +367,26 @@ router.get("/settlement", async (req: Request, res: Response) => {
       if (!own) {
         return res.status(404).json({
           success: false,
-          message: "We could not match your account to an entry in the member register, so no settlement can be calculated.",
+          message:
+            "We could not match your account to an entry in the member register, so no " +
+            "settlement can be calculated.",
         });
       }
       memberId = own.id;
     }
 
-    const [memberRes, coopRes, contribRes, coopContribRes, loanRes, balanceRes, surplusRes] = await Promise.all([
-      query(
-        `SELECT id, full_name, membership_number, membership_date, total_savings, total_contributions
-           FROM members WHERE id = $1`,
-        [memberId]
-      ),
-      query(
-        `SELECT id, name, total_savings,
-                (SELECT COUNT(*) FROM members m WHERE m.cooperative_id = c.id AND m.deleted_at IS NULL) AS member_count
-           FROM cooperatives c WHERE c.id = $1`,
-        [cooperativeId]
-      ),
-      query(
-        `SELECT type, COALESCE(SUM(amount),0) AS total
-           FROM member_contributions WHERE member_id = $1 GROUP BY type`,
-        [memberId]
-      ),
-      query(
-        `SELECT COALESCE(SUM(mc.amount),0) AS total
-           FROM member_contributions mc
-           JOIN members m ON m.id = mc.member_id
-          WHERE m.cooperative_id = $1 AND mc.type = 'share_capital'`,
-        [cooperativeId]
-      ),
-      query(
-        `SELECT COALESCE(SUM(balance),0) AS outstanding
-           FROM loan_records
-          WHERE member_id = $1 AND status IN ('active','overdue')`,
-        [memberId]
-      ),
-      query(
-        `SELECT cash, bank_balance, inventory, fixed_assets, loans_outstanding,
-                external_loans, accounts_payable, member_savings, share_capital,
-                retained_earnings, period_end
-           FROM balance_sheets WHERE cooperative_id = $1
-          ORDER BY period_end DESC LIMIT 1`,
-        [cooperativeId]
-      ),
-      query(
-        `SELECT
-           COALESCE(SUM(amount) FILTER (WHERE type = 'income'), 0)  AS income,
-           COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0) AS expense
-           FROM transactions WHERE cooperative_id = $1 AND status = 'completed'`,
-        [cooperativeId]
-      ),
-    ]);
-
-    if (memberRes.rowCount === 0 || coopRes.rowCount === 0) {
+    const settlement = await calculateSettlement(memberId!, cooperativeId!);
+    if (!settlement) {
       return res.status(404).json({ success: false, message: "Member or cooperative not found" });
     }
 
-    const member = memberRes.rows[0];
-    const coop = coopRes.rows[0];
-    const num = (v: unknown) => Number(v ?? 0);
-
-    const byType: Record<string, number> = {};
-    for (const row of contribRes.rows) byType[row.type] = num(row.total);
-    const savingsContributions = byType.savings ?? 0;
-    const shareCapital = byType.share_capital ?? 0;
-    const specialLevies = byType.special_levy ?? 0;
-
-    // members.total_savings is the running balance the cooperative reports; the
-    // contributions ledger may be incomplete, so take whichever is higher.
-    const recordedSavings = num(member.total_savings);
-    const memberSavings = Math.max(recordedSavings, savingsContributions);
-
-    const cooperativeShareCapital = num(coopContribRes.rows[0]?.total);
-    const outstandingLoans = num(loanRes.rows[0]?.outstanding);
-
-    let netWorth: number;
-    let netWorthBasis: string;
-    let estimated: boolean;
-    const balance = balanceRes.rows[0];
-
-    if (balance) {
-      const assets = num(balance.cash) + num(balance.bank_balance) + num(balance.inventory) +
-        num(balance.fixed_assets) + num(balance.loans_outstanding);
-      const liabilities = num(balance.external_loans) + num(balance.accounts_payable) + num(balance.member_savings);
-      netWorth = assets - liabilities;
-      netWorthBasis = `Latest balance sheet, period ending ${new Date(balance.period_end).toISOString().slice(0, 10)}: assets RWF ${assets.toLocaleString()} less liabilities RWF ${liabilities.toLocaleString()}.`;
-      estimated = false;
-    } else {
-      const income = num(surplusRes.rows[0]?.income);
-      const expense = num(surplusRes.rows[0]?.expense);
-      const surplus = income - expense;
-      netWorth = surplus - num(coop.total_savings);
-      netWorthBasis = `No balance sheet on file. Estimated from completed transactions: income RWF ${income.toLocaleString()} less expenses RWF ${expense.toLocaleString()}, less members' savings of RWF ${num(coop.total_savings).toLocaleString()} which are owed back to members.`;
-      estimated = true;
-    }
-
-    const distributableNetWorth = Math.max(0, netWorth);
-    const sharePercentage = cooperativeShareCapital > 0 ? shareCapital / cooperativeShareCapital : 0;
-    const shareOfNetWorth = Math.round(distributableNetWorth * sharePercentage);
-
-    const ownFunds = memberSavings + shareCapital + specialLevies;
-    const grossEntitlement = ownFunds + shareOfNetWorth;
-    const netPayable = Math.max(0, grossEntitlement - outstandingLoans);
-
-    const warnings: string[] = [];
-    if (cooperativeShareCapital === 0) {
-      warnings.push(
-        "No share capital contributions are recorded for this cooperative, so no share of retained value can be attributed. Only the member's own funds are payable."
-      );
-    }
-    if (estimated) {
-      warnings.push(
-        "No balance sheet has been filed, so the cooperative's net worth is estimated from transaction history. File a balance sheet for an accurate figure."
-      );
-    }
-    if (netWorth < 0) {
-      warnings.push(
-        `The cooperative's net worth is negative (RWF ${Math.round(netWorth).toLocaleString()}), so no surplus is distributable. Members may still be liable for losses under the bylaws.`
-      );
-    }
-    if (outstandingLoans > 0) {
-      warnings.push(
-        `RWF ${outstandingLoans.toLocaleString()} of outstanding loans must be settled and has been deducted.`
-      );
-    }
-    if (outstandingLoans > grossEntitlement) {
-      warnings.push(
-        `Outstanding loans exceed the member's entitlement by RWF ${Math.round(outstandingLoans - grossEntitlement).toLocaleString()}. The member owes this balance to the cooperative.`
-      );
-    }
-
-    res.json({
-      success: true,
-      data: {
-        member: {
-          id: member.id,
-          fullName: member.full_name,
-          membershipNumber: member.membership_number,
-          membershipDate: member.membership_date,
-        },
-        cooperative: {
-          id: coop.id,
-          name: coop.name,
-          memberCount: Number(coop.member_count),
-          totalMemberSavings: num(coop.total_savings),
-          shareCapital: cooperativeShareCapital,
-        },
-        ownFunds: {
-          savings: memberSavings,
-          shareCapital,
-          specialLevies,
-          total: ownFunds,
-        },
-        shareOfCooperative: {
-          distributableNetWorth,
-          sharePercentage: Number((sharePercentage * 100).toFixed(4)),
-          amount: shareOfNetWorth,
-          basis: netWorthBasis,
-          estimated,
-        },
-        deductions: {
-          outstandingLoans,
-          total: outstandingLoans,
-        },
-        grossEntitlement,
-        netPayable,
-        balanceOwedToCooperative: Math.max(0, outstandingLoans - grossEntitlement),
-        warnings,
-        disclaimer:
-          "Indicative figure computed from the records currently held in CoopInsight. The amount actually paid is set by the cooperative's bylaws and its audited accounts at the date of exit.",
-        calculatedAt: new Date().toISOString(),
-      },
-    });
+    res.json({ success: true, data: settlement });
   } catch (err) {
     console.error("GET /membership/settlement error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
+
 
 // ─── POST /exit-requests ──────────────────────────────────────────────────────
 router.post("/exit-requests", async (req: Request, res: Response) => {
@@ -544,7 +486,7 @@ router.post("/exit-requests", async (req: Request, res: Response) => {
       message:
         `Request submitted. ${request.cooperative_name} must call a general assembly to decide it ` +
         `and respond within ${RESPONSE_WINDOW_DAYS} days.`,
-      data: request,
+      data: withProcess(request),
       notifiedReviewers: notified,
     });
   } catch (err) {
@@ -642,9 +584,9 @@ router.get("/exit-requests", authorize(...REVIEWER_ROLES), async (req: Request, 
 
     res.json({
       success: true,
-      data: result.rows,
+      data: result.rows.map(withProcess),
       responseWindowDays: RESPONSE_WINDOW_DAYS,
-      meetingRules: MEETING_RULES,
+      meetingRules: assemblyPolicy(ASSEMBLY_KIND, ASSEMBLY_MATTER),
     });
   } catch (err) {
     console.error("GET /membership/exit-requests error:", err);
@@ -672,7 +614,11 @@ router.get("/exit-requests/:id", async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, message: "Access denied" });
     }
 
-    res.json({ success: true, data: request, meetingRules: MEETING_RULES });
+    res.json({
+      success: true,
+      data: withProcess(request),
+      meetingRules: assemblyPolicy(ASSEMBLY_KIND, ASSEMBLY_MATTER),
+    });
   } catch (err) {
     console.error("GET /membership/exit-requests/:id error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
@@ -732,6 +678,29 @@ router.post(
         });
       }
 
+      // Which call is this? A first call that failed quorum entitles the
+      // cooperative to a second on a lower threshold; anything beyond that goes
+      // to the RCA rather than being put to the members a third time.
+      const priorCalls = await query(
+        `SELECT id, call_number, quorum_met, second_call_due_by
+           FROM membership_exit_meetings
+          WHERE exit_request_id = $1 AND status = 'held'
+          ORDER BY call_number DESC LIMIT 1`,
+        [request.id]
+      );
+      const prior = priorCalls.rows[0];
+      const callNumber: AssemblyCall = prior && prior.quorum_met === false ? 2 : 1;
+
+      if (prior && prior.call_number >= 2 && prior.quorum_met === false) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Two calls have already failed to reach quorum. Under the RCA rules the matter now " +
+            "goes to the National Agency for direction rather than to a third assembly.",
+          referToAgency: true,
+        });
+      }
+
       const { scheduledFor, location, agenda } = req.body;
       if (!scheduledFor || Number.isNaN(Date.parse(scheduledFor))) {
         return res.status(400).json({
@@ -742,25 +711,67 @@ router.post(
 
       const when = new Date(scheduledFor);
       const noticeDays = Math.ceil((when.getTime() - Date.now()) / 86_400_000);
-      if (noticeDays < MEETING_RULES.minimumNoticeDays) {
+      const requiredNotice = NOTICE_DAYS[ASSEMBLY_KIND];
+      if (noticeDays < requiredNotice) {
         return res.status(400).json({
           success: false,
           message:
-            `Members must be given at least ${MEETING_RULES.minimumNoticeDays} days' notice. ` +
-            `The date you chose is ${noticeDays} day(s) away.`,
+            `An extraordinary assembly needs at least ${requiredNotice} days' notice under the ` +
+            `RCA rules. The date you chose is ${noticeDays} day(s) away.`,
         });
+      }
+      // A second call must follow the failed first within the brochure's window.
+      if (callNumber === 2 && prior?.second_call_due_by) {
+        // second_call_due_by is a DATE, so it arrives as midnight. The deadline
+        // is the end of that day — comparing a 10am meeting against 00:00 would
+        // reject the last day the rules actually allow.
+        const dueBy = new Date(prior.second_call_due_by);
+        dueBy.setHours(23, 59, 59, 999);
+        if (when > dueBy) {
+          return res.status(400).json({
+            success: false,
+            message:
+              `The second call must sit by ${dueBy.toLocaleDateString()} — within ` +
+              `${SECOND_CALL_WINDOW[ASSEMBLY_KIND].amount} ` +
+              `${SECOND_CALL_WINDOW[ASSEMBLY_KIND].unit} of the failed first call.`,
+          });
+        }
       }
       if (!location || !String(location).trim()) {
         return res.status(400).json({ success: false, message: "A meeting location is required." });
       }
 
+      // Above 100 members the assembly is a body of elected delegates, not the
+      // whole register, so quorum is counted against the delegates. The delegate
+      // count is set by the National Agency and cannot be derived, so a
+      // cooperative over the threshold with none recorded is told to record it
+      // rather than being silently measured against the wrong denominator.
       const eligible = await query(
-        `SELECT COUNT(*) AS n FROM members
-          WHERE cooperative_id = $1 AND deleted_at IS NULL AND status = 'active'`,
+        `SELECT
+           (SELECT COUNT(*) FROM members
+             WHERE cooperative_id = $1 AND deleted_at IS NULL AND status = 'active') AS members,
+           (SELECT delegate_count FROM cooperatives WHERE id = $1) AS delegates`,
         [request.cooperative_id]
       );
-      const membersEligible = parseInt(eligible.rows[0].n, 10);
-      const quorumRequired = Math.ceil(membersEligible * MEETING_RULES.quorumFraction);
+      const activeMembers = parseInt(eligible.rows[0].members, 10);
+      const delegateCount = eligible.rows[0].delegates as number | null;
+      const usesDelegates = activeMembers > DELEGATE_THRESHOLD_MEMBERS;
+
+      if (usesDelegates && !delegateCount) {
+        return res.status(409).json({
+          success: false,
+          message:
+            `${request.cooperative_name} has ${activeMembers} members, so its general assembly ` +
+            `is made up of delegates elected by their peers rather than of every member. ` +
+            "Record the number of delegates on the cooperative before calling an assembly, or " +
+            "quorum would be counted against the wrong body.",
+          needsDelegateCount: true,
+        });
+      }
+
+      const membersEligible = usesDelegates ? (delegateCount as number) : activeMembers;
+      const eligibleBasis = usesDelegates ? "delegates" : "members";
+      const requiredQuorum = quorumRequired(ASSEMBLY_KIND, callNumber, membersEligible);
 
       const title = `General Assembly — removal request: ${request.requester_name}`;
       const defaultAgenda =
@@ -772,6 +783,9 @@ router.post(
         `5. Settle the member's savings, share capital and outstanding loans.\n` +
         `6. Vote and minute the resolution.`;
 
+      // The wall-clock date and time as typed — toISOString() shifted a 10:00
+      // assembly in Kigali to 08:00 on the activity.
+      const sits = assemblyDateTime(String(scheduledFor));
       const activity = await query(
         `INSERT INTO activities
            (cooperative_id, title, type, status, date, start_time, location, description,
@@ -781,8 +795,8 @@ router.post(
         [
           request.cooperative_id,
           title,
-          when.toISOString().slice(0, 10),
-          when.toISOString().slice(11, 19),
+          sits.date,
+          sits.time,
           String(location).trim(),
           `Extraordinary general assembly convened to decide the removal request filed by ` +
             `${request.requester_name}.`,
@@ -798,8 +812,9 @@ router.post(
       const meeting = await query(
         `INSERT INTO membership_exit_meetings
            (exit_request_id, cooperative_id, activity_id, scheduled_for, location, agenda,
-            convened_by, status, members_eligible, quorum_required)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'scheduled',$8,$9)
+            convened_by, status, members_eligible, quorum_required,
+            assembly_kind, call_number, follows_meeting_id, eligible_basis)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'scheduled',$8,$9,$10,$11,$12,$13)
          RETURNING id`,
         [
           request.id,
@@ -810,9 +825,17 @@ router.post(
           agenda && String(agenda).trim() ? String(agenda).trim() : defaultAgenda,
           req.user!.userId,
           membersEligible,
-          quorumRequired,
+          requiredQuorum,
+          ASSEMBLY_KIND,
+          callNumber,
+          callNumber === 2 ? prior.id : null,
+          eligibleBasis,
         ]
       );
+
+      // Every active member is on the meeting's register, so it is on their
+      // own activities and attendance is taken against the whole membership.
+      const membersRegistered = await registerAllMembers(activity.rows[0].id, request.cooperative_id);
 
       await query(
         `UPDATE membership_exit_requests SET status = 'meeting_scheduled', updated_at = NOW()
@@ -820,7 +843,7 @@ router.post(
         [request.id]
       );
 
-      // The member who filed it, and everyone entitled to vote on it.
+      // The member who filed it hears about it personally.
       await query(
         `INSERT INTO notifications (user_id, title, message, type, link)
          VALUES ($1,'General assembly called on your request',$2,'alert','/membership')`,
@@ -830,33 +853,53 @@ router.post(
             `${when.toLocaleDateString()} at ${String(location).trim()} to decide your removal request.`,
         ]
       );
-      const voters = await query(
-        `SELECT id FROM users
-          WHERE cooperative_id = $1 AND status = 'active' AND id <> $2`,
-        [request.cooperative_id, request.requested_by]
-      );
-      for (const v of voters.rows) {
-        await query(
-          `INSERT INTO notifications (user_id, title, message, type, link)
-           VALUES ($1,'General assembly called',$2,'reminder','/activities')`,
-          [
-            v.id,
-            `A general assembly sits on ${when.toLocaleDateString()} at ${String(location).trim()} ` +
-              `to decide a member's request to leave ${request.cooperative_name}. ` +
-              `${quorumRequired} of ${membersEligible} members must attend for it to be competent.`,
-          ]
-        );
-      }
+
+      // ── And every member is sent the notice as a message ──────────────────
+      // A bell notification disappears the moment it is dismissed. A notice of
+      // assembly has to be readable weeks later, because a member who says they
+      // were never told is making a claim the cooperative must be able to
+      // answer. Convening therefore broadcasts a proper message to the whole
+      // cooperative, carrying the four things an invitation must state: time,
+      // date, venue and agenda.
+      const noticeAgenda =
+        agenda && String(agenda).trim() ? String(agenda).trim() : defaultAgenda;
+      const broadcast = await broadcastToCooperative({
+        cooperativeId: request.cooperative_id,
+        senderId: req.user!.userId,
+        senderName: req.user!.name,
+        subject: `Notice of general assembly — ${when.toLocaleDateString()}`,
+        body:
+          `An ${ASSEMBLY_KIND} general assembly of ${request.cooperative_name} is called for ` +
+          `${when.toLocaleDateString()} at ${when.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}, at ${String(location).trim()}.\n\n` +
+          `Purpose: to decide the request by ${request.requester_name} to be released from ` +
+          `membership.\n\n` +
+          `Quorum: ${requiredQuorum} of ${membersEligible} ${eligibleBasis} must attend for this ` +
+          `assembly (call ${callNumber}) to be competent to decide. Releasing a member carries on ` +
+          `an absolute majority of the votes cast.\n\n` +
+          `Agenda:\n${noticeAgenda}\n\n` +
+          `Please attend. If quorum is not reached a second call must be held within ` +
+          `${SECOND_CALL_WINDOW[ASSEMBLY_KIND].amount} ${SECOND_CALL_WINDOW[ASSEMBLY_KIND].unit}.`,
+        // The notification opens the meeting itself on the activities page.
+        link: `/activities/${activity.rows[0].id}`,
+      });
 
       const updated = await query(`${SELECT_REQUEST} WHERE r.id = $1`, [request.id]);
       res.status(201).json({
         success: true,
         message:
-          `General assembly called for ${when.toLocaleDateString()}. ` +
-          `${quorumRequired} of ${membersEligible} members must attend for the vote to stand.`,
-        data: updated.rows[0],
+          `General assembly called for ${when.toLocaleDateString()}. It is on the activities ` +
+          `calendar with all ${membersRegistered} active member(s) registered, and the notice has ` +
+          `been sent to ${broadcast.accountsReached} member account(s). ` +
+          `${requiredQuorum} of ${membersEligible} ${eligibleBasis} must attend for the vote to stand ` +
+          `(${ASSEMBLY_KIND} assembly, call ${callNumber}).` +
+          (broadcast.note ? ` ${broadcast.note}` : ""),
+        data: withProcess(updated.rows[0]),
         meetingId: meeting.rows[0].id,
-        notifiedMembers: voters.rowCount ?? 0,
+        notifiedMembers: broadcast.accountsReached,
+        broadcast,
       });
     } catch (err) {
       console.error("POST /membership/exit-requests/:id/meeting error:", err);
@@ -934,29 +977,37 @@ router.patch(
         });
       }
 
-      const quorumRequired = meeting.quorum_required ?? 0;
-      const quorumMet = present >= quorumRequired;
+      const requiredQuorum = meeting.quorum_required ?? 0;
+      const quorumMet = present >= requiredQuorum;
 
       // A resolution requires quorum. Without it the meeting can only defer.
       if (!quorumMet && resolution !== "deferred") {
         return res.status(409).json({
           success: false,
           message:
-            `Only ${present} of the ${meeting.members_eligible} members attended; ` +
-            `${quorumRequired} were needed for the assembly to be competent. ` +
-            "Record the meeting as deferred and call another one.",
+            `Only ${present} of the ${meeting.members_eligible} ${meeting.eligible_basis} ` +
+            `attended; ${requiredQuorum} were needed. Quorum for this assembly is ` +
+            quorumBasis(ASSEMBLY_KIND, meeting.call_number as AssemblyCall, meeting.members_eligible) +
+            " Record the meeting as deferred; " +
+            (meeting.call_number === 1
+              ? `a second call within ${SECOND_CALL_WINDOW[ASSEMBLY_KIND].amount} ` +
+                `${SECOND_CALL_WINDOW[ASSEMBLY_KIND].unit} needs only ` +
+                `${Math.round(QUORUM_FRACTION[ASSEMBLY_KIND].second * 100)}%.`
+              : "as this was the second call, the matter now goes to the RCA for direction."),
         });
       }
       // And the arithmetic has to support what is being minuted.
-      if (resolution === "approve_exit" && !(cast > 0 && forVotes / cast > MEETING_RULES.majorityFraction)) {
+      // Releasing a member is ordinary business, so the RCA's absolute-majority
+      // rule applies: more than half of the votes cast. A tie does not carry and
+      // the brochure says the vote is repeated.
+      const outcome = voteCarries(ASSEMBLY_MATTER, forVotes, againstVotes, abstainVotes);
+      if (resolution === "approve_exit" && !outcome.carried) {
         return res.status(409).json({
           success: false,
-          message:
-            `The vote does not carry a removal: ${forVotes} of ${cast} votes were in favour, ` +
-            `and more than ${Math.round(MEETING_RULES.majorityFraction * 100)}% is required.`,
+          message: `The vote does not carry a removal. ${outcome.basis}`,
         });
       }
-      if (resolution === "reject_exit" && cast > 0 && forVotes / cast > MEETING_RULES.majorityFraction) {
+      if (resolution === "reject_exit" && outcome.carried) {
         return res.status(409).json({
           success: false,
           message:
@@ -973,13 +1024,35 @@ router.patch(
         });
       }
 
+      // Two reporting clocks start the moment the assembly sits: the sector and
+      // district administrations within 3 working days, the National Agency
+      // within 7 days.
+      const heldAt = new Date();
+      const deadlines = reportDeadlines(heldAt);
+
+      // A failed first call must be followed by a second inside the window; a
+      // failed second call is the end of the road and goes to the RCA.
+      const failedCall = !quorumMet;
+      const isSecondCall = meeting.call_number === 2;
+      const secondCallDueBy =
+        failedCall && !isSecondCall
+          ? SECOND_CALL_WINDOW[ASSEMBLY_KIND].unit === "working days"
+            ? addWorkingDays(heldAt, SECOND_CALL_WINDOW[ASSEMBLY_KIND].amount)
+            : addDays(heldAt, SECOND_CALL_WINDOW[ASSEMBLY_KIND].amount)
+          : null;
+      const referToAgency = failedCall && isSecondCall;
+
       await query(
         `UPDATE membership_exit_meetings
             SET status = 'held', members_present = $1, quorum_met = $2,
                 votes_for = $3, votes_against = $4, votes_abstain = $5,
                 resolution = $6, resolution_note = $7, minutes_url = $8,
-                held_at = NOW(), recorded_by = $9, updated_at = NOW()
-          WHERE id = $10`,
+                held_at = $9, recorded_by = $10,
+                report_due_local_at = $11, report_due_agency_at = $12,
+                second_call_due_by = $13, referred_to_agency_at = $14,
+                chaired_by_name = $15, minuted_by_name = $16,
+                updated_at = NOW()
+          WHERE id = $17`,
         [
           present,
           quorumMet,
@@ -989,10 +1062,40 @@ router.patch(
           resolution,
           resolutionNote ? String(resolutionNote).trim() : null,
           minutesUrl || null,
+          heldAt.toISOString(),
           req.user!.userId,
+          deadlines.sectorAndDistrict.toISOString(),
+          deadlines.nationalAgency.toISOString(),
+          secondCallDueBy ? secondCallDueBy.toISOString().slice(0, 10) : null,
+          referToAgency ? heldAt.toISOString() : null,
+          req.body.chairedBy ? String(req.body.chairedBy).trim() : null,
+          req.body.minutedBy ? String(req.body.minutedBy).trim() : null,
           meeting.id,
         ]
       );
+
+      // "If two calls fail to reach quorum, the matter goes to the National
+      // Agency for direction." Telling the RCA is the whole point of that rule,
+      // so it is done here rather than left to the cooperative to remember.
+      if (referToAgency) {
+        const officers = await query(
+          `SELECT id FROM users
+            WHERE status = 'active'
+              AND (oversight_level IN ('sector','rca') OR role IN ('admin','generalManager'))`
+        );
+        for (const o of officers.rows) {
+          await query(
+            `INSERT INTO notifications (user_id, title, message, type, link)
+             VALUES ($1,'Assembly failed twice — RCA direction needed',$2,'alert','/membership')`,
+            [
+              o.id,
+              `${request.cooperative_name} called two assemblies to decide a member's removal ` +
+                "request and neither reached quorum. Under the RCA rules the matter now comes to " +
+                "the National Agency for direction.",
+            ]
+          );
+        }
+      }
 
       if (meeting.activity_id) {
         await query(
@@ -1035,12 +1138,36 @@ router.patch(
       res.json({
         success: true,
         message:
-          resolution === "deferred"
-            ? "Meeting recorded as deferred. Call another assembly to decide the request."
-            : `Meeting recorded. The assembly resolved to ${resolution.replace(/_/g, " ")}; ` +
-              "record the formal decision to complete the request.",
-        data: updated.rows[0],
-        quorum: { required: quorumRequired, present, met: quorumMet },
+          resolution !== "deferred"
+            ? `Meeting recorded. The assembly resolved to ${resolution.replace(/_/g, " ")}; ` +
+              "record the formal decision to complete the request."
+            : referToAgency
+              ? "Meeting recorded. Two calls have now failed to reach quorum, so the matter goes " +
+                "to the RCA for direction — a third assembly is not provided for. The sector and " +
+                "RCA officers have been notified."
+              : secondCallDueBy
+                ? "Meeting recorded as deferred. Call the second assembly by " +
+                  `${secondCallDueBy.toLocaleDateString()}; it needs only ` +
+                  `${Math.round(QUORUM_FRACTION[ASSEMBLY_KIND].second * 100)}% to be competent.`
+                : "Meeting recorded as deferred. Call another assembly to decide the request.",
+        data: withProcess(updated.rows[0]),
+        quorum: {
+          required: requiredQuorum,
+          present,
+          met: quorumMet,
+          basis: quorumBasis(
+            ASSEMBLY_KIND,
+            meeting.call_number as AssemblyCall,
+            meeting.members_eligible
+          ),
+          call: meeting.call_number,
+        },
+        vote: outcome,
+        reporting: {
+          sectorAndDistrictDueBy: deadlines.sectorAndDistrict.toISOString(),
+          nationalAgencyDueBy: deadlines.nationalAgency.toISOString(),
+        },
+        referredToAgency: referToAgency,
       });
     } catch (err) {
       console.error("PATCH /membership/exit-requests/:id/meeting/:meetingId error:", err);
@@ -1103,7 +1230,7 @@ router.patch(
       );
 
       const updated = await query(`${SELECT_REQUEST} WHERE r.id = $1`, [request.id]);
-      res.json({ success: true, message: "Assembly cancelled.", data: updated.rows[0] });
+      res.json({ success: true, message: "Assembly cancelled.", data: withProcess(updated.rows[0]) });
     } catch (err) {
       console.error("PATCH /membership/exit-requests/:id/meeting/:meetingId/cancel error:", err);
       res.status(500).json({ success: false, message: "Internal server error" });
@@ -1111,17 +1238,525 @@ router.patch(
   }
 );
 
+
+// ─── GET /exit-requests/:id/settlement ────────────────────────────────────────
+// Step 5, read side. Returns the settlement already recorded against the
+// request, or — when none has been recorded yet — the live calculation the
+// cooperative is about to record, so the manager fills the form with the real
+// figures instead of retyping them.
+router.get("/exit-requests/:id/settlement", async (req: Request, res: Response) => {
+  try {
+    const found = await query(
+      `SELECT r.*, c.name AS cooperative_name, u.name AS requester_name
+         FROM membership_exit_requests r
+         JOIN cooperatives c ON c.id = r.cooperative_id
+         JOIN users u        ON u.id = r.requested_by
+        WHERE r.id = $1`,
+      [req.params.id]
+    );
+    if (found.rowCount === 0) {
+      return res.status(404).json({ success: false, message: "Request not found" });
+    }
+    const request = found.rows[0];
+
+    const role = req.user!.role;
+    const isOwner = request.requested_by === req.user!.userId;
+    const isReviewer =
+      REVIEWER_ROLES.includes(role) &&
+      (["admin", "generalManager"].includes(role) ||
+        request.cooperative_id === req.user!.cooperativeId);
+    if (!isOwner && !isReviewer) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const recorded = await query(
+      `SELECT s.*, u.name AS recorded_by_name
+         FROM membership_exit_settlements s
+         LEFT JOIN users u ON u.id = s.recorded_by
+        WHERE s.exit_request_id = $1`,
+      [request.id]
+    );
+
+    const calculated = request.member_id
+      ? await calculateSettlement(request.member_id, request.cooperative_id)
+      : null;
+
+    res.json({
+      success: true,
+      data: {
+        recorded: recorded.rows[0] ?? null,
+        calculated,
+        // What the member asked for when they filed, so the cooperative does
+        // not have to go and look it up.
+        memberInstruction: request.savings_instruction,
+        suggestedMethod:
+          INSTRUCTION_TO_METHOD[request.savings_instruction as string] ?? "mobile_money",
+        contactPhone: request.contact_phone,
+        methods: SETTLEMENT_METHODS,
+        methodLabels: SETTLEMENT_METHOD_LABELS,
+        canRecord: isReviewer,
+        notOnRegister: !request.member_id,
+      },
+    });
+  } catch (err) {
+    console.error("GET /membership/exit-requests/:id/settlement error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── POST /exit-requests/:id/settlement ───────────────────────────────────────
+// Step 5, write side: the cooperative RESOLVES the member's assets.
+//
+// This is the step the process was missing. Before it existed, a manager could
+// approve a removal while the cooperative still held the member's savings, and
+// nothing in the system would ever say so. Now the release cannot be recorded
+// until this row exists.
+//
+// The figures are recomputed here rather than taken from the request body. A
+// manager may override a line — the cooperative's audited accounts, not this
+// system, are the final word — but an override must be explained, and the
+// computed figures are stored alongside so the difference is visible.
+router.post(
+  "/exit-requests/:id/settlement",
+  authorize(...REVIEWER_ROLES),
+  async (req: Request, res: Response) => {
+    try {
+      const request = await loadForReview(req, res);
+      if (!request) return;
+
+      if (!OPEN_STATUSES.includes(request.status)) {
+        return res.status(409).json({
+          success: false,
+          message: `This request is already ${request.status}; its settlement can no longer be recorded.`,
+        });
+      }
+
+      // The assembly has to have released the member before their money is
+      // paid out. Settling first would hand back savings on a request the
+      // members might still refuse.
+      const resolved = await query(
+        `SELECT resolution, held_at FROM membership_exit_meetings
+          WHERE exit_request_id = $1 AND status = 'held' AND resolution = 'approve_exit'
+          ORDER BY held_at DESC LIMIT 1`,
+        [request.id]
+      );
+      if (resolved.rowCount === 0) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "No general assembly has resolved to release this member yet. Settle their savings " +
+            "and shares only once the members have voted to let them go.",
+          requiresMeeting: true,
+        });
+      }
+
+      const existing = await query(
+        `SELECT id FROM membership_exit_settlements WHERE exit_request_id = $1`,
+        [request.id]
+      );
+      if ((existing.rowCount ?? 0) > 0) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "A settlement is already recorded against this request. It cannot be recorded twice; " +
+            "correct it through the cooperative's accounts if the figures were wrong.",
+        });
+      }
+
+      const {
+        settlementMethod,
+        paymentReference,
+        amountPaid,
+        settledOn,
+        otherDeductions,
+        otherDeductionsNote,
+        notes,
+      } = req.body;
+
+      if (!settlementMethod || !(SETTLEMENT_METHODS as readonly string[]).includes(settlementMethod)) {
+        return res.status(400).json({
+          success: false,
+          message: `settlementMethod must be one of: ${SETTLEMENT_METHODS.join(", ")}`,
+        });
+      }
+
+      // The computed position, from the same code that produces the member's
+      // own estimate.
+      const computed = request.member_id
+        ? await calculateSettlement(request.member_id, request.cooperative_id)
+        : null;
+
+      if (!computed && settlementMethod !== "nothing_due") {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This account has no entry in the member register, so there is no savings or share " +
+            "position to settle. Record the settlement as 'nothing_due', or correct the register " +
+            "first.",
+        });
+      }
+
+      const extraDeductions = otherDeductions != null ? Number(otherDeductions) : 0;
+      if (Number.isNaN(extraDeductions) || extraDeductions < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "otherDeductions must be zero or a positive amount.",
+        });
+      }
+      if (extraDeductions > 0 && !String(otherDeductionsNote ?? "").trim()) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "A deduction beyond the member's outstanding loans has to be explained. The member " +
+            "is entitled to know what was taken off and why.",
+        });
+      }
+
+      const gross = computed?.grossEntitlement ?? 0;
+      const loans = computed?.deductions.outstandingLoans ?? 0;
+      const netPayable = Math.max(0, gross - loans - extraDeductions);
+      const owedByMember = Math.max(0, loans + extraDeductions - gross);
+
+      const paid = amountPaid != null ? Number(amountPaid) : netPayable;
+      if (Number.isNaN(paid) || paid < 0) {
+        return res.status(400).json({ success: false, message: "amountPaid must be zero or more." });
+      }
+      if (paid > netPayable) {
+        return res.status(400).json({
+          success: false,
+          message:
+            `RWF ${paid.toLocaleString()} was entered as paid but only RWF ` +
+            `${netPayable.toLocaleString()} is due. Correct the figure, or record the difference ` +
+            "as a separate transaction in the cooperative's books.",
+        });
+      }
+      // Paying out less than is due, without saying why, is how a member ends
+      // up short and nobody can explain it afterwards.
+      if (paid < netPayable && !String(notes ?? "").trim()) {
+        return res.status(400).json({
+          success: false,
+          message:
+            `RWF ${netPayable.toLocaleString()} is due but RWF ${paid.toLocaleString()} was paid. ` +
+            "Explain the difference in the notes — an instalment plan, a disputed figure, " +
+            "whatever it is — so the member and the auditor can both read it.",
+        });
+      }
+      if (
+        ["mobile_money", "bank_transfer"].includes(settlementMethod) &&
+        paid > 0 &&
+        !String(paymentReference ?? "").trim()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "A mobile money or bank payment needs its transaction reference. Without one there " +
+            "is nothing to check the payment against.",
+        });
+      }
+
+      const inserted = await query(
+        `INSERT INTO membership_exit_settlements
+           (exit_request_id, cooperative_id, member_id,
+            own_savings, share_capital, special_levies, share_of_net_worth,
+            outstanding_loans, other_deductions, other_deductions_note,
+            gross_entitlement, net_payable, balance_owed_by_member,
+            settlement_method, payment_reference, amount_paid, settled_on, notes,
+            computation, recorded_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                 COALESCE($17::date, CURRENT_DATE),$18,$19,$20)
+         RETURNING *`,
+        [
+          request.id,
+          request.cooperative_id,
+          request.member_id,
+          computed?.ownFunds.savings ?? 0,
+          computed?.ownFunds.shareCapital ?? 0,
+          computed?.ownFunds.specialLevies ?? 0,
+          computed?.shareOfCooperative.amount ?? 0,
+          loans,
+          extraDeductions,
+          extraDeductions > 0 ? String(otherDeductionsNote).trim() : null,
+          gross,
+          netPayable,
+          owedByMember,
+          settlementMethod,
+          paymentReference ? String(paymentReference).trim() : null,
+          paid,
+          settledOn || null,
+          notes ? String(notes).trim() : null,
+          computed ? JSON.stringify(computed) : null,
+          req.user!.userId,
+        ]
+      );
+
+      // The member is told exactly what was settled, in figures, not in a
+      // status change they have to interpret.
+      await query(
+        `INSERT INTO notifications (user_id, title, message, type, link)
+         VALUES ($1,'Your settlement has been recorded',$2,'alert','/membership')`,
+        [
+          request.requested_by,
+          `${request.cooperative_name} has settled your account: RWF ${gross.toLocaleString()} ` +
+            `due, RWF ${(loans + extraDeductions).toLocaleString()} deducted, RWF ` +
+            `${paid.toLocaleString()} ${SETTLEMENT_METHOD_LABELS[
+              settlementMethod as keyof typeof SETTLEMENT_METHOD_LABELS
+            ].toLowerCase()}. Confirm receipt on the Membership page.`,
+        ]
+      );
+
+      const updated = await query(`${SELECT_REQUEST} WHERE r.id = $1`, [request.id]);
+      res.status(201).json({
+        success: true,
+        message:
+          owedByMember > 0
+            ? `Settlement recorded. The member still owes the cooperative RWF ` +
+              `${owedByMember.toLocaleString()}; the release can now be entered, but that balance ` +
+              "remains recoverable."
+            : `Settlement recorded: RWF ${paid.toLocaleString()} paid to the member. You can now ` +
+              "enter the release.",
+        data: withProcess(updated.rows[0]),
+        settlement: inserted.rows[0],
+      });
+    } catch (err) {
+      console.error("POST /membership/exit-requests/:id/settlement error:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  }
+);
+
+// ─── PATCH /exit-requests/:id/settlement/acknowledge ──────────────────────────
+// The member confirms on their own portal that they received what was settled.
+// This is the only place in the exit the member gets the last word, and it is
+// what turns "the cooperative says it paid" into "the member agrees it was paid".
+router.patch("/exit-requests/:id/settlement/acknowledge", async (req: Request, res: Response) => {
+  try {
+    const result = await query(
+      `UPDATE membership_exit_settlements s
+          SET acknowledged_by_member = TRUE, acknowledged_at = NOW(), updated_at = NOW()
+        FROM membership_exit_requests r
+        WHERE s.exit_request_id = r.id
+          AND r.id = $1 AND r.requested_by = $2
+          AND s.acknowledged_by_member = FALSE
+        RETURNING s.id, s.amount_paid`,
+      [req.params.id, req.user!.userId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "No settlement of yours was found awaiting confirmation. Either none has been recorded " +
+          "yet, or you have already confirmed it.",
+      });
+    }
+
+    const reviewers = await query(
+      `SELECT u.id FROM users u
+         JOIN membership_exit_requests r ON r.id = $1
+        WHERE u.status = 'active'
+          AND ((u.role IN ('manager','cooperative') AND u.cooperative_id = r.cooperative_id)
+               OR u.role IN ('admin','generalManager'))`,
+      [req.params.id]
+    );
+    for (const reviewer of reviewers.rows) {
+      await query(
+        `INSERT INTO notifications (user_id, title, message, type, link)
+         VALUES ($1,'Settlement confirmed by the member',$2,'info','/membership')`,
+        [
+          reviewer.id,
+          `${req.user!.name ?? "The member"} has confirmed receipt of RWF ` +
+            `${Number(result.rows[0].amount_paid).toLocaleString()}.`,
+        ]
+      );
+    }
+
+    res.json({ success: true, message: "Thank you — receipt confirmed." });
+  } catch (err) {
+    console.error("PATCH /membership/exit-requests/:id/settlement/acknowledge error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+/**
+ * Issues the certificate of past membership and archives the register entry.
+ *
+ * Both happen together because they are the same act: the cooperative closes the
+ * member's file and hands them proof of what was in it. Doing one without the
+ * other produces either a member archived with nothing to show for their years,
+ * or a certificate for somebody still on the register.
+ */
+async function issueCertificateAndArchive(options: {
+  request: any;
+  issuedBy: string;
+  issuedByName: string;
+  decisionNote: string | null;
+}) {
+  const { request, issuedBy, issuedByName } = options;
+
+  const [memberRes, coopRes, settlementRes, meetingRes, contribRes] = await Promise.all([
+    request.member_id
+      ? query(
+          `SELECT full_name, national_id, membership_number, membership_date, role,
+                  total_contributions, total_savings
+             FROM members WHERE id = $1`,
+          [request.member_id]
+        )
+      : Promise.resolve({ rows: [], rowCount: 0 } as any),
+    query(`SELECT name, registration_number FROM cooperatives WHERE id = $1`, [
+      request.cooperative_id,
+    ]),
+    query(
+      `SELECT amount_paid, net_payable FROM membership_exit_settlements WHERE exit_request_id = $1`,
+      [request.id]
+    ),
+    query(
+      `SELECT held_at, resolution, votes_for, votes_against, votes_abstain
+         FROM membership_exit_meetings
+        WHERE exit_request_id = $1 AND status = 'held' AND resolution = 'approve_exit'
+        ORDER BY held_at DESC LIMIT 1`,
+      [request.id]
+    ),
+    request.member_id
+      ? query(
+          `SELECT COALESCE(SUM(amount),0) AS total FROM member_contributions WHERE member_id = $1`,
+          [request.member_id]
+        )
+      : Promise.resolve({ rows: [{ total: 0 }] } as any),
+  ]);
+
+  const member = memberRes.rows[0] ?? null;
+  const coop = coopRes.rows[0];
+  const settlement = settlementRes.rows[0] ?? null;
+  const meeting = meetingRes.rows[0] ?? null;
+
+  const joinedOn: string | null = member?.membership_date ?? null;
+  const leftOn = new Date().toISOString().slice(0, 10);
+  const monthsOfMembership = joinedOn
+    ? Math.max(
+        0,
+        Math.round(
+          (new Date(leftOn).getTime() - new Date(joinedOn).getTime()) / (1000 * 60 * 60 * 24 * 30.44)
+        )
+      )
+    : null;
+
+  // Offices the member held, taken from the leadership register rather than
+  // assumed from their row in the member list.
+  const offices = member
+    ? await query(
+        `SELECT role FROM cooperative_leadership
+          WHERE cooperative_id = $1 AND LOWER(name) = LOWER($2)`,
+        [request.cooperative_id, member.full_name]
+      )
+    : { rows: [] as Array<{ role: string }> };
+  const registerRole =
+    member && member.role && member.role !== "member"
+      ? member.role.charAt(0).toUpperCase() + member.role.slice(1)
+      : null;
+  const rolesHeld =
+    [...offices.rows.map((r: { role: string }) => r.role), registerRole].filter(Boolean).join(", ") ||
+    null;
+
+  const year = new Date().getFullYear();
+  const seq = await query(
+    `SELECT COUNT(*) AS n FROM membership_certificates WHERE EXTRACT(YEAR FROM issued_at) = $1`,
+    [year]
+  );
+  const certificateNumber = `MC/${year}/${String(parseInt(seq.rows[0].n, 10) + 1).padStart(5, "0")}`;
+  // Short, readable, and unguessable enough that a certificate cannot be
+  // fabricated by counting upwards from somebody else's.
+  const verificationCode = `${request.id.replace(/-/g, "").slice(0, 8)}${Date.now()
+    .toString(36)
+    .toUpperCase()
+    .slice(-6)}`.toUpperCase();
+
+  const memberName = member?.full_name ?? request.requester_name ?? "Member";
+  const statement = certificateStatement({
+    memberName,
+    cooperativeName: coop.name,
+    registrationNumber: coop.registration_number,
+    joinedOn,
+    leftOn,
+    monthsOfMembership,
+    rolesHeld,
+    assemblyHeldOn: meeting?.held_at ?? null,
+  });
+
+  const inserted = await query(
+    `INSERT INTO membership_certificates
+       (certificate_number, cooperative_id, member_id, exit_request_id, issued_to_user_id,
+        purpose, member_name, national_id, membership_number, cooperative_name,
+        registration_number, joined_on, left_on, months_of_membership, roles_held,
+        total_contributions, settlement_amount, exit_ground, assembly_held_on,
+        assembly_resolution, statement, verification_code, issued_by, issued_by_name)
+     VALUES ($1,$2,$3,$4,$5,'exit',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+     RETURNING *`,
+    [
+      certificateNumber,
+      request.cooperative_id,
+      request.member_id,
+      request.id,
+      request.requested_by,
+      memberName,
+      member?.national_id ?? null,
+      member?.membership_number ?? null,
+      coop.name,
+      coop.registration_number,
+      joinedOn,
+      leftOn,
+      monthsOfMembership,
+      rolesHeld,
+      Number(contribRes.rows[0]?.total ?? member?.total_contributions ?? 0),
+      settlement ? Number(settlement.amount_paid) : null,
+      String(request.reason_category ?? "").replace(/_/g, " ") || null,
+      meeting?.held_at ? new Date(meeting.held_at).toISOString().slice(0, 10) : null,
+      meeting
+        ? `The general assembly resolved to release the member by ${meeting.votes_for} votes for, ` +
+          `${meeting.votes_against} against and ${meeting.votes_abstain} abstentions.`
+        : null,
+      statement,
+      verificationCode,
+      issuedBy,
+      issuedByName,
+    ]
+  );
+
+  // ── Archive, don't delete ────────────────────────────────────────────────
+  // deleted_at is still set so every existing query that filters on it keeps
+  // behaving; archived_at is what says this was an orderly departure rather
+  // than a record somebody removed.
+  if (request.member_id) {
+    await query(
+      `UPDATE members
+          SET status = 'inactive',
+              archived_at = NOW(),
+              archive_reason = $2,
+              exit_request_id = $3,
+              deleted_at = COALESCE(deleted_at, NOW()),
+              updated_at = NOW()
+        WHERE id = $1`,
+      [
+        request.member_id,
+        `Released by the general assembly on the member's own request. Certificate ` +
+          `${certificateNumber} issued.`,
+        request.id,
+      ]
+    );
+  }
+
+  return inserted.rows[0];
+}
+
 // ─── PATCH /exit-requests/:id/decision ────────────────────────────────────────
-// Records the decision the general assembly reached.
+// Steps 6 and 7: the release is recorded, and the certificate is issued.
 //
-// This endpoint deliberately cannot invent an outcome: approving requires a
-// held assembly that resolved to approve, and rejecting requires one that
-// resolved to refuse. An admin may override that in the exceptional case where
-// the cooperative cannot convene at all, but only with a stated reason, and the
-// override is written into the decision note where the member can read it.
-//
-// Approving removes the member from the register the same way DELETE /members/:id
-// does — status 'inactive' plus a soft delete — and records why in member_status_log.
+// This endpoint cannot invent an outcome. Approving requires a held assembly
+// that resolved to approve AND a recorded settlement of the member's assets;
+// rejecting requires an assembly that resolved to refuse. An admin may override
+// the assembly requirement in the exceptional case where the cooperative cannot
+// convene at all, but only with a stated reason written into the decision note
+// where the member can read it. Nobody may override the settlement: releasing a
+// member while still holding their money is not an administrative shortcut, it
+// is the thing the procedure exists to prevent.
 router.patch("/exit-requests/:id/decision", authorize(...REVIEWER_ROLES), async (req: Request, res: Response) => {
   try {
     const { decision, note } = req.body;
@@ -1140,9 +1775,10 @@ router.patch("/exit-requests/:id/decision", authorize(...REVIEWER_ROLES), async 
     }
 
     const existing = await query(
-      `SELECT r.*, c.name AS cooperative_name
+      `SELECT r.*, c.name AS cooperative_name, u.name AS requester_name
          FROM membership_exit_requests r
          JOIN cooperatives c ON c.id = r.cooperative_id
+         JOIN users u        ON u.id = r.requested_by
         WHERE r.id = $1`,
       [req.params.id]
     );
@@ -1215,6 +1851,29 @@ router.patch("/exit-requests/:id/decision", authorize(...REVIEWER_ROLES), async 
           " [Recorded without a general assembly resolution, under administrative override.]";
       }
     }
+
+    // ── And the member's assets must be resolved before they are released ────
+    // No override. A cooperative that cannot yet pay should record the
+    // settlement with what it has paid and explain the balance in the notes —
+    // that at least leaves the member with a figure they can hold it to.
+    if (decision === "approved") {
+      const settled = await query(
+        `SELECT id, net_payable, amount_paid FROM membership_exit_settlements
+          WHERE exit_request_id = $1`,
+        [request.id]
+      );
+      if (settled.rowCount === 0) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "The member's savings, share capital and outstanding loans have not been settled. " +
+            "Record the settlement against this request before releasing them — a member cannot " +
+            "be taken off the register while the cooperative still holds their money.",
+          requiresSettlement: true,
+        });
+      }
+    }
+
     await query(
       `UPDATE membership_exit_requests
           SET status = $1,
@@ -1232,36 +1891,49 @@ router.patch("/exit-requests/:id/decision", authorize(...REVIEWER_ROLES), async 
       ]
     );
 
-    if (decision === "approved" && request.member_id) {
-      const current = await query(`SELECT status FROM members WHERE id = $1`, [request.member_id]);
-      const oldStatus = current.rows[0]?.status ?? "active";
+    // ── Step 7: certificate, archive, and release of the account ─────────────
+    let certificate: any = null;
+    if (decision === "approved") {
+      const previousStatus = request.member_id
+        ? (await query(`SELECT status FROM members WHERE id = $1`, [request.member_id])).rows[0]
+            ?.status ?? "active"
+        : null;
 
-      await query(
-        `UPDATE members
-            SET status = 'inactive', deleted_at = NOW(), updated_at = NOW()
-          WHERE id = $1 AND deleted_at IS NULL`,
-        [request.member_id]
-      );
-      await query(
-        `INSERT INTO member_status_log (member_id, old_status, new_status, reason, changed_by, changed_at)
-         VALUES ($1,$2,'inactive',$3,$4,NOW())`,
-        [
-          request.member_id,
-          oldStatus,
-          `Member-requested removal approved. ${note ? String(note).trim() : ""}`.trim(),
-          req.user!.userId,
-        ]
-      );
-      // The user account keeps its login but is no longer tied to the cooperative.
-      await query(
-        `UPDATE users SET cooperative_id = NULL, updated_at = NOW() WHERE id = $1`,
-        [request.requested_by]
-      );
+      certificate = await issueCertificateAndArchive({
+        request,
+        issuedBy: req.user!.userId,
+        issuedByName: req.user!.name ?? "Cooperative office",
+        decisionNote: note ? String(note).trim() : null,
+      });
+
+      if (request.member_id) {
+        await query(
+          `INSERT INTO member_status_log (member_id, old_status, new_status, reason, changed_by, changed_at)
+           VALUES ($1,$2,'inactive',$3,$4,NOW())`,
+          [
+            request.member_id,
+            previousStatus,
+            `Released by the general assembly on the member's own request; settlement recorded ` +
+              `and certificate ${certificate.certificate_number} issued. ` +
+              `${note ? String(note).trim() : ""}`.trim(),
+            req.user!.userId,
+          ]
+        );
+      }
+
+      // The account keeps its login — that is how the departed member reaches
+      // their certificate — but it is no longer attached to the cooperative.
+      await query(`UPDATE users SET cooperative_id = NULL, updated_at = NOW() WHERE id = $1`, [
+        request.requested_by,
+      ]);
     }
 
     const messages: Record<string, string> = {
       under_review: `Your removal request from ${request.cooperative_name} is now under review.`,
-      approved: `Your removal request from ${request.cooperative_name} has been approved.`,
+      approved:
+        `Your removal request from ${request.cooperative_name} has been approved. Your ` +
+        `certificate of membership is ready to download from the Membership page, and your ` +
+        `record has been archived.`,
       rejected: `Your removal request from ${request.cooperative_name} was not approved.`,
     };
     await query(
@@ -1271,9 +1943,276 @@ router.patch("/exit-requests/:id/decision", authorize(...REVIEWER_ROLES), async 
     );
 
     const updated = await query(`${SELECT_REQUEST} WHERE r.id = $1`, [request.id]);
-    res.json({ success: true, message: `Request marked ${decision}.`, data: updated.rows[0] });
+    res.json({
+      success: true,
+      message:
+        decision === "approved"
+          ? `Released. Certificate ${certificate.certificate_number} has been issued to ` +
+            `${certificate.member_name} and their register entry is archived.`
+          : `Request marked ${decision}.`,
+      data: withProcess(updated.rows[0]),
+      certificate,
+    });
   } catch (err) {
     console.error("PATCH /membership/exit-requests/:id/decision error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── GET /certificates ────────────────────────────────────────────────────────
+// Every certificate the signed-in account holds. A departed member's login
+// survives their membership precisely so this list keeps working.
+router.get("/certificates", async (req: Request, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT * FROM membership_certificates
+        WHERE issued_to_user_id = $1 AND revoked_at IS NULL
+        ORDER BY issued_at DESC`,
+      [req.user!.userId]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error("GET /membership/certificates error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── GET /certificates/issued ─────────────────────────────────────────────────
+// The cooperative's own record of what it has issued. Managers see their own
+// cooperative; administrators see everything.
+router.get(
+  "/certificates/issued",
+  authorize(...REVIEWER_ROLES),
+  async (req: Request, res: Response) => {
+    try {
+      const scoped = ["manager", "cooperative"].includes(req.user!.role);
+      if (scoped && !req.user!.cooperativeId) {
+        return res.json({ success: true, data: [] });
+      }
+      const result = await query(
+        `SELECT mc.*, u.name AS holder_account_name
+           FROM membership_certificates mc
+           LEFT JOIN users u ON u.id = mc.issued_to_user_id
+          ${scoped ? "WHERE mc.cooperative_id = $1" : ""}
+          ORDER BY mc.issued_at DESC`,
+        scoped ? [req.user!.cooperativeId] : []
+      );
+      res.json({ success: true, data: result.rows });
+    } catch (err) {
+      console.error("GET /membership/certificates/issued error:", err);
+      res.status(500).json({ success: false, message: "Internal server error" });
+    }
+  }
+);
+
+// ─── GET /certificates/verify/:code ───────────────────────────────────────────
+// Open to any signed-in account. A certificate is worthless if the bank or the
+// next cooperative cannot check it, so this returns the printed facts for a
+// code — and nothing else about the holder.
+router.get("/certificates/verify/:code", async (req: Request, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT certificate_number, member_name, cooperative_name, registration_number,
+              joined_on, left_on, months_of_membership, roles_held, issued_at,
+              issued_by_name, revoked_at, revocation_reason
+         FROM membership_certificates
+        WHERE UPPER(verification_code) = UPPER($1)`,
+      [req.params.code]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        valid: false,
+        message: "No certificate matches that verification code.",
+      });
+    }
+    const certificate = result.rows[0];
+    res.json({
+      success: true,
+      valid: !certificate.revoked_at,
+      data: certificate,
+      message: certificate.revoked_at
+        ? `This certificate was revoked on ${new Date(certificate.revoked_at).toLocaleDateString()}.`
+        : "Certificate is valid.",
+    });
+  } catch (err) {
+    console.error("GET /membership/certificates/verify/:code error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── GET /archive ─────────────────────────────────────────────────────────────
+// Members who have left properly. Kept separate from the active register so a
+// cooperative can see its history without those people counting towards quorum,
+// member totals or engagement figures.
+router.get("/archive", authorize(...REVIEWER_ROLES), async (req: Request, res: Response) => {
+  try {
+    const scoped = ["manager", "cooperative"].includes(req.user!.role);
+    if (scoped && !req.user!.cooperativeId) {
+      return res.json({ success: true, data: [] });
+    }
+    const result = await query(
+      `SELECT m.id, m.full_name, m.membership_number, m.national_id, m.phone,
+              m.membership_date, m.archived_at, m.archive_reason, m.total_contributions,
+              c.name AS cooperative_name,
+              r.reason_category, r.decided_at,
+              s.amount_paid, s.settlement_method, s.acknowledged_by_member,
+              mc.certificate_number, mc.verification_code
+         FROM members m
+         JOIN cooperatives c ON c.id = m.cooperative_id
+         LEFT JOIN membership_exit_requests r ON r.id = m.exit_request_id
+         LEFT JOIN membership_exit_settlements s ON s.exit_request_id = r.id
+         LEFT JOIN membership_certificates mc ON mc.member_id = m.id AND mc.revoked_at IS NULL
+        WHERE m.archived_at IS NOT NULL
+          ${scoped ? "AND m.cooperative_id = $1" : ""}
+        ORDER BY m.archived_at DESC`,
+      scoped ? [req.user!.cooperativeId] : []
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error("GET /membership/archive error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── PATCH /exit-requests/:id/reverse ─────────────────────────────────────────
+// Undo an approved exit that should not have happened — recorded in error, or
+// approved while testing. Until now the only way back was editing the database
+// by hand, which is how a member kept finding themselves "not associated with
+// any cooperative".
+//
+// It reinstates the member's register entry, re-attaches their login, revokes
+// the certificate (it no longer states a fact), and keeps the settlement as
+// history with a note. The request itself is marked `reversed`, with who and
+// why, so the record shows both that the member left and that it was undone.
+router.patch("/exit-requests/:id/reverse", authorize(...REVIEWER_ROLES), async (req: Request, res: Response) => {
+  try {
+    const reason = String(req.body.reason ?? "").trim();
+    if (reason.length < 10) {
+      return res.status(400).json({
+        success: false,
+        message: "Say why the exit is being reversed, in at least 10 characters.",
+      });
+    }
+
+    const found = await query(
+      `SELECT e.*, c.name AS cooperative_name, c.deleted_at AS cooperative_deleted_at
+         FROM membership_exit_requests e
+         JOIN cooperatives c ON c.id = e.cooperative_id
+        WHERE e.id = $1`,
+      [req.params.id]
+    );
+    if (found.rowCount === 0) {
+      return res.status(404).json({ success: false, message: "Exit request not found" });
+    }
+    const request = found.rows[0];
+
+    // A manager reverses exits from their own cooperative only.
+    if (["manager", "cooperative"].includes(req.user!.role) && req.user!.cooperativeId !== request.cooperative_id) {
+      return res.status(403).json({ success: false, message: "This exit belongs to another cooperative." });
+    }
+    if (request.status !== "approved") {
+      return res.status(409).json({
+        success: false,
+        message: `Only an approved exit can be reversed; this one is ${request.status.replace(/_/g, " ")}.`,
+      });
+    }
+    if (request.cooperative_deleted_at) {
+      return res.status(409).json({
+        success: false,
+        message: `${request.cooperative_name} has been dissolved, so there is nothing to reinstate the member into.`,
+      });
+    }
+
+    const client = await getClient();
+    try {
+      await client.query("BEGIN");
+
+      await client.query(
+        `UPDATE membership_exit_requests
+            SET status = 'reversed', reversed_at = NOW(), reversed_by = $2, reversal_reason = $3,
+                updated_at = NOW()
+          WHERE id = $1`,
+        [request.id, req.user!.userId, reason]
+      );
+
+      await client.query(
+        `UPDATE membership_certificates
+            SET revoked_at = NOW(), revocation_reason = $2
+          WHERE exit_request_id = $1 AND revoked_at IS NULL`,
+        [request.id, `The exit was reversed: ${reason}`]
+      );
+
+      await client.query(
+        `UPDATE membership_exit_settlements
+            SET notes = TRIM(BOTH E'\\n' FROM COALESCE(notes, '') || E'\\n' || $2), updated_at = NOW()
+          WHERE exit_request_id = $1`,
+        [request.id, `[Exit reversed ${new Date().toISOString().slice(0, 10)}: ${reason}]`]
+      );
+
+      if (request.member_id) {
+        // Back to the status they held before the release, which the status
+        // log recorded when they were archived.
+        const before = await client.query(
+          `SELECT old_status FROM member_status_log
+            WHERE member_id = $1 AND new_status = 'inactive'
+            ORDER BY changed_at DESC LIMIT 1`,
+          [request.member_id]
+        );
+        const restored = before.rows[0]?.old_status && before.rows[0].old_status !== "inactive"
+          ? before.rows[0].old_status
+          : "active";
+
+        await client.query(
+          `UPDATE members
+              SET status = $2, deleted_at = NULL, archived_at = NULL, archive_reason = NULL,
+                  exit_request_id = NULL, updated_at = NOW()
+            WHERE id = $1`,
+          [request.member_id, restored]
+        );
+        await client.query(
+          `INSERT INTO member_status_log (member_id, old_status, new_status, reason, changed_by, changed_at)
+           VALUES ($1,'inactive',$2,$3,$4,NOW())`,
+          [request.member_id, restored, `Exit reversed: ${reason}`, req.user!.userId]
+        );
+      }
+
+      // Re-attach the login: the one that filed the request, and any other
+      // account linked to this member record.
+      const relinked = await client.query(
+        `UPDATE users
+            SET cooperative_id = $1, member_id = COALESCE(member_id, $2), updated_at = NOW()
+          WHERE id = $3 OR ($2::uuid IS NOT NULL AND member_id = $2::uuid)
+          RETURNING id`,
+        [request.cooperative_id, request.member_id, request.requested_by]
+      );
+
+      for (const u of relinked.rows) {
+        await client.query(
+          `INSERT INTO notifications (user_id, title, message, type, link)
+           VALUES ($1,'Your membership has been restored',$2,'info','/members/me')`,
+          [
+            u.id,
+            `Your exit from ${request.cooperative_name} was reversed: ${reason}. You are a member ` +
+              "again and your record is back as it was.",
+          ]
+        );
+      }
+
+      await client.query("COMMIT");
+      res.json({
+        success: true,
+        message: `Exit reversed. The member is back on ${request.cooperative_name}'s register and their login is re-attached.`,
+        data: { exitRequestId: request.id, accountsRelinked: relinked.rowCount },
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error("PATCH /membership/exit-requests/:id/reverse error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });

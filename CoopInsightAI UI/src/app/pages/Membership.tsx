@@ -19,7 +19,87 @@ import {
   Users,
   Gavel,
   CalendarPlus,
+  Award,
+  Archive,
+  BadgeCheck,
+  Banknote,
+  Circle,
+  Copy,
+  Printer,
+  SkipForward,
 } from "lucide-react";
+
+/**
+ * One of the seven steps of leaving a cooperative, as the server computes it.
+ *
+ * The backend owns this list (services/exitProcess.ts) and every response that
+ * carries a request carries its process, so what this page shows a member is
+ * exactly what the server will insist on. Nothing here is inferred from the
+ * status string.
+ */
+interface ProcessStep {
+  key: string;
+  order: number;
+  title: string;
+  description: string;
+  actor: "member" | "manager" | "assembly" | "system";
+  state: "done" | "current" | "blocked" | "pending" | "skipped";
+  completedAt?: string | null;
+  blockedReason?: string;
+  detail?: string;
+}
+
+interface ExitProcess {
+  steps: ProcessStep[];
+  currentStepKey: string | null;
+  percentComplete: number;
+  nextAction: string | null;
+}
+
+/** The settlement the cooperative actually paid, once it has recorded one. */
+interface RecordedSettlement {
+  id: string;
+  own_savings: string;
+  share_capital: string;
+  special_levies: string;
+  share_of_net_worth: string;
+  outstanding_loans: string;
+  other_deductions: string;
+  other_deductions_note: string | null;
+  gross_entitlement: string;
+  net_payable: string;
+  balance_owed_by_member: string;
+  settlement_method: string;
+  payment_reference: string | null;
+  amount_paid: string;
+  settled_on: string;
+  notes: string | null;
+  acknowledged_by_member: boolean;
+  acknowledged_at: string | null;
+  recorded_by_name: string | null;
+  created_at: string;
+}
+
+/** The certificate of past membership, issued when the release is recorded. */
+interface MembershipCertificate {
+  id: string;
+  certificate_number: string;
+  verification_code: string;
+  issued_at: string;
+  issued_by_name: string | null;
+  statement: string;
+  months_of_membership: number | null;
+  joined_on: string | null;
+  left_on: string | null;
+  roles_held: string | null;
+  total_contributions: string | null;
+  settlement_amount: string | null;
+  cooperative_name: string;
+  registration_number: string | null;
+  member_name: string;
+  membership_number: string | null;
+  revoked_at?: string | null;
+}
 
 interface ExitRequest {
   id: string;
@@ -45,6 +125,10 @@ interface ExitRequest {
     | "rejected"
     | "withdrawn";
   meetings: AssemblyMeeting[];
+  settlement: RecordedSettlement | null;
+  certificate: MembershipCertificate | null;
+  member_archived_at: string | null;
+  process: ExitProcess;
   response_due_at: string;
   decision_note: string | null;
   decided_by_name: string | null;
@@ -63,6 +147,15 @@ interface AssemblyMeeting {
   membersPresent: number | null;
   quorumRequired: number | null;
   quorumMet: boolean | null;
+  assemblyKind: "ordinary" | "extraordinary";
+  callNumber: number;
+  eligibleBasis: "members" | "delegates";
+  secondCallDueBy: string | null;
+  referredToAgencyAt: string | null;
+  reportDueLocalAt: string | null;
+  reportDueAgencyAt: string | null;
+  reportedLocalAt: string | null;
+  reportedAgencyAt: string | null;
   votesFor: number | null;
   votesAgainst: number | null;
   votesAbstain: number | null;
@@ -74,10 +167,24 @@ interface AssemblyMeeting {
   createdAt: string;
 }
 
+/**
+ * The assembly rules as published by the RCA, served by /membership/policy.
+ * An extraordinary assembly is convened for a removal request because it cannot
+ * wait for the March or October ordinary sitting.
+ */
 interface MeetingRules {
-  minimumNoticeDays: number;
-  quorumFraction: number;
-  majorityFraction: number;
+  kind: "ordinary" | "extraordinary";
+  matter: string;
+  noticeDays: number;
+  quorumFirstCall: number;
+  quorumSecondCall: number;
+  secondCallWindow: { amount: number; unit: string };
+  majorityRequired: number;
+  reserved: boolean;
+  reportDeadlines: { sectorAndDistrictWorkingDays: number; nationalAgencyDays: number };
+  delegateThreshold: number;
+  ordinaryMonths: number[];
+  source: string;
   explanation?: string;
 }
 
@@ -121,6 +228,7 @@ const STATUS_STYLES: Record<string, { label: string; badge: string; Icon: typeof
   approved: { label: "Approved", badge: "bg-green-100 text-green-800", Icon: CheckCircle2 },
   rejected: { label: "Not approved", badge: "bg-red-100 text-red-700", Icon: XCircle },
   withdrawn: { label: "Withdrawn by you", badge: "bg-gray-100 text-gray-700", Icon: Undo2 },
+  reversed: { label: "Exit reversed", badge: "bg-slate-100 text-slate-700", Icon: Undo2 },
 };
 
 /** Statuses in which a request is still live and being worked. */
@@ -135,6 +243,342 @@ const daysUntil = (value: string) =>
 
 const money = (v: number | string | null | undefined) =>
   v == null ? "—" : `RWF ${Number(v).toLocaleString()}`;
+
+const SETTLEMENT_METHOD_LABELS: Record<string, string> = {
+  mobile_money: "Paid by mobile money",
+  bank_transfer: "Paid by bank transfer",
+  cash: "Paid in cash against a signed receipt",
+  donated_to_cooperative: "Left to the cooperative at the member's request",
+  offset_against_loan: "Set off against the outstanding loan",
+  nothing_due: "Nothing was due either way",
+};
+
+const STEP_ACTOR_LABELS: Record<string, string> = {
+  member: "The member",
+  manager: "The cooperative office",
+  assembly: "The general assembly",
+  system: "Automatic",
+};
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE PROCESS, DRAWN
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The complaint this answers is that nobody could tell what happens when a
+ * member asks to leave. A status badge reading "meeting_held" tells a member
+ * nothing about whether their money is coming, or when they get proof they were
+ * ever a member.
+ *
+ * So the seven steps are drawn out, in order, with who moves each one and what
+ * has actually happened. The list comes from the server, which is also what
+ * enforces it, so this cannot show a step as done that the server would refuse
+ * to build on.
+ */
+function ProcessTracker({ process, compact }: { process: ExitProcess; compact?: boolean }) {
+  if (!process?.steps?.length) return null;
+
+  const stateStyles: Record<string, { ring: string; text: string; Icon: typeof Circle }> = {
+    done: { ring: "bg-green-600 border-green-600 text-white", text: "text-gray-900", Icon: CheckCircle2 },
+    current: { ring: "bg-white border-[#2D6A4F] text-[#2D6A4F]", text: "text-gray-900 font-medium", Icon: Circle },
+    blocked: { ring: "bg-white border-red-500 text-red-600", text: "text-gray-900 font-medium", Icon: AlertTriangle },
+    pending: { ring: "bg-white border-gray-300 text-gray-400", text: "text-gray-500", Icon: Circle },
+    skipped: { ring: "bg-gray-100 border-gray-200 text-gray-400", text: "text-gray-400", Icon: SkipForward },
+  };
+
+  return (
+    <div>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-gray-900">How leaving works, and where this request is</p>
+        <span className="text-xs font-semibold text-gray-600">{process.percentComplete}% complete</span>
+      </div>
+      <div className="mb-4 h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
+        <div
+          className="h-full rounded-full bg-[#2D6A4F] transition-all"
+          style={{ width: `${process.percentComplete}%` }}
+        />
+      </div>
+
+      <ol className="space-y-0">
+        {process.steps.map((step, index) => {
+          const style = stateStyles[step.state] ?? stateStyles.pending;
+          const Icon = style.Icon;
+          const last = index === process.steps.length - 1;
+          return (
+            <li key={step.key} className="flex gap-3">
+              <div className="flex flex-col items-center">
+                <span
+                  className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 text-xs font-semibold ${style.ring}`}
+                >
+                  {step.state === "done" ? (
+                    <Icon className="h-4 w-4" />
+                  ) : step.state === "blocked" ? (
+                    <Icon className="h-3.5 w-3.5" />
+                  ) : (
+                    step.order
+                  )}
+                </span>
+                {!last && (
+                  <span
+                    className={`w-0.5 flex-1 ${step.state === "done" ? "bg-green-600" : "bg-gray-200"}`}
+                    style={{ minHeight: compact ? 12 : 20 }}
+                  />
+                )}
+              </div>
+              <div className={`pb-4 ${last ? "pb-0" : ""}`}>
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <p className={`text-sm ${style.text}`}>{step.title}</p>
+                  <span className="text-[11px] uppercase tracking-wide text-gray-400">
+                    {STEP_ACTOR_LABELS[step.actor] ?? step.actor}
+                  </span>
+                  {step.completedAt && (
+                    <span className="text-[11px] text-gray-400">{formatDate(step.completedAt)}</span>
+                  )}
+                </div>
+                {!compact && <p className="mt-0.5 text-xs text-gray-600">{step.description}</p>}
+                {step.detail && <p className="mt-0.5 text-xs text-gray-500">{step.detail}</p>}
+                {step.blockedReason && (
+                  <p className="mt-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">
+                    {step.blockedReason}
+                  </p>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+
+      {process.nextAction && (
+        <p className="mt-2 rounded-lg border border-[#2D6A4F]/20 bg-[#2D6A4F]/5 px-3 py-2 text-xs text-[#1b4332]">
+          <strong>Next:</strong> {process.nextAction}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The settlement as it was actually paid, line by line.
+ *
+ * Shown to the member as well as to the office. A member handed a single
+ * figure has no way to check it; a member shown savings, shares, their share of
+ * the cooperative and what was deducted can.
+ */
+function SettlementRecord({
+  settlement,
+  onAcknowledge,
+  acknowledging,
+}: {
+  settlement: RecordedSettlement;
+  onAcknowledge?: () => void;
+  acknowledging?: boolean;
+}) {
+  const lines: Array<[string, string, boolean]> = [
+    ["Savings returned", money(settlement.own_savings), false],
+    ["Share capital returned", money(settlement.share_capital), false],
+    ["Special levies returned", money(settlement.special_levies), false],
+    ["Share of the cooperative's accumulated value", money(settlement.share_of_net_worth), false],
+    ["Less: outstanding loans", money(settlement.outstanding_loans), true],
+  ];
+  if (Number(settlement.other_deductions) > 0) {
+    lines.push(["Less: other deductions", money(settlement.other_deductions), true]);
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Banknote className="h-4 w-4 text-gray-700" />
+          <p className="text-sm font-medium text-gray-900">Settlement of the member's assets</p>
+        </div>
+        <span className="text-xs text-gray-500">Settled {formatDate(settlement.settled_on)}</span>
+      </div>
+
+      <dl className="space-y-1 text-sm">
+        {lines.map(([label, value, deduction]) => (
+          <div key={label} className="flex items-baseline justify-between gap-3">
+            <dt className="text-gray-600">{label}</dt>
+            <dd className={deduction ? "font-medium text-red-600" : "font-medium text-gray-900"}>
+              {deduction ? `(${value})` : value}
+            </dd>
+          </div>
+        ))}
+        <div className="flex items-baseline justify-between gap-3 border-t border-gray-200 pt-2">
+          <dt className="font-medium text-gray-900">Net payable</dt>
+          <dd className="font-semibold text-gray-900">{money(settlement.net_payable)}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt className="text-gray-600">Actually paid</dt>
+          <dd className="font-semibold text-[#2D6A4F]">{money(settlement.amount_paid)}</dd>
+        </div>
+        {Number(settlement.balance_owed_by_member) > 0 && (
+          <div className="flex items-baseline justify-between gap-3">
+            <dt className="text-red-700">Still owed by the member</dt>
+            <dd className="font-semibold text-red-700">
+              {money(settlement.balance_owed_by_member)}
+            </dd>
+          </div>
+        )}
+      </dl>
+
+      <p className="mt-3 text-xs text-gray-600">
+        {SETTLEMENT_METHOD_LABELS[settlement.settlement_method] ?? settlement.settlement_method}
+        {settlement.payment_reference ? ` · reference ${settlement.payment_reference}` : ""}
+        {settlement.recorded_by_name ? ` · recorded by ${settlement.recorded_by_name}` : ""}
+      </p>
+      {settlement.other_deductions_note && (
+        <p className="mt-1 text-xs text-gray-600">
+          Other deductions: {settlement.other_deductions_note}
+        </p>
+      )}
+      {settlement.notes && <p className="mt-1 text-xs text-gray-600">Note: {settlement.notes}</p>}
+
+      {settlement.acknowledged_by_member ? (
+        <p className="mt-3 flex items-center gap-1.5 text-xs text-green-700">
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          Receipt confirmed by the member on {formatDate(settlement.acknowledged_at)}
+        </p>
+      ) : onAcknowledge ? (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+          <p className="text-xs text-amber-900">
+            Did you receive this? Confirming it closes the settlement on the record. If the amount is
+            wrong, do not confirm — raise it with the cooperative first.
+          </p>
+          <Button
+            size="sm"
+            className="mt-2"
+            disabled={acknowledging}
+            onClick={onAcknowledge}
+          >
+            {acknowledging ? "Confirming…" : "Confirm I received this"}
+          </Button>
+        </div>
+      ) : (
+        <p className="mt-3 text-xs text-amber-700">Awaiting the member's confirmation of receipt.</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The certificate of past membership.
+ *
+ * Deliberately printable. The reason a departing member needs this at all is to
+ * hand it to somebody else — a bank, another cooperative — so a version that
+ * only exists inside this app would not do the job. `window.print()` on a
+ * print-styled block is enough; there is no server-side PDF and pretending
+ * otherwise would be worse than this.
+ */
+function CertificateCard({ certificate }: { certificate: MembershipCertificate }) {
+  const [copied, setCopied] = useState(false);
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(certificate.verification_code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access is denied in some browsers; the code is on screen
+      // anyway, so failing silently is better than an alert about it.
+    }
+  };
+
+  return (
+    <div className="rounded-xl border-2 border-[#2D6A4F]/30 bg-white p-6 print:border-black">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 pb-4">
+        <div className="flex items-center gap-2">
+          <Award className="h-6 w-6 text-[#2D6A4F]" />
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-wide text-[#2D6A4F]">
+              Certificate of membership
+            </p>
+            <p className="text-xs text-gray-500">{certificate.cooperative_name}</p>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="font-mono text-sm font-semibold text-gray-900">
+            {certificate.certificate_number}
+          </p>
+          <p className="text-xs text-gray-500">Issued {formatDate(certificate.issued_at)}</p>
+        </div>
+      </div>
+
+      <p className="mt-4 text-sm leading-relaxed text-gray-800">{certificate.statement}</p>
+
+      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+        <div>
+          <dt className="text-xs text-gray-500">Member</dt>
+          <dd className="font-medium text-gray-900">{certificate.member_name}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-gray-500">Membership number</dt>
+          <dd className="font-medium text-gray-900">{certificate.membership_number ?? "—"}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-gray-500">Member from / to</dt>
+          <dd className="font-medium text-gray-900">
+            {formatDate(certificate.joined_on)} — {formatDate(certificate.left_on)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-gray-500">Length of membership</dt>
+          <dd className="font-medium text-gray-900">
+            {certificate.months_of_membership != null
+              ? `${certificate.months_of_membership} months`
+              : "—"}
+          </dd>
+        </div>
+        {certificate.roles_held && (
+          <div>
+            <dt className="text-xs text-gray-500">Office held</dt>
+            <dd className="font-medium text-gray-900">{certificate.roles_held}</dd>
+          </div>
+        )}
+        <div>
+          <dt className="text-xs text-gray-500">Total contributed</dt>
+          <dd className="font-medium text-gray-900">{money(certificate.total_contributions)}</dd>
+        </div>
+        {certificate.registration_number && (
+          <div>
+            <dt className="text-xs text-gray-500">Cooperative registration</dt>
+            <dd className="font-medium text-gray-900">{certificate.registration_number}</dd>
+          </div>
+        )}
+        {certificate.settlement_amount != null && (
+          <div>
+            <dt className="text-xs text-gray-500">Settlement paid on exit</dt>
+            <dd className="font-medium text-gray-900">{money(certificate.settlement_amount)}</dd>
+          </div>
+        )}
+      </dl>
+
+      <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-gray-200 pt-4">
+        <div>
+          <p className="text-xs text-gray-500">Verification code</p>
+          <button
+            type="button"
+            onClick={copyCode}
+            title="Copy — anyone can check this code against the register"
+            className="inline-flex items-center gap-2 font-mono text-sm font-semibold text-gray-900 hover:text-[#2D6A4F]"
+          >
+            {certificate.verification_code}
+            <Copy className="h-3.5 w-3.5" />
+            {copied && <span className="text-xs font-sans text-green-700">copied</span>}
+          </button>
+          {certificate.issued_by_name && (
+            <p className="mt-1 text-xs text-gray-500">Issued by {certificate.issued_by_name}</p>
+          )}
+        </div>
+        <Button size="sm" variant="outline" onClick={() => window.print()} className="print:hidden">
+          <span className="flex items-center gap-2">
+            <Printer className="h-4 w-4" />
+            Print or save as PDF
+          </span>
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 interface Settlement {
   member: { id: string; fullName: string; membershipNumber: string; membershipDate: string };
@@ -151,9 +595,32 @@ interface Settlement {
   grossEntitlement: number;
   netPayable: number;
   balanceOwedToCooperative: number;
+  /**
+   * The calculation read top to bottom. Negative amounts are deductions. The
+   * order matters — a member told "RWF 0" is entitled to see which line
+   * produced it — so the server sends the sequence rather than letting each
+   * screen invent its own.
+   */
+  lines: Array<{ label: string; amount: number; note: string }>;
   warnings: string[];
   disclaimer: string;
   calculatedAt: string;
+}
+
+/**
+ * What the settlement form is opened with: what has already been recorded (if
+ * anything), the live calculation, and what the member asked for when they filed.
+ */
+interface SettlementPreview {
+  recorded: RecordedSettlement | null;
+  calculated: Settlement | null;
+  memberInstruction: string;
+  suggestedMethod: string;
+  contactPhone: string | null;
+  methods: string[];
+  methodLabels: Record<string, string>;
+  canRecord: boolean;
+  notOnRegister: boolean;
 }
 
 /**
@@ -321,6 +788,10 @@ function MeetingPanel({ meeting }: { meeting: AssemblyMeeting }) {
               : meeting.status === "cancelled"
                 ? "General assembly — cancelled"
                 : "General assembly called"}
+            <span className="ml-2 text-xs font-normal text-gray-600">
+              {meeting.assemblyKind === "extraordinary" ? "Extraordinary" : "Ordinary"} ·{" "}
+              {meeting.callNumber === 2 ? "second call" : "first call"}
+            </span>
           </p>
         </div>
         <p className="text-sm text-gray-600">
@@ -350,7 +821,7 @@ function MeetingPanel({ meeting }: { meeting: AssemblyMeeting }) {
           <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
             <span className="text-gray-700">
               <span className="font-medium text-gray-900">{meeting.membersPresent}</span> of{" "}
-              {meeting.membersEligible} attended
+              {meeting.membersEligible} {meeting.eligibleBasis ?? "members"} attended
             </span>
             <span className={meeting.quorumMet ? "text-[#2D6A4F]" : "text-red-700"}>
               {meeting.quorumMet
@@ -393,6 +864,44 @@ function MeetingPanel({ meeting }: { meeting: AssemblyMeeting }) {
               {meeting.resolutionNote}
             </p>
           )}
+
+          {/* A failed first call entitles the cooperative to a second on a
+              lower threshold; a failed second goes to the RCA instead. */}
+          {meeting.secondCallDueBy && (
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Quorum was not reached. A second call must sit by{" "}
+              <span className="font-medium">{formatDate(meeting.secondCallDueBy)}</span>, and needs
+              only half of those entitled to attend.
+            </p>
+          )}
+          {meeting.referredToAgencyAt && (
+            <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+              Two calls failed to reach quorum, so under the RCA rules the matter has gone to the
+              National Agency for direction.
+            </p>
+          )}
+
+          {/* The two statutory reporting deadlines the brochure attaches to
+              every meeting held. */}
+          {(meeting.reportDueLocalAt || meeting.reportDueAgencyAt) && (
+            <div className="rounded-lg bg-white px-3 py-2 text-xs text-gray-600">
+              <p className="font-medium text-gray-800 mb-1">Minutes must be filed</p>
+              <p>
+                Sector and District administrations by{" "}
+                <span className="font-medium text-gray-900">
+                  {formatDate(meeting.reportDueLocalAt)}
+                </span>
+                {meeting.reportedLocalAt ? " — filed." : " — outstanding."}
+              </p>
+              <p>
+                RCA by{" "}
+                <span className="font-medium text-gray-900">
+                  {formatDate(meeting.reportDueAgencyAt)}
+                </span>
+                {meeting.reportedAgencyAt ? " — filed." : " — outstanding."}
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -425,6 +934,10 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [acknowledging, setAcknowledging] = useState(false);
+  // Certificates outlive membership: a departed member keeps their login
+  // precisely so this list keeps working after they are off the register.
+  const [certificates, setCertificates] = useState<MembershipCertificate[]>([]);
 
   const [form, setForm] = useState({
     reasonCategory: "",
@@ -439,6 +952,13 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
     setLoading(true);
     setLoadError("");
     try {
+      // Certificates are fetched even when the member has no open request:
+      // the whole point of one is that it is still there years later.
+      api
+        .get<{ data: MembershipCertificate[] }>("/membership/certificates")
+        .then((r) => setCertificates(Array.isArray(r.data) ? r.data : []))
+        .catch(() => setCertificates([]));
+
       const data = await api.get<{ data: ExitRequest[]; memberRecord: MemberRecord | null }>(
         "/membership/exit-requests/mine"
       );
@@ -507,6 +1027,28 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
       await fetchRequests();
     } catch (err: any) {
       setLoadError(err?.message ?? "Could not withdraw the request.");
+    }
+  };
+
+  /**
+   * The member confirms they actually received what the cooperative says it
+   * paid. This is the only point in the whole procedure where the member has
+   * the last word, which is exactly why it exists.
+   */
+  const handleAcknowledge = async (id: string) => {
+    setLoadError("");
+    setAcknowledging(true);
+    try {
+      const res = await api.patch<{ message: string }>(
+        `/membership/exit-requests/${id}/settlement/acknowledge`,
+        {}
+      );
+      setSuccessMessage(res.message);
+      await fetchRequests();
+    } catch (err: any) {
+      setLoadError(err?.message ?? "Could not confirm receipt.");
+    } finally {
+      setAcknowledging(false);
     }
   };
 
@@ -644,6 +1186,14 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
             </div>
           </dl>
 
+          {/*
+            The seven steps, and where this request has got to. This replaces
+            the guessing a member previously had to do from a status badge.
+          */}
+          <div className="mt-6 border-t border-gray-200 pt-5">
+            <ProcessTracker process={openRequest.process} />
+          </div>
+
           {openRequest.meetings?.length > 0 && (
             <div className="mt-5 space-y-3">
               <p className="text-xs uppercase tracking-wide text-gray-500">
@@ -652,6 +1202,16 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
               {openRequest.meetings.map((m) => (
                 <MeetingPanel key={m.id} meeting={m} />
               ))}
+            </div>
+          )}
+
+          {openRequest.settlement && (
+            <div className="mt-5">
+              <SettlementRecord
+                settlement={openRequest.settlement}
+                acknowledging={acknowledging}
+                onAcknowledge={() => handleAcknowledge(openRequest.id)}
+              />
             </div>
           )}
 
@@ -770,6 +1330,29 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
         </Card>
       )}
 
+      {/*
+        ── Proof of membership ───────────────────────────────────────────────
+        A member released by the assembly is entitled to written proof that they
+        belonged to the cooperative, for how long, and what they held. Without
+        it they have nothing to show a bank or another cooperative. It is issued
+        automatically when the release is recorded, so it cannot be forgotten or
+        quietly withheld, and it lands here.
+      */}
+      {certificates.length > 0 && (
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900">Your certificate of membership</h3>
+            <p className="text-sm text-gray-600">
+              Proof that you were a member of this cooperative. Print it or save it as a PDF; anyone
+              can check the verification code against the register.
+            </p>
+          </div>
+          {certificates.map((certificate) => (
+            <CertificateCard key={certificate.id} certificate={certificate} />
+          ))}
+        </div>
+      )}
+
       {/* Past requests */}
       {history.length > 0 && (
         <Card className="p-6">
@@ -793,12 +1376,174 @@ function MemberView({ responseWindowDays }: { responseWindowDays: number }) {
                 {r.decision_note && (
                   <p className="mt-3 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">{r.decision_note}</p>
                 )}
+                {r.member_archived_at && (
+                  <p className="mt-2 flex items-center gap-1.5 text-xs text-gray-500">
+                    <Archive className="h-3.5 w-3.5" />
+                    Your register entry was archived on {formatDate(r.member_archived_at)}. Your
+                    history with the cooperative is kept, not deleted.
+                  </p>
+                )}
+                {r.settlement && (
+                  <div className="mt-3">
+                    <SettlementRecord
+                      settlement={r.settlement}
+                      acknowledging={acknowledging}
+                      onAcknowledge={
+                        r.settlement.acknowledged_by_member
+                          ? undefined
+                          : () => handleAcknowledge(r.id)
+                      }
+                    />
+                  </div>
+                )}
               </div>
             ))}
           </div>
         </Card>
       )}
     </div>
+  );
+}
+
+/** A member who left properly, kept on the record rather than deleted. */
+interface ArchivedMember {
+  id: string;
+  full_name: string;
+  membership_number: string | null;
+  national_id: string | null;
+  phone: string | null;
+  membership_date: string | null;
+  archived_at: string;
+  archive_reason: string | null;
+  total_contributions: string | null;
+  cooperative_name: string;
+  reason_category: string | null;
+  decided_at: string | null;
+  amount_paid: string | null;
+  settlement_method: string | null;
+  acknowledged_by_member: boolean | null;
+  certificate_number: string | null;
+  verification_code: string | null;
+}
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE ARCHIVE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * A member who leaves is archived, not deleted. The difference matters:
+ *
+ *   • they stop counting towards the register, quorum and engagement figures,
+ *     so the cooperative is not measured against people who have gone;
+ *   • their history, their contributions and the settlement they were paid stay
+ *     readable, so the cooperative can still answer for them years later;
+ *   • the certificate issued to them is on the record next to their name, so a
+ *     verification enquiry can be answered.
+ *
+ * Deleting the row would have destroyed all three.
+ */
+function ArchivePanel() {
+  const [archive, setArchive] = useState<ArchivedMember[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [shown, setShown] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res = await api.get<{ data: ArchivedMember[] }>("/membership/archive");
+      setArchive(Array.isArray(res.data) ? res.data : []);
+      setShown(true);
+    } catch {
+      setArchive([]);
+      setShown(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Card className="p-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-start gap-2">
+          <Archive className="mt-0.5 h-5 w-5 text-gray-700" />
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900">Archived members</h3>
+            <p className="text-sm text-gray-600">
+              Members released by a general assembly. They no longer count towards the register or
+              quorum, but their history, their settlement and their certificate stay on the record.
+            </p>
+          </div>
+        </div>
+        {!shown && (
+          <Button variant="outline" disabled={loading} onClick={load}>
+            {loading ? "Loading…" : "Show the archive"}
+          </Button>
+        )}
+      </div>
+
+      {shown && archive.length === 0 && (
+        <p className="mt-4 text-sm text-gray-500">
+          Nobody has been archived yet. Members appear here once their removal is approved.
+        </p>
+      )}
+
+      {archive.length > 0 && (
+        <div className="mt-5 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 bg-gray-50 text-left">
+                <th className="px-3 py-2 font-medium text-gray-700">Member</th>
+                <th className="px-3 py-2 font-medium text-gray-700">Member from</th>
+                <th className="px-3 py-2 font-medium text-gray-700">Archived</th>
+                <th className="px-3 py-2 text-right font-medium text-gray-700">Contributed</th>
+                <th className="px-3 py-2 text-right font-medium text-gray-700">Settled</th>
+                <th className="px-3 py-2 font-medium text-gray-700">Certificate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {archive.map((m) => (
+                <tr key={m.id} className="border-b border-gray-200">
+                  <td className="px-3 py-2">
+                    <p className="font-medium text-gray-900">{m.full_name}</p>
+                    <p className="text-xs text-gray-500">
+                      {m.membership_number ?? "no membership number"}
+                      {m.reason_category && ` · ${REASON_LABELS[m.reason_category] ?? m.reason_category}`}
+                    </p>
+                  </td>
+                  <td className="px-3 py-2 text-gray-700">{formatDate(m.membership_date)}</td>
+                  <td className="px-3 py-2 text-gray-700">{formatDate(m.archived_at)}</td>
+                  <td className="px-3 py-2 text-right text-gray-700">
+                    {money(m.total_contributions)}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <span className="text-gray-900">{money(m.amount_paid)}</span>
+                    {m.amount_paid != null && (
+                      <p
+                        className={`text-xs ${
+                          m.acknowledged_by_member ? "text-green-700" : "text-amber-700"
+                        }`}
+                      >
+                        {m.acknowledged_by_member ? "receipt confirmed" : "unconfirmed"}
+                      </p>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    {m.certificate_number ? (
+                      <>
+                        <p className="font-mono text-xs text-gray-900">{m.certificate_number}</p>
+                        <p className="font-mono text-[11px] text-gray-400">{m.verification_code}</p>
+                      </>
+                    ) : (
+                      <span className="text-xs text-amber-700">not issued</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -827,6 +1572,46 @@ function ReviewerView() {
     resolution: "",
     resolutionNote: "",
   });
+
+  // Settling the member's assets — step 5, the one the process used to skip.
+  const [settlingFor, setSettlingFor] = useState<string | null>(null);
+  const [settlementPreview, setSettlementPreview] = useState<SettlementPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [settleForm, setSettleForm] = useState({
+    settlementMethod: "",
+    paymentReference: "",
+    amountPaid: "",
+    settledOn: "",
+    otherDeductions: "",
+    otherDeductionsNote: "",
+    notes: "",
+  });
+
+  /**
+   * Turns an error from any request-scoped action into something a person can
+   * act on.
+   *
+   * A 404 here means the row is gone — seeded over, withdrawn in another tab,
+   * or decided by a colleague while this page sat open. Reporting the server's
+   * bare "Request not found" leaves the manager staring at a card that is no
+   * longer real and a button that will never work. Refreshing the queue makes
+   * the stale card disappear, which is the actual fix.
+   */
+  const reportActionError = async (err: any, fallback: string) => {
+    if (err?.status === 404) {
+      setError(
+        "That request no longer exists — it may have been withdrawn, already decided, or removed " +
+          "when the database was reseeded. The list has been refreshed."
+      );
+      setSettlingFor(null);
+      setSettlementPreview(null);
+      setConveningFor(null);
+      setRecordingFor(null);
+      await fetchRequests();
+      return;
+    }
+    setError(err?.message ?? fallback);
+  };
 
   const fetchRequests = async () => {
     setLoading(true);
@@ -863,7 +1648,7 @@ function ReviewerView() {
       setConvene({ scheduledFor: "", location: "", agenda: "" });
       await fetchRequests();
     } catch (err: any) {
-      setError(err?.message ?? "Could not call the assembly.");
+      await reportActionError(err, "Could not call the assembly.");
     } finally {
       setBusyId(null);
     }
@@ -897,7 +1682,72 @@ function ReviewerView() {
       });
       await fetchRequests();
     } catch (err: any) {
-      setError(err?.message ?? "Could not record the meeting.");
+      await reportActionError(err, "Could not record the meeting.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /**
+   * Opens the settlement form, pre-filled with the figures the server computes.
+   *
+   * The manager is NOT asked to type in the member's savings and shares — the
+   * system already holds them, and retyping them is how a member ends up paid
+   * the wrong amount. What the manager supplies is how it was paid and the
+   * reference, which are the only facts the system cannot know.
+   */
+  const openSettlement = async (requestId: string) => {
+    setError("");
+    setSettlingFor(requestId);
+    setSettlementPreview(null);
+    setPreviewLoading(true);
+    try {
+      const res = await api.get<{ data: SettlementPreview }>(
+        `/membership/exit-requests/${requestId}/settlement`
+      );
+      setSettlementPreview(res.data);
+      setSettleForm({
+        settlementMethod: res.data.suggestedMethod ?? "mobile_money",
+        paymentReference: "",
+        amountPaid:
+          res.data.calculated?.netPayable != null ? String(res.data.calculated.netPayable) : "",
+        settledOn: new Date().toISOString().slice(0, 10),
+        otherDeductions: "",
+        otherDeductionsNote: "",
+        notes: "",
+      });
+    } catch (err: any) {
+      setSettlingFor(null);
+      await reportActionError(err, "Could not price this member's settlement.");
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const recordSettlement = async (requestId: string) => {
+    if (!settleForm.settlementMethod) return setError("How was the settlement paid?");
+    setBusyId(requestId);
+    setError("");
+    try {
+      const res = await api.post<{ message: string }>(
+        `/membership/exit-requests/${requestId}/settlement`,
+        {
+          settlementMethod: settleForm.settlementMethod,
+          paymentReference: settleForm.paymentReference.trim() || undefined,
+          amountPaid: settleForm.amountPaid === "" ? undefined : Number(settleForm.amountPaid),
+          settledOn: settleForm.settledOn || undefined,
+          otherDeductions:
+            settleForm.otherDeductions === "" ? undefined : Number(settleForm.otherDeductions),
+          otherDeductionsNote: settleForm.otherDeductionsNote.trim() || undefined,
+          notes: settleForm.notes.trim() || undefined,
+        }
+      );
+      setMessage(res.message);
+      setSettlingFor(null);
+      setSettlementPreview(null);
+      await fetchRequests();
+    } catch (err: any) {
+      await reportActionError(err, "Could not record the settlement.");
     } finally {
       setBusyId(null);
     }
@@ -944,11 +1794,38 @@ function ReviewerView() {
       setNotes({ ...notes, [id]: "" });
       await fetchRequests();
     } catch (err: any) {
-      setError(err?.message ?? "Could not record the decision.");
+      await reportActionError(err, "Could not record the decision.");
     } finally {
       setBusyId(null);
     }
   };
+
+  /**
+   * Undo an approved exit recorded in error. Reinstates the member, re-attaches
+   * their login and revokes the certificate; the request keeps the history.
+   */
+  const reverse = async (id: string) => {
+    setError("");
+    setMessage("");
+    const reason = notes[id]?.trim() ?? "";
+    if (reason.length < 10) {
+      setError("Write why the exit is being reversed (at least 10 characters) in the box under the request.");
+      return;
+    }
+    setBusyId(id);
+    try {
+      const res = await api.patch<{ message: string }>(`/membership/exit-requests/${id}/reverse`, { reason });
+      setMessage(res.message);
+      setNotes({ ...notes, [id]: "" });
+      setReversing(null);
+      await fetchRequests();
+    } catch (err: any) {
+      await reportActionError(err, "Could not reverse the exit.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+  const [reversing, setReversing] = useState<string | null>(null);
 
   const open = requests.filter((r) => OPEN_STATUSES.includes(r.status));
   const closed = requests.filter((r) => !OPEN_STATUSES.includes(r.status));
@@ -1030,6 +1907,15 @@ function ReviewerView() {
                 </div>
               </dl>
 
+              {/*
+                Where this request has got to, and what has to happen next.
+                The same seven steps the member sees, so the office and the
+                member are never looking at different versions of the process.
+              */}
+              <div className="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4">
+                <ProcessTracker process={r.process} compact />
+              </div>
+
               {/* ── The assembly ─────────────────────────────────────────── */}
               {(() => {
                 const meetings = r.meetings ?? [];
@@ -1037,6 +1923,8 @@ function ReviewerView() {
                 const held = meetings.find(
                   (m) => m.status === "held" && m.resolution && m.resolution !== "deferred"
                 );
+                const releaseResolved = held?.resolution === "approve_exit";
+                const settled = r.settlement;
 
                 return (
                   <div className="mt-5 border-t border-gray-200 pt-4 space-y-4">
@@ -1100,9 +1988,14 @@ function ReviewerView() {
                               />
                             </div>
                             <p className="text-xs text-gray-500">
-                              Members must be given at least {rules?.minimumNoticeDays ?? 7} days'
-                              notice. The meeting is added to the activities calendar and every
-                              member is notified.
+                              This is convened as an <strong>extraordinary</strong> assembly,
+                              because a removal request cannot wait for the March or October
+                              ordinary sitting. The RCA requires at least{" "}
+                              {rules?.noticeDays ?? 3} days' notice, and{" "}
+                              {Math.round((rules?.quorumFirstCall ?? 0.75) * 100)}% of those
+                              entitled to sit must attend for the first call to be competent. The
+                              meeting is added to the activities calendar and every member is
+                              notified.
                             </p>
                             <div className="flex flex-wrap gap-3">
                               <Button
@@ -1203,9 +2096,17 @@ function ReviewerView() {
                             </div>
                             <p className="text-xs text-gray-500">
                               Quorum is {scheduled.quorumRequired} of {scheduled.membersEligible}{" "}
-                              members. Without it the assembly can only defer. A removal carries on
-                              more than {Math.round((rules?.majorityFraction ?? 0.5) * 100)}% of the
-                              votes cast.
+                              {scheduled.eligibleBasis ?? "members"} (
+                              {scheduled.callNumber === 2 ? "second" : "first"} call). Without it
+                              the assembly can only defer
+                              {scheduled.callNumber === 1
+                                ? `, and a second call within ${rules?.secondCallWindow?.amount ?? 3} ${
+                                    rules?.secondCallWindow?.unit ?? "working days"
+                                  } needs only ${Math.round((rules?.quorumSecondCall ?? 0.5) * 100)}%`
+                                : ", and as this is the second call the matter would go to the RCA"}
+                              . Releasing a member is ordinary business, so it carries on more than{" "}
+                              {Math.round((rules?.majorityRequired ?? 0.5) * 100)}% of the votes
+                              cast.
                             </p>
                             <div className="flex flex-wrap gap-3">
                               <Button
@@ -1224,7 +2125,224 @@ function ReviewerView() {
                       </div>
                     )}
 
-                    {/* Step 3 — record the decision the assembly reached */}
+                    {/*
+                      ── Step 5: resolve the member's assets ────────────────
+                      This step did not exist. A manager could approve a
+                      removal while the cooperative still held the member's
+                      savings, and nothing in the system would ever say so.
+                      The release button below is now unreachable until this
+                      has been recorded, and there is no override for it.
+                    */}
+                    {releaseResolved && !settled && (
+                      <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+                        {settlingFor !== r.id ? (
+                          <>
+                            <div className="flex items-start gap-2">
+                              <Wallet className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                              <div>
+                                <p className="text-sm font-medium text-amber-900">
+                                  Settle the member's savings, shares and loans
+                                </p>
+                                <p className="mt-0.5 text-xs text-amber-800">
+                                  The assembly has released {r.requester_name}. Before they can come
+                                  off the register the cooperative has to return their savings,
+                                  share capital and levies, add their share of what the cooperative
+                                  has accumulated, and deduct anything they still owe. Nothing can
+                                  be recorded as approved until this is done.
+                                </p>
+                              </div>
+                            </div>
+                            <Button
+                              variant="primary"
+                              className="mt-3"
+                              onClick={() => openSettlement(r.id)}
+                            >
+                              <span className="flex items-center gap-2">
+                                <Banknote className="h-4 w-4" />
+                                Settle and record the payment
+                              </span>
+                            </Button>
+                          </>
+                        ) : previewLoading ? (
+                          <p className="text-sm text-amber-900">Computing what is owed…</p>
+                        ) : (
+                          <div className="space-y-4">
+                            {/*
+                              The computed position, read-only. These figures come
+                              from the same code that shows the member their own
+                              estimate, so the two cannot disagree.
+                            */}
+                            {settlementPreview?.calculated && (
+                              <div className="rounded-lg border border-amber-200 bg-white p-3 text-sm">
+                                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                                  Computed from the cooperative's records
+                                </p>
+                                <dl className="space-y-1">
+                                  {settlementPreview.calculated.lines.map((line) => (
+                                    <div
+                                      key={line.label}
+                                      className="flex items-baseline justify-between gap-3"
+                                      title={line.note}
+                                    >
+                                      <dt className="text-gray-600">{line.label}</dt>
+                                      <dd
+                                        className={
+                                          line.amount < 0
+                                            ? "font-medium text-red-600"
+                                            : "font-medium text-gray-900"
+                                        }
+                                      >
+                                        {money(Math.abs(line.amount))}
+                                      </dd>
+                                    </div>
+                                  ))}
+                                  <div className="flex items-baseline justify-between gap-3 border-t border-gray-200 pt-1.5">
+                                    <dt className="font-medium text-gray-900">Net payable</dt>
+                                    <dd className="font-semibold text-[#2D6A4F]">
+                                      {money(settlementPreview.calculated.netPayable)}
+                                    </dd>
+                                  </div>
+                                  {settlementPreview.calculated.balanceOwedToCooperative > 0 && (
+                                    <div className="flex items-baseline justify-between gap-3">
+                                      <dt className="text-red-700">Owed by the member</dt>
+                                      <dd className="font-semibold text-red-700">
+                                        {money(
+                                          settlementPreview.calculated.balanceOwedToCooperative
+                                        )}
+                                      </dd>
+                                    </div>
+                                  )}
+                                </dl>
+                                {settlementPreview.calculated.warnings.length > 0 && (
+                                  <ul className="mt-3 space-y-1 border-t border-gray-200 pt-2">
+                                    {settlementPreview.calculated.warnings.map((w) => (
+                                      <li key={w} className="text-xs text-amber-800">
+                                        • {w}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            )}
+
+                            {settlementPreview?.notOnRegister && (
+                              <p className="rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs text-amber-900">
+                                This account has no entry in the member register, so there is no
+                                savings or share position to compute. Record the settlement as
+                                &ldquo;Nothing was due either way&rdquo;, or correct the register first.
+                              </p>
+                            )}
+
+                            <div className="grid gap-4 sm:grid-cols-2">
+                              <Select
+                                label="How was it settled? *"
+                                value={String(settleForm.settlementMethod)}
+                                onChange={(e) =>
+                                  setSettleForm({ ...settleForm, settlementMethod: e.target.value })
+                                }
+                                options={(settlementPreview?.methods ?? []).map((m) => ({
+                                  value: m,
+                                  label: SETTLEMENT_METHOD_LABELS[m] ?? m,
+                                }))}
+                              />
+                              <Input
+                                label="Amount actually paid (RWF)"
+                                type="number"
+                                min={0}
+                                value={settleForm.amountPaid}
+                                onChange={(e) =>
+                                  setSettleForm({ ...settleForm, amountPaid: e.target.value })
+                                }
+                              />
+                              <Input
+                                label="Payment reference"
+                                value={settleForm.paymentReference}
+                                onChange={(e) =>
+                                  setSettleForm({ ...settleForm, paymentReference: e.target.value })
+                                }
+                                placeholder="Mobile money or bank transaction reference"
+                              />
+                              <Input
+                                label="Date settled"
+                                type="date"
+                                value={settleForm.settledOn}
+                                onChange={(e) =>
+                                  setSettleForm({ ...settleForm, settledOn: e.target.value })
+                                }
+                              />
+                              <Input
+                                label="Other deductions (RWF)"
+                                type="number"
+                                min={0}
+                                value={settleForm.otherDeductions}
+                                onChange={(e) =>
+                                  setSettleForm({ ...settleForm, otherDeductions: e.target.value })
+                                }
+                              />
+                              <Input
+                                label="Why the other deduction?"
+                                value={settleForm.otherDeductionsNote}
+                                onChange={(e) =>
+                                  setSettleForm({
+                                    ...settleForm,
+                                    otherDeductionsNote: e.target.value,
+                                  })
+                                }
+                                placeholder="Required if you deduct anything beyond loans"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="mb-1 block text-sm font-medium text-gray-700">
+                                Notes
+                              </label>
+                              <textarea
+                                rows={2}
+                                value={settleForm.notes}
+                                onChange={(e) =>
+                                  setSettleForm({ ...settleForm, notes: e.target.value })
+                                }
+                                placeholder="Required if you pay less than the amount due — say why, so the member and the auditor can both read it."
+                                className="w-full rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-[#2D6A4F]"
+                              />
+                            </div>
+
+                            <p className="text-xs text-gray-600">
+                              The member asked for{" "}
+                              <strong>
+                                {SAVINGS_LABELS[r.savings_instruction] ?? r.savings_instruction}
+                              </strong>
+                              {r.contact_phone ? ` · reachable on ${r.contact_phone}` : ""}. Once
+                              recorded, they are notified with the figures and asked to confirm
+                              receipt on their own portal.
+                            </p>
+
+                            <div className="flex flex-wrap gap-3">
+                              <Button
+                                variant="primary"
+                                disabled={busyId === r.id}
+                                onClick={() => recordSettlement(r.id)}
+                              >
+                                {busyId === r.id ? "Recording…" : "Record the settlement"}
+                              </Button>
+                              <Button
+                                variant="outline"
+                                onClick={() => {
+                                  setSettlingFor(null);
+                                  setSettlementPreview(null);
+                                }}
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {settled && <SettlementRecord settlement={settled} />}
+
+                    {/* Step 6 — record the decision the assembly reached */}
                     {held && (
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1241,10 +2359,15 @@ function ReviewerView() {
                           {held.resolution === "approve_exit" ? (
                             <Button
                               variant="primary"
-                              disabled={busyId === r.id}
+                              disabled={busyId === r.id || !settled}
                               onClick={() => decide(r.id, "approved")}
+                              title={
+                                settled
+                                  ? undefined
+                                  : "Settle the member's savings, shares and loans first."
+                              }
                             >
-                              Record the removal
+                              Release the member &amp; issue the certificate
                             </Button>
                           ) : (
                             <Button
@@ -1261,7 +2384,13 @@ function ReviewerView() {
                           {RESOLUTION_LABELS[held.resolution!]?.toLowerCase()}, so that is the only
                           decision that can be recorded.{" "}
                           {held.resolution === "approve_exit" &&
-                            "Recording it removes the member from the register and unlinks their login."}
+                            (settled
+                              ? "Recording it issues the member's certificate of past membership, " +
+                                "archives their register entry, and unlinks their login from the " +
+                                "cooperative."
+                              : "You cannot record it until the settlement above is done — a " +
+                                "member must not leave the register while the cooperative still " +
+                                "holds their money.")}
                         </p>
                       </div>
                     )}
@@ -1287,20 +2416,73 @@ function ReviewerView() {
                     {r.decided_by_name && ` by ${r.decided_by_name}`}
                   </p>
                   {r.decision_note && <p className="text-sm text-gray-700 mt-2">{r.decision_note}</p>}
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+                    {r.settlement && (
+                      <span className="inline-flex items-center gap-1">
+                        <Banknote className="h-3.5 w-3.5" />
+                        {money(r.settlement.amount_paid)} settled
+                        {r.settlement.acknowledged_by_member
+                          ? " · receipt confirmed"
+                          : " · awaiting the member's confirmation"}
+                      </span>
+                    )}
+                    {r.certificate && (
+                      <span className="inline-flex items-center gap-1">
+                        <BadgeCheck className="h-3.5 w-3.5" />
+                        Certificate {r.certificate.certificate_number}
+                      </span>
+                    )}
+                    {r.member_archived_at && (
+                      <span className="inline-flex items-center gap-1">
+                        <Archive className="h-3.5 w-3.5" />
+                        Archived {formatDate(r.member_archived_at)}
+                      </span>
+                    )}
+                  </div>
+                  {r.status === "approved" && reversing === r.id && (
+                    <div className="mt-3 flex flex-wrap items-start gap-2">
+                      <textarea
+                        rows={2}
+                        value={notes[r.id] ?? ""}
+                        onChange={(e) => setNotes({ ...notes, [r.id]: e.target.value })}
+                        placeholder="Why is this exit being reversed? e.g. approved in error — the member never asked to leave."
+                        className="w-96 max-w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                      />
+                      <Button variant="danger" disabled={busyId === r.id} onClick={() => reverse(r.id)}>
+                        {busyId === r.id ? "Reversing…" : "Reverse the exit"}
+                      </Button>
+                      <Button variant="outline" onClick={() => setReversing(null)}>Cancel</Button>
+                    </div>
+                  )}
                 </div>
-                <StatusBadge status={r.status} />
+                <div className="flex flex-col items-end gap-2">
+                  <StatusBadge status={r.status} />
+                  {r.status === "approved" && reversing !== r.id && (
+                    <button onClick={() => setReversing(r.id)} className="text-xs text-gray-600 underline hover:text-red-700">
+                      Approved in error? Reverse it
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
         </Card>
       )}
+
+      <ArchivePanel />
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function Membership() {
+/**
+ * Leaving a cooperative.
+ *
+ * `embedded` is set when this is rendered as a tab of Services & requests,
+ * which owns the page heading. Without it the tab would carry two titles.
+ */
+export function Membership({ embedded = false }: { embedded?: boolean } = {}) {
   const { user } = useAuth();
   const isReviewer = ["manager", "admin", "generalManager", "cooperative"].includes(user?.role ?? "");
   const [responseWindowDays, setResponseWindowDays] = useState(14);
@@ -1316,14 +2498,16 @@ export function Membership() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-900">Membership</h1>
-        <p className="text-gray-600 mt-1">
-          {isReviewer
-            ? `Removal requests filed by your members. Each one goes to a general assembly, which votes on whether to release the member, and must be answered within ${responseWindowDays} days.`
-            : `Manage your membership, or ask to be removed from your cooperative. A general assembly of the members decides your request, and the cooperative has ${responseWindowDays} days to answer.`}
-        </p>
-      </div>
+      {!embedded && (
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">Leaving a cooperative</h1>
+          <p className="text-gray-600 mt-1">
+            {isReviewer
+              ? `Removal requests filed by your members. Each one goes to a general assembly, which votes on whether to release the member, and must be answered within ${responseWindowDays} days.`
+              : `Ask to be removed from your cooperative. A general assembly of the members decides your request, and the cooperative has ${responseWindowDays} days to answer.`}
+          </p>
+        </div>
+      )}
 
       {isReviewer ? <ReviewerView /> : <MemberView responseWindowDays={responseWindowDays} />}
     </div>

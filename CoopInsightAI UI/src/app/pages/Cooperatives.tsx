@@ -6,6 +6,7 @@ import { Input } from "../components/Input";
 import { SMSPanel } from "../components/SMSPanel";
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../services/api";
+import { RegistryBreakdown, Place } from "../components/RegistryBreakdown";
 import { Plus, Building2, Users, ChevronDown, ChevronUp, MessageSquare, ExternalLink } from "lucide-react";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
@@ -27,6 +28,50 @@ interface CooperativeDocument {
   uploadedAt: string;
 }
 
+/** The active permit, if any. `null` means the cooperative is unlicensed. */
+interface Permit {
+  permitNumber: string;
+  permitType: "temporary" | "permanent";
+  status: string;
+  issuedOn: string | null;
+  expiresOn: string | null;
+}
+
+/** A formation or dissolution request still in the chain against this row. */
+interface OpenRequest {
+  id: string;
+  reference: string;
+  requestType: string;
+  status: string;
+  currentStage: string;
+}
+
+/** One reason a cooperative on the register is not active. */
+interface InactiveReason {
+  id: string;
+  label: string;
+  description: string;
+  count: number;
+}
+
+interface RegistryView {
+  id: string;
+  label: string;
+  description: string;
+  kind: "cooperatives" | "requests";
+  count: number;
+  /** Only on "not active": the breakdown by reason. */
+  reasons?: InactiveReason[];
+}
+
+/** An RCA audit that is still open against the cooperative. */
+interface OpenAudit {
+  reference: string;
+  auditType: string;
+  status: string;
+  dueOn: string | null;
+}
+
 interface Cooperative {
   id: string;
   name: string;
@@ -38,7 +83,14 @@ interface Cooperative {
   status: string;
   operatingArea: string;
   membershipSize: string;
+  archivedMembers: number;
   composition: "Male" | "Female" | "Mixed";
+  permit: Permit | null;
+  openRequest: OpenRequest | null;
+  auditBand: string | null;
+  openAudit: OpenAudit | null;
+  /** Why it is not active, most decisive first; empty when it is active. */
+  inactiveReasons: string[];
   bylawsFileName: string;
   constitutionFileName: string;
   licenseFileName: string;
@@ -78,14 +130,43 @@ function mapApiCooperative(raw: any, membershipSize?: number, composition: Coope
     id: String(raw.id ?? ""),
     name: raw.name ?? "",
     sector: raw.sector ?? "",
-    district: raw.address ?? "Gasabo District",
+    district: raw.district ?? "Gasabo",
     type: raw.type ?? "",
     registrationNumber: raw.registration_number ?? "",
     registrationDate: raw.registration_date ? String(raw.registration_date).slice(0, 10) : "",
     status: raw.status ?? "Active",
     operatingArea: raw.address ?? "",
     membershipSize: String(membershipSize ?? raw.member_count ?? 0),
+    archivedMembers: Number(raw.archived_member_count ?? 0),
     composition,
+    permit: raw.permit
+      ? {
+          permitNumber: raw.permit.permit_number,
+          permitType: raw.permit.permit_type,
+          status: raw.permit.status,
+          issuedOn: raw.permit.issued_on ?? null,
+          expiresOn: raw.permit.expires_on ?? null,
+        }
+      : null,
+    openRequest: raw.open_request
+      ? {
+          id: raw.open_request.id,
+          reference: raw.open_request.reference,
+          requestType: raw.open_request.request_type,
+          status: raw.open_request.status,
+          currentStage: raw.open_request.current_stage,
+        }
+      : null,
+    auditBand: raw.audit_band ?? null,
+    openAudit: raw.open_audit
+      ? {
+          reference: raw.open_audit.reference,
+          auditType: raw.open_audit.audit_type,
+          status: raw.open_audit.status,
+          dueOn: raw.open_audit.due_on ?? null,
+        }
+      : null,
+    inactiveReasons: Array.isArray(raw.inactive_reasons) ? raw.inactive_reasons : [],
     bylawsFileName: "",
     constitutionFileName: "",
     licenseFileName: "",
@@ -110,18 +191,191 @@ function mapApiCooperative(raw: any, membershipSize?: number, composition: Coope
   };
 }
 
+const STAGE_NAMES: Record<string, string> = {
+  sector: "sector officer",
+  district: "district officer",
+  rca: "RCA",
+};
+
+/**
+ * The specific detail behind one "not active" reason, so the badge says not
+ * just "no permit" but which permit lapsed and when.
+ */
+function reasonDetail(id: string, coop: Cooperative): string | null {
+  switch (id) {
+    case "under_final_audit":
+      return coop.openAudit
+        ? `${coop.openAudit.auditType.replace(/_/g, " ")} audit ${coop.openAudit.reference}, ${coop.openAudit.status.replace(/_/g, " ")}` +
+            (coop.openAudit.dueOn ? `, due ${new Date(coop.openAudit.dueOn).toLocaleDateString()}` : "")
+        : null;
+    case "dissolving":
+      return coop.openRequest?.requestType === "dissolution"
+        ? `${coop.openRequest.reference}, with the ${STAGE_NAMES[coop.openRequest.currentStage] ?? coop.openRequest.currentStage}`
+        : null;
+    case "no_permit":
+      if (!coop.permit) return "never issued";
+      return coop.permit.status !== "active"
+        ? `${coop.permit.permitNumber} ${coop.permit.status}`
+        : coop.permit.expiresOn
+          ? `${coop.permit.permitNumber} expired ${new Date(coop.permit.expiresOn).toLocaleDateString()}`
+          : null;
+    case "temporary_permit":
+      return coop.permit?.expiresOn
+        ? `temporary permit to ${new Date(coop.permit.expiresOn).toLocaleDateString()}`
+        : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The licence, as one badge.
+ *
+ * No permit is not a neutral state — it means the cooperative is on the
+ * register and trading without authorisation — so it is shown in red rather
+ * than as a quiet dash.
+ */
+function PermitBadge({ permit }: { permit: Permit | null }) {
+  if (!permit || permit.status !== "active") {
+    return (
+      <span
+        className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700"
+        title={
+          permit
+            ? `Last permit ${permit.permitNumber} is ${permit.status}.`
+            : "No operating permit has ever been issued to this cooperative."
+        }
+      >
+        No permit
+      </span>
+    );
+  }
+
+  const expires = permit.expiresOn ? new Date(permit.expiresOn) : null;
+  const lapsed = expires ? expires.getTime() < Date.now() : false;
+  if (lapsed) {
+    return (
+      <span
+        className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700"
+        title={`Permit ${permit.permitNumber} expired on ${expires!.toLocaleDateString()}.`}
+      >
+        Permit expired
+      </span>
+    );
+  }
+
+  const temporary = permit.permitType === "temporary";
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+        temporary ? "bg-blue-100 text-blue-800" : "bg-green-100 text-green-800"
+      }`}
+      title={
+        `Permit ${permit.permitNumber}` +
+        (expires ? `, valid to ${expires.toLocaleDateString()}` : "") +
+        (temporary ? ". An RCA maturity audit decides whether it becomes permanent." : ".")
+      }
+    >
+      {temporary ? "Temporary permit" : "Licensed"}
+    </span>
+  );
+}
+
+/** A request row, for the Applications category, which lists requests rather than cooperatives. */
+interface PendingRequest {
+  id: string;
+  reference: string;
+  request_type: string;
+  status: string;
+  current_stage: string;
+  sector: string;
+  district?: string;
+  proposed_name: string | null;
+  cooperative_name: string | null;
+  contact_name: string;
+  contact_phone: string;
+  created_at: string;
+  response_due_at: string;
+  process?: { percentComplete: number; nextAction: string | null; blockedBy: string | null };
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  sector: "Sector officer",
+  district: "District officer",
+  rca: "RCA",
+  closed: "Closed",
+};
+
 export function Cooperatives() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [cooperatives, setCooperatives] = useState<Cooperative[]>([]);
+  const [requests, setRequests] = useState<PendingRequest[]>([]);
+  const [views, setViews] = useState<RegistryView[]>([]);
+  // A member has no category tabs and only ever sees their own cooperative,
+  // so they read the whole register rather than one slice of it.
+  const [view, setView] = useState(user?.role === "member" ? "all" : "active");
+  const [reason, setReason] = useState<string | null>(null);
+  const [onRegister, setOnRegister] = useState<number | null>(null);
+  // The district office reads the register by sector and the RCA by district;
+  // a sector officer already sees only their own sector.
+  const canSeeBreakdown =
+    ["admin", "generalManager"].includes(user?.role ?? "") ||
+    (user?.role === "government" && user?.oversightLevel !== "sector");
+  const [showBreakdown, setShowBreakdown] = useState(false);
+  const [place, setPlace] = useState<Place | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchCooperatives = async () => {
+  const activeView = views.find((v) => v.id === view) ?? null;
+
+  /**
+   * The tab strip. Loaded once from the backend rather than restated here, so
+   * a label can never claim a different rule from the one the query applied.
+   */
+  const fetchViews = async () => {
+    try {
+      const res = await api.get<{ data: RegistryView[]; onRegister?: number }>("/cooperatives/registry");
+      setViews(Array.isArray(res?.data) ? res.data : []);
+      setOnRegister(res?.onRegister ?? null);
+    } catch {
+      // The tab strip is a convenience. If it fails the list below still works
+      // on the default view, so this is not surfaced as a page error.
+      setViews([]);
+    }
+  };
+
+  const fetchCooperatives = async (selectedView = view, selectedReason = reason, selectedPlace = place) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await api.get<any>("/cooperatives?page=1&limit=100");
+      const definition = views.find((v) => v.id === selectedView);
+
+      // "Applications" lists REQUESTS, not cooperatives — a group applying to
+      // form one does not have a row in the register yet.
+      if (definition?.kind === "requests") {
+        const res = await api.get<any>(`/cooperative-requests?type=formation`);
+        const all: PendingRequest[] = Array.isArray(res?.data) ? res.data : [];
+        setRequests(
+          all.filter(
+            (r) =>
+              String(r.status).startsWith("pending") &&
+              (!selectedPlace?.sector || r.sector === selectedPlace.sector) &&
+              (!selectedPlace?.district || (r.district ?? "Gasabo") === selectedPlace.district)
+          )
+        );
+        setCooperatives([]);
+        return;
+      }
+
+      const response = await api.get<any>(
+        `/cooperatives?view=${encodeURIComponent(selectedView)}&page=1&limit=100` +
+          (selectedView === "not_active" && selectedReason
+            ? `&reason=${encodeURIComponent(selectedReason)}`
+            : "") +
+          (selectedPlace?.sector ? `&sector=${encodeURIComponent(selectedPlace.sector)}` : "") +
+          (selectedPlace?.district ? `&district=${encodeURIComponent(selectedPlace.district)}` : "")
+      );
       const membersResponse = await api.get<any>("/members?page=1&limit=500");
       const rawList: any[] = Array.isArray(response?.data) ? response.data : [];
       const memberList: any[] = Array.isArray(membersResponse?.data) ? membersResponse.data : [];
@@ -136,6 +390,7 @@ export function Cooperatives() {
         counts.set(coopId, existing);
       }
 
+      setRequests([]);
       setCooperatives(rawList.map((raw: any) => {
         const coopId = String(raw.id ?? "");
         const memberInfo = counts.get(coopId);
@@ -155,8 +410,18 @@ export function Cooperatives() {
   };
 
   useEffect(() => {
-    fetchCooperatives();
+    fetchViews();
   }, []);
+
+  useEffect(() => {
+    fetchCooperatives(view, reason, place);
+    // `views` is in the deps because the fetch needs to know whether the
+    // selected view lists cooperatives or requests, and that comes from it.
+  }, [view, reason, place, views.length]);
+
+  const reasonLabels = new Map(
+    (views.find((v) => v.id === "not_active")?.reasons ?? []).map((r) => [r.id, r])
+  );
 
   // Filter cooperatives based on user role
   const filteredCooperatives = (() => {
@@ -428,7 +693,7 @@ export function Cooperatives() {
                 <select
                   value={formData.type}
                   onChange={(e) => setFormData({ ...formData, type: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   required
                 >
                   <option value="">Select a type</option>
@@ -453,7 +718,7 @@ export function Cooperatives() {
                   type="date"
                   value={formData.registrationDate}
                   onChange={(e) => setFormData({ ...formData, registrationDate: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   required
                 />
               </div>
@@ -463,7 +728,7 @@ export function Cooperatives() {
                   type="text"
                   value={formData.operatingArea}
                   onChange={(e) => setFormData({ ...formData, operatingArea: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   required
                 />
               </div>
@@ -474,7 +739,7 @@ export function Cooperatives() {
                   min={1}
                   value={formData.membershipSize}
                   onChange={(e) => setFormData({ ...formData, membershipSize: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   required
                 />
               </div>
@@ -487,7 +752,7 @@ export function Cooperatives() {
                   type="text"
                   value={formData.president}
                   onChange={(e) => setFormData({ ...formData, president: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   required
                 />
               </div>
@@ -497,7 +762,7 @@ export function Cooperatives() {
                   type="email"
                   value={formData.presidentEmail}
                   onChange={(e) => setFormData({ ...formData, presidentEmail: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               </div>
               <div>
@@ -506,7 +771,7 @@ export function Cooperatives() {
                   type="tel"
                   value={formData.presidentPhone}
                   onChange={(e) => setFormData({ ...formData, presidentPhone: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               </div>
             </div>
@@ -518,7 +783,7 @@ export function Cooperatives() {
                   type="text"
                   value={formData.vicePresident}
                   onChange={(e) => setFormData({ ...formData, vicePresident: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   required
                 />
               </div>
@@ -528,7 +793,7 @@ export function Cooperatives() {
                   type="email"
                   value={formData.vicePresidentEmail}
                   onChange={(e) => setFormData({ ...formData, vicePresidentEmail: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               </div>
               <div>
@@ -537,7 +802,7 @@ export function Cooperatives() {
                   type="tel"
                   value={formData.vicePresidentPhone}
                   onChange={(e) => setFormData({ ...formData, vicePresidentPhone: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               </div>
             </div>
@@ -549,7 +814,7 @@ export function Cooperatives() {
                   type="text"
                   value={formData.secretary}
                   onChange={(e) => setFormData({ ...formData, secretary: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   required
                 />
               </div>
@@ -559,7 +824,7 @@ export function Cooperatives() {
                   type="email"
                   value={formData.secretaryEmail}
                   onChange={(e) => setFormData({ ...formData, secretaryEmail: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               </div>
               <div>
@@ -568,7 +833,7 @@ export function Cooperatives() {
                   type="tel"
                   value={formData.secretaryPhone}
                   onChange={(e) => setFormData({ ...formData, secretaryPhone: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               </div>
             </div>
@@ -652,6 +917,133 @@ export function Cooperatives() {
         </Card>
       )}
 
+      {/*
+        ── The register, sliced ──────────────────────────────────────────────
+        An officer opening this page is looking for one specific thing:
+        which cooperatives are licensed, which are trading with no permit,
+        what is waiting to be approved, what is being wound up. Making them
+        scan every row for it was the whole problem. Each tab is one of those
+        questions, its count comes from the same query that fills the list,
+        and its meaning is spelled out underneath so the number is arguable.
+      */}
+      {views.length > 0 && (user?.role !== "member") && (
+        <div className="mb-6">
+          <div className="flex flex-wrap gap-2">
+            {views.map((v) => (
+              <button
+                key={v.id}
+                onClick={() => {
+                  setView(v.id);
+                  setReason(null);
+                }}
+                title={v.description}
+                className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition-colors ${
+                  view === v.id
+                    ? "border-[#2D6A4F] bg-[#2D6A4F] text-white"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                <span>{v.label}</span>
+                <span
+                  className={`rounded-full px-1.5 text-xs font-semibold ${
+                    view === v.id
+                      ? "bg-white/20"
+                      : v.id === "not_active" && v.count > 0
+                        ? "bg-red-100 text-red-700"
+                        : v.id === "at_risk" && v.count > 0
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {v.count}
+                </span>
+              </button>
+            ))}
+          </div>
+          {onRegister != null && (
+            <p className="mt-2 text-xs text-gray-500">
+              {onRegister} on the register: active, not active and at risk together account for
+              every one of them.
+            </p>
+          )}
+
+          {canSeeBreakdown && (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button
+                onClick={() => setShowBreakdown((s) => !s)}
+                className="text-sm font-medium text-[#2D6A4F] hover:underline"
+              >
+                {showBreakdown
+                  ? "Hide the breakdown"
+                  : user?.oversightLevel === "district"
+                    ? "Break down by sector"
+                    : "Break down by district and sector"}
+              </button>
+              {place && (
+                <span className="inline-flex items-center gap-2 rounded-full bg-[#2D6A4F]/10 px-3 py-1 text-xs font-medium text-[#1b4332]">
+                  Showing {place.label} only
+                  <button onClick={() => setPlace(null)} className="text-[#1b4332] hover:text-red-700" aria-label="Clear place filter">
+                    ×
+                  </button>
+                </span>
+              )}
+            </div>
+          )}
+          {canSeeBreakdown && showBreakdown && (
+            <Card className="mt-3 p-5">
+              <RegistryBreakdown
+                onSelect={(nextView, nextPlace) => {
+                  setView(nextView);
+                  setReason(null);
+                  setPlace(nextPlace);
+                }}
+              />
+            </Card>
+          )}
+          {activeView && (
+            <p className="mt-3 max-w-3xl text-sm text-gray-600">{activeView.description}</p>
+          )}
+
+          {/* Why they are not active — the detail inside the category. */}
+          {activeView?.reasons && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                onClick={() => setReason(null)}
+                className={`rounded-lg border px-2.5 py-1 text-xs ${
+                  reason === null
+                    ? "border-gray-800 bg-gray-800 text-white"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                Every reason
+              </button>
+              {activeView.reasons.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => setReason(r.id)}
+                  disabled={r.count === 0}
+                  title={r.description}
+                  className={`rounded-lg border px-2.5 py-1 text-xs disabled:opacity-40 ${
+                    reason === r.id
+                      ? "border-gray-800 bg-gray-800 text-white"
+                      : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                  }`}
+                >
+                  {r.label} · {r.count}
+                </button>
+              ))}
+            </div>
+          )}
+          {activeView?.reasons && (
+            <p className="mt-2 text-xs text-gray-500">
+              {reason
+                ? reasonLabels.get(reason)?.description
+                : "A cooperative with more than one reason is counted under each."}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Loading / Error States */}
       {loading && (
         <div className="flex items-center justify-center py-16 text-gray-500">
@@ -661,12 +1053,71 @@ export function Cooperatives() {
       {!loading && error && (
         <div className="flex flex-col items-center justify-center py-16 gap-4">
           <p className="text-red-600">{error}</p>
-          <Button variant="secondary" onClick={fetchCooperatives}>Retry</Button>
+          <Button variant="secondary" onClick={() => fetchCooperatives(view)}>Retry</Button>
+        </div>
+      )}
+
+      {/*
+        ── Requests, for the one category that is not cooperatives at all ────
+        "Applications" lists formation requests, not register rows. Showing
+        them as an empty cooperative list — which is
+        what a naive status filter would do — reads as "there are none", when
+        the truth is "there are four and they are all waiting on you".
+      */}
+      {!loading && !error && activeView?.kind === "requests" && (
+        <div className="space-y-3">
+          {requests.length === 0 && (
+            <div className="flex items-center justify-center py-16 text-gray-500">
+              Nothing waiting in this queue.
+            </div>
+          )}
+          {requests.map((request) => (
+            <Card key={request.id} className="p-5">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs text-gray-500">{request.reference}</span>
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                      With the {STAGE_LABELS[request.current_stage] ?? request.current_stage}
+                    </span>
+                  </div>
+                  <h3 className="mt-1 truncate text-lg font-semibold text-gray-900">
+                    {request.proposed_name || request.cooperative_name || "Unnamed"}
+                  </h3>
+                  <p className="text-sm text-gray-600">
+                    {request.sector} sector · filed by {request.contact_name}
+                    {request.contact_phone ? ` · ${request.contact_phone}` : ""}
+                  </p>
+                  {request.process?.blockedBy && (
+                    <p className="mt-1 text-sm text-red-600">
+                      Blocked: {request.process.blockedBy}
+                    </p>
+                  )}
+                  {!request.process?.blockedBy && request.process?.nextAction && (
+                    <p className="mt-1 text-sm text-gray-500">{request.process.nextAction}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-4">
+                  {request.process && (
+                    <div className="text-right">
+                      <p className="text-sm text-gray-500">Progress</p>
+                      <p className="text-lg font-semibold text-gray-900">
+                        {request.process.percentComplete}%
+                      </p>
+                    </div>
+                  )}
+                  <Button variant="secondary" onClick={() => navigate("/rca-services")}>
+                    Open
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          ))}
         </div>
       )}
 
       {/* Cooperatives List with Expandable Details */}
-      {!loading && !error && (
+      {!loading && !error && activeView?.kind !== "requests" && (
         <div className="space-y-4">
           {filteredCooperatives.length === 0 && (
             <div className="flex items-center justify-center py-16 text-gray-500">
@@ -687,13 +1138,63 @@ export function Cooperatives() {
                     <div className="w-12 h-12 rounded-lg bg-[#2D6A4F]/10 flex items-center justify-center flex-shrink-0">
                       <Building2 className="w-6 h-6 text-[#2D6A4F]" />
                     </div>
-                    <div className="flex-1">
-                      <h3 className="font-semibold text-gray-900 text-lg mb-1">{coop.name}</h3>
-                      <div className="flex items-center gap-4 text-sm text-gray-600">
+                    <div className="flex-1 min-w-0">
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <h3 className="font-semibold text-gray-900 text-lg">{coop.name}</h3>
+                        {/*
+                          The licence, on the row. Whether a cooperative may
+                          legally trade is the single most important fact about
+                          it, and it used to be three clicks away on another
+                          page. An unlicensed cooperative now says so here.
+                        */}
+                        <PermitBadge permit={coop.permit} />
+                        {/* A dissolution shows as a "not active" reason below instead. */}
+                        {coop.openRequest && coop.openRequest.requestType !== "dissolution" && (
+                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                            {coop.openRequest.requestType.replace(/_/g, " ")}
+                            {" — "}
+                            {STAGE_LABELS[coop.openRequest.currentStage] ??
+                              coop.openRequest.currentStage}
+                          </span>
+                        )}
+                        {coop.auditBand && ["at_risk", "critical"].includes(coop.auditBand) && (
+                          <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                            {coop.auditBand === "critical" ? "Critical" : "At risk"}
+                          </span>
+                        )}
+                        {coop.inactiveReasons.length > 0 && (
+                          <span className="rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-white">
+                            Not active
+                          </span>
+                        )}
+                      </div>
+                      {coop.inactiveReasons.length > 0 && (
+                        <ul className="mb-1.5 flex flex-wrap gap-1.5">
+                          {coop.inactiveReasons.map((id) => {
+                            const detail = reasonDetail(id, coop);
+                            return (
+                              <li
+                                key={id}
+                                title={reasonLabels.get(id)?.description}
+                                className="rounded-md border border-orange-200 bg-orange-50 px-2 py-0.5 text-xs text-orange-900"
+                              >
+                                <span className="font-medium">{reasonLabels.get(id)?.label ?? id.replace(/_/g, " ")}</span>
+                                {detail && <span className="text-orange-800"> — {detail}</span>}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-600">
                         <span className="flex items-center gap-1">
                           <Users className="w-4 h-4" />
                           {coop.membershipSize} members
                         </span>
+                        {coop.archivedMembers > 0 && (
+                          <span className="text-gray-400">
+                            {coop.archivedMembers} archived
+                          </span>
+                        )}
                         <span>•</span>
                         <span>{coop.composition}</span>
                         <span>•</span>

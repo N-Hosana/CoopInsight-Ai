@@ -1,13 +1,34 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Bell, X, CheckCheck, ExternalLink, Eye } from "lucide-react";
-import { useNotifications } from "../contexts/NotificationContext";
+import { useNotifications, notificationPath } from "../contexts/NotificationContext";
+
+/** How long a real-time alert stays on screen before it tucks itself away. */
+const TOAST_MS = 12_000;
 import { Link, useNavigate } from "react-router";
 
 export function NotificationBar() {
-  const { notifications, unreadCount, markAsRead, markAllAsRead } = useNotifications();
+  const { notifications, unreadCount, markAsRead, markAllAsRead, toasts, dismissToast } = useNotifications();
   const [isOpen, setIsOpen] = useState(false);
   const [selectedNotification, setSelectedNotification] = useState<any>(null);
   const navigate = useNavigate();
+  const [desktopAllowed, setDesktopAllowed] = useState(
+    typeof window !== "undefined" && "Notification" in window ? window.Notification.permission : "denied"
+  );
+
+  // Each alert leaves on its own after a while; it stays in the bell either way.
+  useEffect(() => {
+    if (!toasts.length) return;
+    const timers = toasts.map((t) => setTimeout(() => dismissToast(t.id), TOAST_MS));
+    return () => timers.forEach(clearTimeout);
+  }, [toasts, dismissToast]);
+
+  /** Go to the notification itself, on the Notifications page. */
+  const openNotification = (id: string) => {
+    markAsRead(id);
+    dismissToast(id);
+    setIsOpen(false);
+    navigate(notificationPath(id));
+  };
 
   const getNotificationIcon = (type: string) => {
     switch (type) {
@@ -99,7 +120,8 @@ export function NotificationBar() {
                       className={`p-4 hover:bg-muted/50 transition-colors cursor-pointer ${
                         !notification.read ? "bg-primary/5" : ""
                       }`}
-                      onClick={() => markAsRead(notification.id)}
+                      onClick={() => openNotification(notification.id)}
+                      title="Open this notification"
                     >
                       <div className="flex gap-3">
                         <div className="text-2xl flex-shrink-0">{getNotificationIcon(notification.type)}</div>
@@ -160,6 +182,19 @@ export function NotificationBar() {
               )}
             </div>
 
+            {desktopAllowed === "default" && (
+              <div className="px-4 py-2 border-t border-border text-xs text-muted-foreground flex items-center justify-between gap-2">
+                <span>Get alerts even when this tab is in the background.</span>
+                <button
+                  onClick={() =>
+                    window.Notification.requestPermission().then((p) => setDesktopAllowed(p))
+                  }
+                  className="text-primary hover:underline font-medium whitespace-nowrap"
+                >
+                  Allow
+                </button>
+              </div>
+            )}
             <div className="p-3 border-t border-border bg-muted/30">
               <Link
                 to="/notifications"
@@ -171,6 +206,49 @@ export function NotificationBar() {
             </div>
           </div>
         </>
+      )}
+
+      {/*
+        Real-time alerts, on every page. A click opens the notification itself.
+      */}
+      {toasts.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-[60] w-96 max-w-[calc(100vw-2rem)] space-y-2" aria-live="polite">
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => openNotification(t.id)}
+              onKeyDown={(e) => e.key === "Enter" && openNotification(t.id)}
+              className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 shadow-lg transition-transform hover:-translate-y-0.5 ${
+                t.type === "alert"
+                  ? "border-red-200 bg-red-50"
+                  : t.type === "warning"
+                    ? "border-amber-200 bg-amber-50"
+                    : t.type === "success"
+                      ? "border-green-200 bg-green-50"
+                      : "border-blue-200 bg-blue-50"
+              }`}
+            >
+              <div className="text-xl flex-shrink-0">{getNotificationIcon(t.type)}</div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-gray-900">{t.title}</p>
+                <p className="mt-0.5 line-clamp-2 text-xs text-gray-700">{t.message}</p>
+                <p className="mt-1 text-xs font-medium text-[#2D6A4F]">Open notification →</p>
+              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dismissToast(t.id);
+                }}
+                className="flex-shrink-0 text-gray-400 hover:text-gray-600"
+                aria-label="Dismiss"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          ))}
+        </div>
       )}
 
       {/* Notification Detail Modal */}

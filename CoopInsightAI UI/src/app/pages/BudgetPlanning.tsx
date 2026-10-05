@@ -280,7 +280,7 @@ export function BudgetPlanning() {
             </div>
             <div className="rounded-2xl bg-slate-50 p-4">
               <p className="text-gray-500">Projected Total</p>
-              <p className="mt-2 text-2xl font-semibold text-[#2563EB]">{formatFrw(summary.totalProjected)}</p>
+              <p className="mt-2 text-2xl font-semibold text-[#2D6A4F]">{formatFrw(summary.totalProjected)}</p>
             </div>
             <div className="rounded-2xl bg-slate-50 p-4">
               <p className="text-gray-500">Variance</p>

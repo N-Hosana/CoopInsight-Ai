@@ -4,6 +4,7 @@ import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { api } from "../services/api";
 import { useAuth } from "../contexts/AuthContext";
+import { MyInsights } from "../components/MyInsights";
 
 interface ApiInsight {
   id: string;
@@ -40,7 +41,17 @@ interface ModelInfo {
   accuracy: number | null;
 }
 
+/**
+ * A member gets their own progress and their own cooperative; every other role
+ * gets the cooperative analytics below, which the backend scopes to what that
+ * role supervises.
+ */
 export function AIInsights() {
+  const { user } = useAuth();
+  return user?.role === "member" ? <MyInsights /> : <CooperativeAIInsights />;
+}
+
+function CooperativeAIInsights() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<"overview" | "anomalies" | "engagement" | "benchmarks" | "performance">("overview");
 
@@ -263,7 +274,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
         <div className="text-sm text-gray-500 text-center py-2">Loading AI insights…</div>
       )}
 
-      <div className="bg-gradient-to-r from-[#2563EB] via-blue-600 to-blue-700 rounded-xl p-8 text-white">
+      <div className="bg-gradient-to-r from-[#2D6A4F] via-[#245A42] to-[#1B5E20] rounded-xl p-8 text-white">
         <div className="flex items-center justify-between">
           <div>
             <div className="flex items-center gap-3 mb-2">
@@ -341,7 +352,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
               onClick={() => setActiveTab(tab.id as any)}
               className={`px-4 py-3 font-medium flex items-center gap-2 border-b-2 transition-colors ${
                 activeTab === tab.id
-                  ? "border-[#2563EB] text-[#2563EB]"
+                  ? "border-[#2D6A4F] text-[#2D6A4F]"
                   : "border-transparent text-gray-600 hover:text-gray-900"
               }`}
             >
@@ -368,7 +379,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
                   ? "text-green-600"
                   : insight.type === "warning"
                   ? "text-yellow-600"
-                  : "text-[#2563EB]";
+                  : "text-[#2D6A4F]";
 
               return (
                 <Card key={insight.id ?? index} className="p-6">
@@ -379,7 +390,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
                   <p className="text-sm text-gray-600 mb-4">{insight.description}</p>
                   <div className="flex items-center justify-between">
                     <span className="text-lg font-bold text-gray-900">{insight.metric}</span>
-                    <button className="text-[#2563EB] text-sm font-medium hover:underline">Learn More →</button>
+                    <button className="text-[#2D6A4F] text-sm font-medium hover:underline">Learn More →</button>
                   </div>
                 </Card>
               );
@@ -389,7 +400,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
           <div className="grid grid-cols-2 gap-6">
             <Card className="p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <Zap className="w-5 h-5 text-[#2563EB]" />
+                <Zap className="w-5 h-5 text-[#2D6A4F]" />
                 AI Recommendations
               </h2>
               <div className="space-y-4">
@@ -420,7 +431,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
 
             <Card className="p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <Target className="w-5 h-5 text-[#2563EB]" />
+                <Target className="w-5 h-5 text-[#2D6A4F]" />
                 Predictive Analytics
               </h2>
               <div className="space-y-4">
@@ -445,7 +456,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
                         <TrendingUp className="w-4 h-4 text-green-600 mt-4" />
                         <div>
                           <p className="text-xs text-gray-500">Predicted</p>
-                          <p className="text-lg font-semibold text-[#2563EB]">{expected}</p>
+                          <p className="text-lg font-semibold text-[#2D6A4F]">{expected}</p>
                         </div>
                       </div>
                     </div>
@@ -463,7 +474,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
       {activeTab === "anomalies" && (
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
-            <AlertTriangle className="w-6 h-6 text-[#2563EB]" />
+            <AlertTriangle className="w-6 h-6 text-[#2D6A4F]" />
             Anomaly Detection Results ({apiAnomalies.length} Found)
           </h2>
           <div className="space-y-4">
@@ -527,7 +538,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
       {activeTab === "engagement" && (
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
-            <Users className="w-6 h-6 text-[#2563EB]" />
+            <Users className="w-6 h-6 text-[#2D6A4F]" />
             Member Engagement Analysis
           </h2>
           {engagementNote && (
@@ -563,7 +574,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <div className="w-16 bg-gray-200 rounded-full h-2">
-                            <div className="bg-blue-600 h-2 rounded-full" style={{ width: `${member.contributionConsistency ?? 0}%` }}></div>
+                            <div className="bg-[#2D6A4F] h-2 rounded-full" style={{ width: `${member.contributionConsistency ?? 0}%` }}></div>
                           </div>
                           <span className="text-gray-700 font-medium">{member.contributionConsistency ?? 0}%</span>
                         </div>
@@ -601,7 +612,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
       {activeTab === "benchmarks" && (
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
-            <BarChart3 className="w-6 h-6 text-[#2563EB]" />
+            <BarChart3 className="w-6 h-6 text-[#2D6A4F]" />
             Benchmarking Against Similar Cooperatives
           </h2>
           {benchmarksNote && (
@@ -626,7 +637,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
                 <div className="grid grid-cols-3 gap-4">
                   <div>
                     <p className="text-xs text-gray-600 mb-1">Your Cooperative</p>
-                    <p className="text-2xl font-bold text-[#2563EB]">{bench.yourValue}%</p>
+                    <p className="text-2xl font-bold text-[#2D6A4F]">{bench.yourValue}%</p>
                   </div>
                   <div>
                     <p className="text-xs text-gray-600 mb-1">Average Cooperative</p>
@@ -650,7 +661,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
                     <div className="h-2 bg-gray-500 rounded-full" style={{ width: `${bench.averageCooperative ?? 0}%` }}></div>
                   </div>
                   <div className="flex-1 h-2 bg-blue-200 rounded-full">
-                    <div className="h-2 bg-[#2563EB] rounded-full" style={{ width: `${((bench.yourValue ?? 0) / (bench.topPerformer || 1)) * 100}%` }}></div>
+                    <div className="h-2 bg-[#2D6A4F] rounded-full" style={{ width: `${((bench.yourValue ?? 0) / (bench.topPerformer || 1)) * 100}%` }}></div>
                   </div>
                   <div className="flex-1 h-2 bg-gray-200 rounded-full">
                     <div className="h-2 bg-green-500 rounded-full" style={{ width: "100%" }}></div>
@@ -665,7 +676,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
       {activeTab === "performance" && (
         <Card className="p-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-6 flex items-center gap-2">
-            <Layers className="w-6 h-6 text-[#2563EB]" />
+            <Layers className="w-6 h-6 text-[#2D6A4F]" />
             Model Performance
           </h2>
           {modelPerformanceNote && (
@@ -689,7 +700,7 @@ ${apiForecasts.map((f: any) => `- ${f.affected_metric ?? f.title}: ${f.current_v
                         <p className="text-sm font-bold text-gray-900">{model.accuracy}%</p>
                       </div>
                       <div className="w-full bg-gray-200 rounded-full h-2">
-                        <div className="bg-[#2563EB] h-2 rounded-full" style={{ width: `${model.accuracy}%` }}></div>
+                        <div className="bg-[#2D6A4F] h-2 rounded-full" style={{ width: `${model.accuracy}%` }}></div>
                       </div>
                     </div>
                   ) : (

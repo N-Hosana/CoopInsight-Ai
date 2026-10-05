@@ -67,14 +67,18 @@ export function Dashboard() {
 
     const fetchDashboard = async () => {
       try {
-        const [statsRes, activitiesRes, alertsRes] = await Promise.all([
+        const [statsRes, activitiesRes, alertsRes, trendsRes] = await Promise.all([
           api.get<any>("/dashboard/stats"),
           api.get<any>("/dashboard/recent-activity"),
           api.get<any>("/dashboard/alerts"),
+          api.get<any>("/dashboard/financial-trends?months=6").catch(() => ({ data: [] })),
         ]);
         setStats((statsRes as any)?.data ?? statsRes);
         setActivities((activitiesRes as any)?.data ?? []);
-        setFinancialTrends([]);
+        // Income, expenses and savings by month, from the same records as the
+        // Financials page. This was always set to [], so the chart showed six
+        // invented months.
+        setFinancialTrends((trendsRes as any)?.data ?? []);
         setNotifications((alertsRes as any)?.data ?? []);
       } catch (err: any) {
         setError(err?.message ?? "Failed to load dashboard data");
@@ -121,6 +125,59 @@ export function Dashboard() {
   );
 }
 
+const rwf = (v: number | null | undefined) => `${Math.round(Number(v ?? 0)).toLocaleString()} RWF`;
+
+/**
+ * The money cards, from /dashboard/stats. Each is the same figure the
+ * Financials page shows for the same thing, and each caption is a fact from
+ * the same records — not a decorative percentage.
+ */
+function moneyCards(stats: any, loading: boolean) {
+  const prev = Number(stats?.previousMonthRevenue ?? 0);
+  const now = Number(stats?.monthlyRevenue ?? 0);
+  const change = prev > 0 ? Math.round(((now - prev) / prev) * 100) : null;
+  return [
+    {
+      title: "Total Members",
+      value: loading ? "..." : (stats?.totalMembers ?? 0).toLocaleString(),
+      change: loading ? "" : `${stats?.newMembersThisMonth ?? 0} joined this month`,
+      trend: "up",
+      icon: Users,
+    },
+    {
+      title: "Income this month",
+      value: loading ? "..." : rwf(now),
+      change: loading ? "" : change == null ? `last month ${rwf(prev)}` : `${change >= 0 ? "+" : ""}${change}% on last month (${rwf(prev)})`,
+      trend: "up",
+      icon: DollarSign,
+    },
+    {
+      title: "Total Savings",
+      value: loading ? "..." : rwf(stats?.totalSavings),
+      change: loading ? "" : `${rwf(stats?.savingsThisMonth)} paid in this month`,
+      trend: "up",
+      icon: PiggyBank,
+    },
+    {
+      title: "Loans outstanding",
+      value: loading ? "..." : rwf(stats?.activeLoanBalance),
+      change: loading ? "" : `${stats?.overdueLoans ?? 0} overdue`,
+      trend: "up",
+      icon: CreditCard,
+    },
+  ];
+}
+
+/** Monthly income, expenses and savings for the chart — empty, never invented. */
+function trendSeries(trends: any[]) {
+  return trends.map((t) => ({
+    month: new Date(`${t.month}-01`).toLocaleDateString(undefined, { month: "short", year: "2-digit" }),
+    income: Math.round(t.income),
+    expense: Math.round(t.expense),
+    savings: Math.round(t.savings),
+  }));
+}
+
 interface DashboardDataProps {
   stats: any;
   activities: any[];
@@ -141,53 +198,19 @@ function ManagerDashboard({
 }: { announcements: SystemAnnouncement[] } & DashboardDataProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const [recommendation, setRecommendation] = useState<{ title: string; summary: string } | null>(null);
+  useEffect(() => {
+    api
+      .get<any>("/ai/recommendations?limit=1")
+      .then((res) => setRecommendation((res as any)?.data?.[0] ?? null))
+      .catch(() => setRecommendation(null));
+  }, []);
 
-  const summaryCards = [
-    {
-      title: "Total Members",
-      value: loading ? "..." : (stats?.totalMembers ?? 0).toLocaleString(),
-      change: loading ? "" : `+${stats?.monthlyGrowth ?? 0}%`,
-      trend: "up",
-      icon: Users,
-    },
-    {
-      title: "Monthly Revenue",
-      value: loading ? "..." : `${(stats?.totalSavings ?? 0).toLocaleString()}RWF`,
-      change: loading ? "" : `+${stats?.monthlyGrowth ?? 0}%`,
-      trend: "up",
-      icon: DollarSign,
-    },
-    {
-      title: "Total Savings",
-      value: loading ? "..." : `${(stats?.totalSavings ?? 0).toLocaleString()}RWF`,
-      change: loading ? "" : "+12%",
-      trend: "up",
-      icon: PiggyBank,
-    },
-    {
-      title: "Active Loans",
-      value: loading ? "..." : `${(stats?.totalLoans ?? 0).toLocaleString()}RWF`,
-      change: loading ? "" : "+5%",
-      trend: "up",
-      icon: CreditCard,
-    },
-  ];
-
-  const trendData =
-    financialTrends.length > 0
-      ? financialTrends.map((t: any) => ({
-          month: t.month,
-          revenue: t.income,
-          savings: t.savings,
-        }))
-      : [
-          { month: "Jan", revenue: 105, savings: 72 },
-          { month: "Feb", revenue: 120, savings: 80 },
-          { month: "Mar", revenue: 135, savings: 88 },
-          { month: "Apr", revenue: 150, savings: 97 },
-          { month: "May", revenue: 162, savings: 105 },
-          { month: "Jun", revenue: 175, savings: 112 },
-        ];
+  // Every figure here is the same number the Financials page shows for the
+  // same thing: Monthly Revenue was showing Total Savings, Active Loans read a
+  // field that did not exist, and the small percentages were all invented.
+  const summaryCards = moneyCards(stats, loading);
+  const trendData = trendSeries(financialTrends);
 
   return (
     <div className="space-y-6">
@@ -228,15 +251,13 @@ function ManagerDashboard({
           return (
             <div key={card.title} className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
               <div className="flex items-center justify-between mb-4">
-                <div className="p-3 bg-blue-50 rounded-lg">
-                  <Icon className="w-6 h-6 text-[#2563EB]" />
+                <div className="p-3 bg-[#2D6A4F]/10 rounded-lg">
+                  <Icon className="w-6 h-6 text-[#2D6A4F]" />
                 </div>
-                {card.change && (
-                  <span className="text-sm font-medium text-green-600">{card.change}</span>
-                )}
               </div>
               <p className="text-sm text-gray-600 mb-1">{card.title}</p>
               <p className="text-2xl font-bold text-gray-900">{card.value}</p>
+              {card.change && <p className="mt-1 text-xs text-gray-500">{card.change}</p>}
             </div>
           );
         })}
@@ -244,7 +265,8 @@ function ManagerDashboard({
 
       <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-6">
         <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Performance Trends</h2>
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">Money in and out, by month</h2>
+          <p className="text-xs text-gray-500 mb-3">From the same records as the Financials page (RWF).</p>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={trendData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
@@ -253,8 +275,9 @@ function ManagerDashboard({
                 <YAxis tickLine={false} axisLine={false} />
                 <Tooltip />
                 <Legend verticalAlign="top" height={36} />
-                <Line type="monotone" dataKey="revenue" stroke="#2563EB" strokeWidth={3} dot={{ r: 3 }} />
-                <Line type="monotone" dataKey="savings" stroke="#10B981" strokeWidth={3} dot={{ r: 3 }} />
+                <Line type="monotone" dataKey="income" name="Income" stroke="#2D6A4F" strokeWidth={3} dot={{ r: 3 }} />
+                <Line type="monotone" dataKey="expense" name="Expenses" stroke="#DC2626" strokeWidth={2} dot={{ r: 2 }} />
+                <Line type="monotone" dataKey="savings" name="Savings paid in" stroke="#10B981" strokeWidth={3} dot={{ r: 3 }} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -283,32 +306,25 @@ function ManagerDashboard({
                 </div>
               ))
             ) : (
-              <>
-                <div className="p-3 bg-yellow-50 rounded-lg">
-                  <p className="text-sm font-medium text-gray-900">Loan Payment Due</p>
-                  <p className="text-xs text-gray-600">3 members tomorrow</p>
-                </div>
-                <div className="p-3 bg-blue-50 rounded-lg">
-                  <p className="text-sm font-medium text-gray-900">Meeting Reminder</p>
-                  <p className="text-xs text-gray-600">May 5, 10:00 AM</p>
-                </div>
-              </>
+              <p className="py-6 text-center text-sm text-gray-400">No alerts right now.</p>
             )}
           </div>
         </div>
       </div>
 
-      <div className="bg-gradient-to-r from-[#2563EB] to-[#1d4ed8] rounded-xl p-6 text-white">
+      <div className="bg-gradient-to-r from-[#2D6A4F] to-[#1B5E20] rounded-xl p-6 text-white">
         <div className="flex items-start gap-4">
           <Lightbulb className="w-8 h-8" />
           <div>
             <h3 className="font-semibold mb-2">AI Recommendation</h3>
             <p className="text-blue-100 mb-3">
-              Member engagement is 23% above average. Consider expanding training programs to maintain growth momentum.
+              {recommendation
+                ? `${recommendation.title}: ${recommendation.summary}`
+                : "Open AI insights for what the models have found in your cooperative's records."}
             </p>
             <button
               onClick={() => navigate("/ai-insights")}
-              className="px-4 py-2 bg-white text-[#2563EB] rounded-lg hover:bg-blue-50 transition-colors text-sm font-medium"
+              className="px-4 py-2 bg-white text-[#2D6A4F] rounded-lg hover:bg-[#2D6A4F]/10 transition-colors text-sm font-medium"
             >
               View Details
             </button>
@@ -348,28 +364,7 @@ function ManagerDashboard({
               </div>
             ))
           ) : (
-            [
-              { member: "Jean Uwimana", action: "Contribution Payment", amount: "50,000RWF", time: "2 hours ago" },
-              { member: "Marie Mukamana", action: "Loan Disbursement", amount: "200,000RWF", time: "5 hours ago" },
-              { member: "Peter Habimana", action: "Savings Deposit", amount: "75,000RWF", time: "1 day ago" },
-            ].map((activity, index) => (
-              <div
-                key={index}
-                onClick={() => navigate(`/activities/${index + 1}`)}
-                className="p-6 hover:bg-gray-50 transition-colors cursor-pointer"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-medium text-gray-900">{activity.member}</p>
-                    <p className="text-sm text-gray-600">{activity.action}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="font-semibold text-gray-900">{activity.amount}</p>
-                    <p className="text-xs text-gray-500">{activity.time}</p>
-                  </div>
-                </div>
-              </div>
-            ))
+            <p className="p-6 text-center text-sm text-gray-400">Nothing recorded recently.</p>
           )}
         </div>
       </div>
@@ -378,6 +373,7 @@ function ManagerDashboard({
 }
 
 function GovernmentDashboard({ announcements }: { announcements: SystemAnnouncement[] }) {
+  const { user } = useAuth();
   const navigate = useNavigate();
   const [overview, setOverview] = useState<any>(null);
   const [compliance, setCompliance] = useState<any>(null);
@@ -423,9 +419,28 @@ function GovernmentDashboard({ announcements }: { announcements: SystemAnnouncem
     <div className="space-y-6">
       <SystemAnnouncements announcements={announcements} />
 
+      {/*
+        All three oversight tiers share this dashboard and all three carry the
+        role `government`, so titling it "RCA Monitoring" told a sector officer
+        in Remera that they were looking at the national agency's desk. The
+        title now names whose desk it actually is, and the subtitle names the
+        scope they can actually see.
+      */}
       <div>
-        <h1 className="text-3xl font-bold text-gray-900">RCA Monitoring Dashboard</h1>
-        <p className="text-gray-600 mt-1">Gasabo District — cooperative performance overview</p>
+        <h1 className="text-3xl font-bold text-gray-900">
+          {user?.oversightLevel === "sector"
+            ? `${user?.sector ?? "Sector"} Sector Monitoring`
+            : user?.oversightLevel === "district"
+              ? "Gasabo District Monitoring"
+              : user?.oversightLevel === "rca"
+                ? "RCA Monitoring — Gasabo Portfolio"
+                : "Cooperative Monitoring"}
+        </h1>
+        <p className="text-gray-600 mt-1">
+          {user?.oversightLevel === "sector"
+            ? `Cooperatives registered in ${user?.sector ?? "your"} sector — performance overview`
+            : "Gasabo District — cooperative performance overview"}
+        </p>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-6">
@@ -434,8 +449,8 @@ function GovernmentDashboard({ announcements }: { announcements: SystemAnnouncem
           return (
             <div key={stat.label} className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
               <div className="flex items-center gap-3 mb-3">
-                <div className="p-3 bg-blue-50 rounded-lg">
-                  <Icon className="w-6 h-6 text-[#2563EB]" />
+                <div className="p-3 bg-[#2D6A4F]/10 rounded-lg">
+                  <Icon className="w-6 h-6 text-[#2D6A4F]" />
                 </div>
               </div>
               <p className="text-sm text-gray-600 mb-1">{stat.label}</p>
@@ -453,7 +468,7 @@ function GovernmentDashboard({ announcements }: { announcements: SystemAnnouncem
               <div
                 key={coop.id ?? index}
                 onClick={() => navigate(`/cooperatives/${coop.id}`)}
-                className="flex items-center justify-between p-4 bg-gray-50 rounded-lg cursor-pointer hover:bg-blue-50 transition-colors"
+                className="flex items-center justify-between p-4 bg-gray-50 rounded-lg cursor-pointer hover:bg-[#2D6A4F]/10 transition-colors"
               >
                 <div>
                   <p className="font-medium text-gray-900">{coop.name}</p>
@@ -541,7 +556,7 @@ function GovernmentDashboard({ announcements }: { announcements: SystemAnnouncem
           <h2 className="text-lg font-semibold text-gray-900">Health Score Distribution</h2>
           <button
             onClick={() => navigate("/government")}
-            className="text-sm text-blue-600 hover:underline"
+            className="text-sm text-[#2D6A4F] hover:underline"
           >
             Full monitoring →
           </button>
@@ -566,211 +581,195 @@ function GovernmentDashboard({ announcements }: { announcements: SystemAnnouncem
   );
 }
 
+/**
+ * A member's dashboard: their own standing, nothing about other members.
+ *
+ * It used to show "Recent Cooperative Activity" — other members joining, other
+ * people's transactions — beside a performance score, chart and rates that were
+ * all hardcoded (87/100, "Excellent standing member"), and it downloaded the
+ * whole member list to find the member's own row. Everything here now comes
+ * from the member's own record: `/ai/me` for the figures and the savings trend,
+ * `/members/me/history` for what they have done lately.
+ */
+interface HistoryEntry {
+  kind: string;
+  id: string;
+  at: string;
+  amount: number | null;
+  title: string;
+  flow: "in" | "out" | null;
+}
+
+const HISTORY_ICON: Record<string, { Icon: typeof Activity; tone: string }> = {
+  contribution: { Icon: PiggyBank, tone: "bg-green-50 text-green-700" },
+  repayment: { Icon: CreditCard, tone: "bg-green-50 text-green-700" },
+  loan: { Icon: CreditCard, tone: "bg-purple-50 text-purple-700" },
+  dividend: { Icon: DollarSign, tone: "bg-orange-50 text-orange-700" },
+  attended: { Icon: CheckCircle, tone: "bg-[#2D6A4F]/10 text-[#2D6A4F]" },
+  missed: { Icon: AlertCircle, tone: "bg-amber-50 text-amber-700" },
+  registered: { Icon: Activity, tone: "bg-blue-50 text-blue-700" },
+  status: { Icon: Users, tone: "bg-gray-100 text-gray-700" },
+  joined: { Icon: Users, tone: "bg-gray-100 text-gray-700" },
+};
+
 function MemberDashboard({ user, announcements }: { user: any; announcements: SystemAnnouncement[] }) {
   const navigate = useNavigate();
-  const [coopStats, setCoopStats] = useState<any>(null);
-  const [recentActivity, setRecentActivity] = useState<any[]>([]);
-  const [memberRecord, setMemberRecord] = useState<any>(null);
-  const [memLoading, setMemLoading] = useState(true);
+  const [mine, setMine] = useState<any>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [note, setNote] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchMemberData = async () => {
-      try {
-        const [statsRes, activityRes, membersRes] = await Promise.all([
-          api.get<any>("/dashboard/stats"),
-          api.get<any>("/dashboard/recent-activity?limit=5"),
-          api.get<any>("/members?page=1&limit=100"),
-        ]);
-        setCoopStats((statsRes as any)?.data);
-        setRecentActivity((activityRes as any)?.data ?? []);
-        // Find this user's member record by email
-        const allMembers: any[] = (membersRes as any)?.data ?? [];
-        const mine = allMembers.find((m: any) => m.email === user?.email || m.full_name === user?.name);
-        setMemberRecord(mine ?? null);
-      } catch (err) {
-        console.error("Member dashboard fetch error:", err);
-      } finally {
-        setMemLoading(false);
-      }
-    };
-    fetchMemberData();
-  }, [user]);
+    Promise.allSettled([
+      api.get<any>("/ai/me"),
+      api.get<{ data: HistoryEntry[]; pagination: { total: number } }>("/members/me/history?limit=6"),
+    ])
+      .then(([me, hist]) => {
+        if (me.status === "fulfilled") {
+          setMine(me.value?.data ?? null);
+          if (!me.value?.data) setNote(me.value?.message ?? null);
+        }
+        if (hist.status === "fulfilled") {
+          setHistory(hist.value.data ?? []);
+          setHistoryTotal(hist.value.pagination?.total ?? 0);
+        }
+      })
+      .finally(() => setLoading(false));
+  }, [user?.id]);
 
-  const savings = memberRecord?.total_savings ?? memberRecord?.totalSavings ?? 0;
+  const s = mine?.summary;
+  const rwf = (v: number | null | undefined) => `${Math.round(Number(v ?? 0)).toLocaleString()} RWF`;
+  const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(v * 100)}%`);
+  const trend = (mine?.savingsTrend ?? []).map((m: { month: string; amount: number }) => ({
+    month: new Date(`${m.month}-01`).toLocaleDateString(undefined, { month: "short" }),
+    savings: m.amount,
+  }));
+  const topInsights = (mine?.insights ?? []).filter((i: any) => i.category !== "cooperative").slice(0, 2);
 
-  const performanceMetrics = { score: 87, engagement: 92, loanRepayment: 100, savingsGrowth: 15, participationRate: 89 };
-
-  const performanceData = [
-    { month: "Jan", score: 72, engagement: 78, savings: 35 },
-    { month: "Feb", score: 75, engagement: 82, savings: 42 },
-    { month: "Mar", score: 79, engagement: 86, savings: 48 },
-    { month: "Apr", score: 83, engagement: 89, savings: 56 },
-    { month: "May", score: 87, engagement: 92, savings: 65 },
-    { month: "Jun", score: 89, engagement: 94, savings: 72 },
+  const tiles = [
+    { label: "My savings", value: loading ? "…" : rwf(s?.savings), sub: s?.savingsPercentile != null ? `ahead of ${pct(s.savingsPercentile)} of members` : "", Icon: PiggyBank, tone: "bg-purple-50 text-purple-600" },
+    { label: "Months saved", value: loading ? "…" : s ? `${s.monthsSavedOf6} of 6` : "—", sub: "last six complete months", Icon: TrendingUp, tone: "bg-green-50 text-green-600" },
+    { label: "My attendance", value: loading ? "…" : pct(s?.attendanceRate), sub: s?.activitiesInvited ? `${s.activitiesAttended} of ${s.activitiesInvited} activities` : "no activities yet", Icon: Activity, tone: "bg-[#2D6A4F]/10 text-[#2D6A4F]" },
+    { label: "Loan owed", value: loading ? "…" : s?.loanBalance ? rwf(s.loanBalance) : "None", sub: s?.lastDividend ? `last dividend ${rwf(s.lastDividend.amount)}` : "", Icon: CreditCard, tone: "bg-orange-50 text-orange-600" },
   ];
-
-  const getScoreColor = (score: number) => {
-    if (score >= 85) return "text-green-600";
-    if (score >= 70) return "text-yellow-600";
-    return "text-red-600";
-  };
-
-  const getScoreBg = (score: number) => {
-    if (score >= 85) return "bg-green-50";
-    if (score >= 70) return "bg-yellow-50";
-    return "bg-red-50";
-  };
 
   return (
     <div className="space-y-6">
       <SystemAnnouncements announcements={announcements} />
 
       <div>
-        <h1 className="text-3xl font-bold text-gray-900">Member Dashboard</h1>
-        <p className="text-gray-600 mt-1">{user.cooperativeName}</p>
+        <h1 className="text-3xl font-bold text-gray-900">My dashboard</h1>
+        <p className="text-gray-600 mt-1">
+          {user?.name} · {mine?.member?.cooperativeName ?? user?.cooperativeName ?? "No cooperative"}
+        </p>
       </div>
 
+      {note && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{note}</div>
+      )}
+
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-6">
-        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-          <div className="p-3 bg-green-50 rounded-lg inline-block mb-3">
-            <DollarSign className="w-6 h-6 text-green-600" />
+        {tiles.map((t) => (
+          <div key={t.label} className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+            <div className={`p-3 rounded-lg inline-block mb-3 ${t.tone}`}>
+              <t.Icon className="w-6 h-6" />
+            </div>
+            <p className="text-sm text-gray-600 mb-1">{t.label}</p>
+            <p className="text-2xl font-bold text-gray-900">{t.value}</p>
+            {t.sub && <p className="text-xs text-gray-500 mt-1">{t.sub}</p>}
           </div>
-          <p className="text-sm text-gray-600 mb-1">Total Members (Coop)</p>
-          <p className="text-2xl font-bold text-gray-900">
-            {memLoading ? "…" : (coopStats?.totalMembers ?? 0).toLocaleString()}
-          </p>
-        </div>
-
-        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-          <div className="p-3 bg-blue-50 rounded-lg inline-block mb-3">
-            <TrendingUp className="w-6 h-6 text-blue-600" />
-          </div>
-          <p className="text-sm text-gray-600 mb-1">Upcoming Activities</p>
-          <p className="text-2xl font-bold text-gray-900">
-            {memLoading ? "…" : (coopStats?.upcomingActivities ?? 0)}
-          </p>
-        </div>
-
-        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-          <div className="p-3 bg-purple-50 rounded-lg inline-block mb-3">
-            <PiggyBank className="w-6 h-6 text-purple-600" />
-          </div>
-          <p className="text-sm text-gray-600 mb-1">My Savings</p>
-          <p className="text-2xl font-bold text-gray-900">
-            {memLoading ? "…" : `${Number(savings).toLocaleString()} RWF`}
-          </p>
-        </div>
-
-        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-          <div className="p-3 bg-orange-50 rounded-lg inline-block mb-3">
-            <CreditCard className="w-6 h-6 text-orange-600" />
-          </div>
-          <p className="text-sm text-gray-600 mb-1">Coop Total Savings</p>
-          <p className="text-2xl font-bold text-gray-900">
-            {memLoading ? "…" : `${(coopStats?.totalSavings ?? 0).toLocaleString()} RWF`}
-          </p>
-        </div>
+        ))}
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-6">
         <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Performance Analytics</h2>
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={performanceData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                <XAxis dataKey="month" tickLine={false} axisLine={false} />
-                <YAxis tickLine={false} axisLine={false} />
-                <Tooltip />
-                <Legend verticalAlign="top" height={36} />
-                <Line type="monotone" dataKey="score" stroke="#2563EB" strokeWidth={3} dot={{ r: 3 }} name="Performance Score" />
-                <Line type="monotone" dataKey="engagement" stroke="#10B981" strokeWidth={3} dot={{ r: 3 }} name="Engagement %" />
-                <Line type="monotone" dataKey="savings" stroke="#F59E0B" strokeWidth={3} dot={{ r: 3 }} name="Savings Growth %" />
-              </LineChart>
-            </ResponsiveContainer>
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">My savings, month by month</h2>
+          <p className="text-xs text-gray-500 mb-4">What you paid in as savings in each of the last six complete months.</p>
+          <div className="h-64">
+            {trend.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trend} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                  <XAxis dataKey="month" tickLine={false} axisLine={false} />
+                  <YAxis tickLine={false} axisLine={false} />
+                  <Tooltip formatter={(v: any) => `${Number(v).toLocaleString()} RWF`} />
+                  <Line type="monotone" dataKey="savings" stroke="#2D6A4F" strokeWidth={3} dot={{ r: 3 }} name="Savings" />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="py-16 text-center text-sm text-gray-400">{loading ? "Loading…" : "No savings recorded yet."}</p>
+            )}
           </div>
         </div>
 
         <div className="space-y-4">
-          <div className={`${getScoreBg(performanceMetrics.score)} rounded-xl p-6 border border-gray-200`}>
-            <div className="text-center">
-              <p className="text-sm text-gray-600 mb-1">Overall Performance Score</p>
-              <p className={`text-4xl font-bold ${getScoreColor(performanceMetrics.score)}`}>{performanceMetrics.score}/100</p>
-              <p className="text-xs text-gray-500 mt-2">Excellent standing member</p>
+          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-gray-900">How I am doing</h3>
+              <button onClick={() => navigate("/ai-insights")} className="text-sm text-[#2D6A4F] hover:underline">
+                All insights →
+              </button>
             </div>
+            {topInsights.length ? (
+              <ul className="space-y-3">
+                {topInsights.map((i: any) => (
+                  <li key={i.id} className="text-sm">
+                    <p className={`font-medium ${i.tone === "warning" ? "text-amber-800" : i.tone === "positive" ? "text-green-800" : "text-gray-900"}`}>
+                      {i.title}
+                    </p>
+                    <p className="text-gray-600">{i.detail}</p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-gray-500">{loading ? "…" : "Nothing to report yet."}</p>
+            )}
           </div>
 
-          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200 space-y-3">
-            <h3 className="font-semibold text-gray-900 mb-4">Performance Metrics</h3>
-
-            <div>
-              <div className="flex justify-between items-center mb-1">
-                <p className="text-sm text-gray-600">Engagement Rate</p>
-                <p className="text-sm font-semibold text-gray-900">{performanceMetrics.engagement}%</p>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div className="bg-green-600 h-2 rounded-full" style={{ width: `${performanceMetrics.engagement}%` }}></div>
-              </div>
-            </div>
-
-            <div>
-              <div className="flex justify-between items-center mb-1">
-                <p className="text-sm text-gray-600">Loan Repayment Rate</p>
-                <p className="text-sm font-semibold text-gray-900">{performanceMetrics.loanRepayment}%</p>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div className="bg-blue-600 h-2 rounded-full" style={{ width: `${performanceMetrics.loanRepayment}%` }}></div>
-              </div>
-            </div>
-
-            <div>
-              <div className="flex justify-between items-center mb-1">
-                <p className="text-sm text-gray-600">Participation Rate</p>
-                <p className="text-sm font-semibold text-gray-900">{performanceMetrics.participationRate}%</p>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div className="bg-purple-600 h-2 rounded-full" style={{ width: `${performanceMetrics.participationRate}%` }}></div>
-              </div>
-            </div>
-
-            <div>
-              <div className="flex justify-between items-center mb-1">
-                <p className="text-sm text-gray-600">Savings Growth (YoY)</p>
-                <p className="text-sm font-semibold text-gray-900">{performanceMetrics.savingsGrowth}%</p>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div className="bg-orange-600 h-2 rounded-full" style={{ width: `${Math.min(performanceMetrics.savingsGrowth * 2, 100)}%` }}></div>
-              </div>
-            </div>
+          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+            <h3 className="font-semibold text-gray-900 mb-3">Coming up</h3>
+            {(mine?.upcoming ?? []).length ? (
+              <ul className="space-y-2">
+                {mine.upcoming.slice(0, 3).map((a: any) => (
+                  <li key={a.id} className="text-sm">
+                    <p className="font-medium text-gray-900">{a.title}</p>
+                    <p className="text-xs text-gray-500">
+                      {new Date(a.date).toLocaleDateString()} · {a.registered ? "you are registered" : "not registered yet"}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-gray-500">{loading ? "…" : "Nothing scheduled in the next weeks."}</p>
+            )}
           </div>
         </div>
       </div>
 
       <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-gray-900">Recent Cooperative Activity</h2>
-          <button onClick={() => navigate("/activities")} className="text-sm text-blue-600 hover:underline">
-            View all →
+          <h2 className="text-lg font-semibold text-gray-900">My recent activity</h2>
+          <button onClick={() => navigate("/members/me?tab=history")} className="text-sm text-[#2D6A4F] hover:underline">
+            View all{historyTotal ? ` (${historyTotal})` : ""} →
           </button>
         </div>
         <div className="divide-y divide-gray-100">
-          {recentActivity.length > 0 ? recentActivity.map((item: any, index: number) => (
-            <div key={item.id ?? index} className="py-3 flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-900">{item.title ?? item.description}</p>
-                <p className="text-xs text-gray-500 capitalize">{item.entity_type === "member" ? "New member" : item.sub_type ?? item.entity_type}</p>
-              </div>
-              <div className="text-right">
-                {item.amount != null && (
-                  <p className="text-sm font-semibold text-gray-900">{Number(item.amount).toLocaleString()} RWF</p>
-                )}
-                <p className="text-xs text-gray-400">
-                  {item.created_at ? new Date(item.created_at).toLocaleDateString() : ""}
-                </p>
-              </div>
-            </div>
-          )) : (
-            <p className="text-gray-400 text-sm text-center py-8">No recent activity yet</p>
+          {history.length > 0 ? (
+            history.map((e) => {
+              const look = HISTORY_ICON[e.kind] ?? HISTORY_ICON.status;
+              return (
+                <div key={`${e.kind}-${e.id}`} className="py-3 flex items-center gap-3">
+                  <div className={`p-2 rounded-lg ${look.tone}`}>
+                    <look.Icon className="w-4 h-4" />
+                  </div>
+                  <p className="flex-1 text-sm text-gray-900">{e.title}</p>
+                  <p className="text-xs text-gray-400">{new Date(e.at).toLocaleDateString()}</p>
+                </div>
+              );
+            })
+          ) : (
+            <p className="text-gray-400 text-sm text-center py-8">{loading ? "Loading…" : "Nothing recorded for you yet."}</p>
           )}
         </div>
       </div>
@@ -783,7 +782,6 @@ function MemberDashboard({ user, announcements }: { user: any; announcements: Sy
 function AdminDashboard({
   announcements,
   stats,
-  activities,
   loading,
   error,
 }: { announcements: SystemAnnouncement[] } & DashboardDataProps) {
@@ -791,28 +789,29 @@ function AdminDashboard({
     {
       title: "Total Cooperatives",
       value: loading ? "..." : (stats?.totalCooperatives ?? 0).toLocaleString(),
-      change: loading ? "" : `+${stats?.monthlyGrowth ?? 0}%`,
+      change: loading ? "" : `${stats?.activeCooperatives ?? 0} active`,
       trend: "up",
       icon: Building2,
     },
     {
       title: "Total Members",
       value: loading ? "..." : (stats?.totalMembers ?? 0).toLocaleString(),
-      change: loading ? "" : "+8%",
+      change: loading ? "" : `${stats?.newMembersThisMonth ?? 0} joined this month`,
       trend: "up",
       icon: Users,
     },
     {
       title: "Total Activities",
-      value: loading ? "..." : (activities.length).toLocaleString(),
-      change: loading ? "" : "+15%",
+      value: loading ? "..." : (stats?.totalActivities ?? 0).toLocaleString(),
+      change: loading ? "" : `${stats?.completionRate ?? 0}% completed`,
       trend: "up",
       icon: Activity,
     },
     {
-      title: "Total Revenue",
-      value: loading ? "..." : `${(stats?.totalSavings ?? 0).toLocaleString()}RWF`,
-      change: loading ? "" : "+24%",
+      // Was showing total savings under the "revenue" label.
+      title: "Total Income",
+      value: loading ? "..." : `${Math.round(stats?.totalIncome ?? 0).toLocaleString()} RWF`,
+      change: loading ? "" : `${Math.round(stats?.monthlyRevenue ?? 0).toLocaleString()} RWF this month`,
       trend: "up",
       icon: DollarSign,
     },
@@ -853,15 +852,13 @@ function AdminDashboard({
           return (
             <div key={card.title} className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
               <div className="flex items-center justify-between mb-4">
-                <div className="p-3 bg-blue-50 rounded-lg">
-                  <Icon className="w-6 h-6 text-[#2563EB]" />
+                <div className="p-3 bg-[#2D6A4F]/10 rounded-lg">
+                  <Icon className="w-6 h-6 text-[#2D6A4F]" />
                 </div>
-                {card.change && (
-                  <span className="text-sm font-medium text-green-600">{card.change}</span>
-                )}
               </div>
               <p className="text-sm text-gray-600 mb-1">{card.title}</p>
               <p className="text-2xl font-bold text-gray-900">{card.value}</p>
+              {card.change && <p className="mt-1 text-xs text-gray-500">{card.change}</p>}
             </div>
           );
         })}

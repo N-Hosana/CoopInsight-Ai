@@ -364,13 +364,13 @@ export function SecurityAudit() {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search logs..."
-                  className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               </div>
               <select
                 value={categoryFilter}
                 onChange={(e) => setCategoryFilter(e.target.value)}
-                className="border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#2563EB]"
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#2D6A4F]"
               >
                 <option value="all">All Categories</option>
                 <option value="financial">Financial</option>
@@ -382,7 +382,7 @@ export function SecurityAudit() {
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#2563EB]"
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#2D6A4F]"
               >
                 <option value="all">All Status</option>
                 <option value="success">Success</option>
@@ -392,7 +392,7 @@ export function SecurityAudit() {
             </div>
             {loading ? (
               <div className="flex justify-center py-12">
-                <RefreshCw className="w-6 h-6 text-[#2563EB] animate-spin" />
+                <RefreshCw className="w-6 h-6 text-[#2D6A4F] animate-spin" />
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -457,7 +457,7 @@ export function SecurityAudit() {
             <h3 className="font-semibold text-gray-900 mb-4">Login Activity Monitor</h3>
             {loading ? (
               <div className="flex justify-center py-12">
-                <RefreshCw className="w-6 h-6 text-[#2563EB] animate-spin" />
+                <RefreshCw className="w-6 h-6 text-[#2D6A4F] animate-spin" />
               </div>
             ) : (
               <>
@@ -530,7 +530,7 @@ export function SecurityAudit() {
             <h3 className="font-semibold text-gray-900 mb-4">Anomaly Detection Alerts</h3>
             {loading ? (
               <div className="flex justify-center py-12">
-                <RefreshCw className="w-6 h-6 text-[#2563EB] animate-spin" />
+                <RefreshCw className="w-6 h-6 text-[#2D6A4F] animate-spin" />
               </div>
             ) : (
               <div className="space-y-3">

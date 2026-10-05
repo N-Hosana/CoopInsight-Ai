@@ -4,10 +4,10 @@ import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import {
   ArrowLeft,
+  CalendarPlus,
   Edit2,
   Save,
   X,
-  Download,
   Calendar,
   Users,
   Zap,
@@ -15,10 +15,11 @@ import {
   Paperclip,
   AlertCircle,
   TrendingUp,
-  UserPlus,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../services/api";
+import { downloadIcs } from "../services/calendar";
+import { AttendanceRegister } from "../components/AttendanceRegister";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -102,10 +103,6 @@ export function ActivityDetails() {
   const [deletingAttachmentId, setDeletingAttachmentId] = useState<string | null>(null);
 
   // Register participant
-  const [registerMemberId, setRegisterMemberId] = useState("");
-  const [registering, setRegistering] = useState(false);
-  const [registerError, setRegisterError] = useState<string | null>(null);
-  const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
 
   const fetchActivity = async () => {
     if (!id) return;
@@ -153,7 +150,9 @@ export function ActivityDetails() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const canEdit = user?.role === "manager" || user?.role === "admin";
+  // The backend decides finally (own cooperative only); this just hides the
+  // controls from roles that can never use them.
+  const canEdit = ["manager", "cooperative", "admin", "generalManager"].includes(user?.role ?? "");
 
   const formatCurrency = (value: number) => `RWF ${value.toLocaleString("en-RW")}`;
 
@@ -194,26 +193,6 @@ export function ActivityDetails() {
       setSaveError(err?.message || "Failed to save changes. Please try again.");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleRegisterParticipant = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!id || !registerMemberId.trim()) return;
-    setRegistering(true);
-    setRegisterError(null);
-    setRegisterSuccess(null);
-    try {
-      await api.post(`/activities/${id}/participants`, { member_id: registerMemberId.trim() });
-      setRegisterSuccess("Participant registered successfully.");
-      setRegisterMemberId("");
-      // Refresh participants list
-      const res = await api.get<{ data: Participant[] }>(`/activities/${id}/participants`);
-      setParticipants((res as any).data ?? []);
-    } catch (err: any) {
-      setRegisterError(err?.message || "Failed to register participant.");
-    } finally {
-      setRegistering(false);
     }
   };
 
@@ -263,57 +242,23 @@ export function ActivityDetails() {
     }
   };
 
-  const handleExportReport = () => {
+  /** The activity as a calendar entry; written reports are on the Reports page. */
+  const handleAddToCalendar = () => {
     if (!activity) return;
-
-    const report = `
-ACTIVITY DETAILED REPORT
-Generated: ${new Date().toLocaleString()}
-
-ACTIVITY INFORMATION
-Title: ${activity.title}
-Type: ${activity.type}
-Date: ${formatDate(activity.date || activity.scheduled_date || "")}
-Status: ${activity.status}
-Description: ${activity.description}
-
-RESOURCE UTILIZATION
-Resources Allocated: ${formatCurrency(resourcesAllocated)}
-Resources Utilized: ${formatCurrency(resourcesUtilized)}
-Utilization Rate: ${utilizationPercent}%
-Remaining: ${formatCurrency(resourcesAllocated - resourcesUtilized)}
-
-PARTICIPATION
-Total Participants: ${activity.participantsCount ?? activity.participant_count ?? 0}
-
-OUTCOMES & IMPACT
-Outcome:
-${activity.outcome || "Not specified"}
-
-Impact:
-${activity.impact || "Not specified"}
-
-ATTACHMENTS (${attachments.length})
-${attachments.map((a) => `- ${a.name} - ${new Date(a.uploaded_at).toLocaleDateString()}`).join("\n")}
-
-ACTIVITY HISTORY
-${(activity.history || []).map((h) => `${formatDate(h.date)}: ${h.status} - ${h.notes}`).join("\n")}
-
-AUDIT INFORMATION
-Created by: ${activity.createdBy || activity.created_by_name || "—"}
-Last Modified by: ${activity.lastModifiedBy || "—"}
-Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
-    `.trim();
-
-    const blob = new Blob([report], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `activity-report-${activity.id}-${new Date().toISOString().split("T")[0]}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const a: any = activity;
+    downloadIcs(
+      [{
+        id: activity.id,
+        title: activity.title,
+        date: activity.date || activity.scheduled_date || "",
+        startTime: a.start_time ?? null,
+        endTime: a.end_time ?? null,
+        location: a.location ?? null,
+        description: activity.description ?? null,
+        status: STATUS_API[activity.status as string] ?? String(activity.status).toLowerCase(),
+      }],
+      `activity-${activity.title.replace(/[^w]+/g, "-").toLowerCase().slice(0, 40)}`
+    );
   };
 
   if (loading) {
@@ -325,7 +270,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
       <div className="max-w-5xl mx-auto py-10">
         <Card className="p-6">
           <p className="text-gray-600">{error || "Activity not found."}</p>
-          <button onClick={() => navigate("/activities")} className="mt-4 text-[#2563EB] hover:underline text-sm">
+          <button onClick={() => navigate("/activities")} className="mt-4 text-[#2D6A4F] hover:underline text-sm">
             ← Back to Activities
           </button>
         </Card>
@@ -348,14 +293,14 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
   return (
     <div className="max-w-5xl mx-auto space-y-6 py-8">
       <div className="flex items-center justify-between">
-        <button onClick={() => navigate("/activities")} className="flex items-center gap-2 text-[#2563EB] hover:text-[#1d4ed8]">
+        <button onClick={() => navigate("/activities")} className="flex items-center gap-2 text-[#2D6A4F] hover:text-[#1B5E20]">
           <ArrowLeft className="w-4 h-4" />
           Back to Activities
         </button>
         <div className="flex gap-3">
-          <Button variant="secondary" onClick={handleExportReport}>
-            <Download className="w-4 h-4 mr-2" />
-            Export Report
+          <Button variant="secondary" onClick={handleAddToCalendar}>
+            <CalendarPlus className="w-4 h-4 mr-2" />
+            Add to calendar
           </Button>
           {canEdit && (
             <Button variant="secondary" onClick={() => { setIsEditing(!isEditing); setSaveError(null); }}>
@@ -401,7 +346,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
                 type="text"
                 value={formData.title}
                 onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
               />
             </div>
             <div>
@@ -409,7 +354,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
               <textarea
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 rows={3}
               />
             </div>
@@ -419,7 +364,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
                 <select
                   value={formData.status}
                   onChange={(e) => setFormData({ ...formData, status: e.target.value as any })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 >
                   <option>Planned</option>
                   <option>Ongoing</option>
@@ -432,7 +377,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
                   type="number"
                   value={participantsCount}
                   onChange={(e) => setFormData({ ...formData, participantsCount: parseInt(e.target.value) })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               </div>
             </div>
@@ -441,7 +386,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
               <textarea
                 value={formData.outcome || ""}
                 onChange={(e) => setFormData({ ...formData, outcome: e.target.value })}
-                className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 rows={3}
                 placeholder="Describe the activity outcomes…"
               />
@@ -451,7 +396,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
               <textarea
                 value={formData.impact || ""}
                 onChange={(e) => setFormData({ ...formData, impact: e.target.value })}
-                className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 rows={3}
                 placeholder="Describe the expected impact…"
               />
@@ -482,7 +427,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
               </div>
               <div>
                 <p className="text-xs text-gray-500 mb-1">Utilized</p>
-                <p className="text-lg font-semibold text-[#2563EB]">{formatCurrency(resourcesUtilized)}</p>
+                <p className="text-lg font-semibold text-[#2D6A4F]">{formatCurrency(resourcesUtilized)}</p>
               </div>
               <div>
                 <div className="flex justify-between mb-2">
@@ -495,7 +440,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
                       utilizationPercent > 90
                         ? "bg-green-600"
                         : utilizationPercent > 70
-                        ? "bg-blue-600"
+                        ? "bg-[#2D6A4F]"
                         : "bg-orange-600"
                     }`}
                     style={{ width: `${utilizationPercent}%` }}
@@ -544,59 +489,25 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
         </Card>
       </div>
 
-      {/* Register Participant */}
-      {canEdit && (
-        <Card className="p-6 space-y-4">
-          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-            <UserPlus className="w-5 h-5" />
-            Register Participant
-          </h2>
-          <form onSubmit={handleRegisterParticipant} className="flex gap-3">
-            <input
-              type="text"
-              value={registerMemberId}
-              onChange={(e) => setRegisterMemberId(e.target.value)}
-              placeholder="Member ID"
-              className="flex-1 rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
-              required
-            />
-            <Button type="submit" disabled={registering}>
-              {registering ? "Registering…" : "Register"}
-            </Button>
-          </form>
-          {registerError && <p className="text-sm text-red-600">{registerError}</p>}
-          {registerSuccess && <p className="text-sm text-green-600">{registerSuccess}</p>}
-        </Card>
-      )}
-
-      {/* Participants list */}
-      {participants.length > 0 && (
-        <Card className="p-6 space-y-4">
-          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-            <Users className="w-5 h-5" />
-            Registered Participants ({participants.length})
-          </h2>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 bg-gray-50">
-                  <th className="px-4 py-3 text-left font-medium text-gray-700">Member Name</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-700">Member ID</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-700">Joined At</th>
-                </tr>
-              </thead>
-              <tbody>
-                {participants.map((p) => (
-                  <tr key={p.id} className="border-b border-gray-200 hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium text-gray-900">{p.member_name}</td>
-                    <td className="px-4 py-3 text-gray-600">{p.member_id}</td>
-                    <td className="px-4 py-3 text-gray-600">{formatDate(p.joined_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
+      {/*
+        Who was invited and who came. The old form asked for a raw member id
+        and posted a body the backend rejected, so no attendance could ever be
+        entered here — and attendance is what the audit and the oversight
+        officers read.
+      */}
+      {id && (
+        <AttendanceRegister
+          activityId={id}
+          cooperativeId={(activity as any)?.cooperative_id ?? null}
+          status={STATUS_API[formData.status as string] ?? String(formData.status ?? "").toLowerCase()}
+          canEdit={canEdit}
+          onSaved={() =>
+            api
+              .get<{ data: Participant[] }>(`/activities/${id}/participants`)
+              .then((res) => setParticipants(res.data ?? []))
+              .catch(() => undefined)
+          }
+        />
       )}
 
       {(formData.outcome || formData.impact) && (
@@ -641,7 +552,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
                   value={attachmentName}
                   onChange={(e) => setAttachmentName(e.target.value)}
                   placeholder="Document name (optional)"
-                  className="col-span-2 rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="col-span-2 rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
                 <input
                   type="file"
@@ -666,7 +577,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
                         href={att.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="font-medium text-[#2563EB] hover:underline truncate block"
+                        className="font-medium text-[#2D6A4F] hover:underline truncate block"
                       >
                         {att.name}
                       </a>
@@ -711,7 +622,7 @@ Last Modified Date: ${formatDate(activity.lastModifiedDate || "")}
                     entry.status === "Completed"
                       ? "bg-green-600"
                       : entry.status === "Ongoing"
-                      ? "bg-blue-600"
+                      ? "bg-[#2D6A4F]"
                       : "bg-gray-400"
                   }`}>
                     {idx + 1}

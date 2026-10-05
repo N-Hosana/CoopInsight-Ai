@@ -4,6 +4,8 @@ import { api } from "../services/api";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { Select } from "../components/Select";
+import { AuditRollup } from "../components/AuditRollup";
+import { GASABO_SECTORS } from "../data/gasaboData";
 import {
   Activity,
   MapPin,
@@ -47,11 +49,37 @@ interface AuditRow {
     flaggedOnSilenceAlone?: boolean;
     permitType?: string | null;
     permitExpiresOn?: string | null;
+    issues?: AuditIssue[];
   } | null;
   reasons: string[] | null;
   recommended_actions: string[] | null;
   period: string;
 }
+
+/** One rule a cooperative breached, as coded by the audit. */
+interface AuditIssue {
+  code: string;
+  component: string;
+  severity: "critical" | "major" | "minor";
+  title: string;
+  value: number | null;
+  threshold: number | null;
+  unit: string;
+}
+
+const ISSUE_SEVERITY_BADGE: Record<AuditIssue["severity"], string> = {
+  critical: "bg-red-100 text-red-700",
+  major: "bg-amber-100 text-amber-800",
+  minor: "bg-gray-100 text-gray-700",
+};
+
+/** A measured value in the unit the rule is written in. */
+const formatMeasure = (v: number | null, unit: string) => {
+  if (v == null) return "none";
+  if (unit === "ratio") return `${Math.round(v * 100)}%`;
+  if (unit === "months") return `${Number(v).toFixed(1)} mo`;
+  return `${v} ${unit}`;
+};
 
 interface Visit {
   id: string;
@@ -136,8 +164,17 @@ function StatTile({
 
 export function MonthlyAudit() {
   const { user } = useAuth();
+  // Every level of the oversight chain may run it: a sector officer over their
+  // own sector, the district office and the RCA over the district or one sector.
   const canRun =
     ["admin", "generalManager"].includes(user?.role ?? "") || user?.role === "government";
+  const isSectorOfficer = user?.role === "government" && user?.oversightLevel === "sector";
+  const [runSector, setRunSector] = useState("");
+  const scopeName = isSectorOfficer
+    ? `${user?.sector ?? "your"} sector`
+    : runSector
+      ? `${runSector} sector`
+      : "the district";
 
   const [rows, setRows] = useState<AuditRow[]>([]);
   const [visits, setVisits] = useState<Visit[]>([]);
@@ -149,12 +186,16 @@ export function MonthlyAudit() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [tab, setTab] = useState<"visits" | "standings">("visits");
+  const [tab, setTab] = useState<"visits" | "standings" | "rollup">("visits");
 
   const [visitForms, setVisitForms] = useState<
     Record<string, { findings: string; supportNeeded: string; outcome: string; scheduledFor: string }>
   >({});
   const [busyVisit, setBusyVisit] = useState<string | null>(null);
+  // Errors shown against the card being worked rather than at the top of
+  // the page. A visit card sits well below the fold, so a rejection
+  // rendered in the page header reads as the button doing nothing at all.
+  const [visitError, setVisitError] = useState<Record<string, string>>({});
 
   const load = async (p?: string) => {
     setLoading(true);
@@ -185,7 +226,9 @@ export function MonthlyAudit() {
     setError("");
     setMessage("");
     try {
-      const res = await api.post<{ message: string }>("/audits/monthly/run", {});
+      const res = await api.post<{ message: string }>("/audits/monthly/run", {
+        sector: isSectorOfficer ? undefined : runSector || undefined,
+      });
       setMessage(res.message);
       await load();
     } catch (err: any) {
@@ -201,12 +244,19 @@ export function MonthlyAudit() {
   const updateVisit = async (id: string, patch: Record<string, unknown>) => {
     setBusyVisit(id);
     setError("");
+    setVisitError((e) => ({ ...e, [id]: "" }));
     try {
       const res = await api.patch<{ message: string }>(`/audits/visits/${id}`, patch);
       setMessage(res.message);
       await load(period);
     } catch (err: any) {
-      setError(err?.message ?? "Could not update the visit.");
+      const text =
+        err?.status === 404
+          ? "This visit no longer exists — it may have been closed by another officer, or cleared " +
+            "when the audit was re-run. Refreshing the list."
+          : (err?.message ?? "Could not update the visit.");
+      setVisitError((e) => ({ ...e, [id]: text }));
+      if (err?.status === 404) await load(period);
     } finally {
       setBusyVisit(null);
     }
@@ -229,18 +279,33 @@ export function MonthlyAudit() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Monthly cooperative audit</h1>
           <p className="text-gray-600 mt-1 max-w-3xl">
-            Every cooperative in the district scored on whether it is still functioning and whether
-            its members are still engaged. The bottom of the list becomes visits, so a cooperative
-            that has gone quiet is found while something can still be done about it.
+            Every cooperative scored on whether it is still functioning and whether its members are
+            still engaged, with the results rolled up to sector and district level so that failures
+            shared across a sector are seen as one problem. The bottom of the list becomes visits.
           </p>
         </div>
         {canRun && (
-          <Button variant="primary" onClick={runAudit} disabled={running}>
-            <span className="flex items-center gap-2">
-              <Play className="w-4 h-4" />
-              {running ? "Running…" : "Run this month's audit"}
-            </span>
-          </Button>
+          <div className="flex flex-wrap items-end gap-3">
+            {!isSectorOfficer && (
+              <div className="w-52">
+                <Select
+                  label="Audit scope"
+                  value={runSector}
+                  onChange={(e) => setRunSector(e.target.value)}
+                  options={[
+                    { value: "", label: "Whole district" },
+                    ...GASABO_SECTORS.map((s) => ({ value: s.name, label: `${s.name} sector` })),
+                  ]}
+                />
+              </div>
+            )}
+            <Button variant="primary" onClick={runAudit} disabled={running}>
+              <span className="flex items-center gap-2">
+                <Play className="w-4 h-4" />
+                {running ? "Running…" : `Audit ${scopeName}`}
+              </span>
+            </Button>
+          </div>
         )}
       </div>
 
@@ -259,8 +324,8 @@ export function MonthlyAudit() {
           <p className="font-medium text-gray-900 mt-3">No audit has been run yet</p>
           <p className="text-sm text-gray-500 mt-1 max-w-md mx-auto">
             {canRun
-              ? "Run the audit to score every cooperative in the district and raise the visit list. The AI service must be running."
-              : "The district office has not yet run a monthly audit."}
+              ? "Run the audit for the district or one sector to score its cooperatives and raise the visit list. The AI service must be running."
+              : "No monthly audit has been run yet."}
           </p>
         </Card>
       ) : (
@@ -276,7 +341,7 @@ export function MonthlyAudit() {
 
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="inline-flex rounded-lg border border-gray-200 p-1">
-              {(["visits", "standings"] as const).map((t) => (
+              {(["visits", "standings", "rollup"] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => setTab(t)}
@@ -284,7 +349,11 @@ export function MonthlyAudit() {
                     tab === t ? "bg-[#2D6A4F] text-white" : "text-gray-600 hover:bg-gray-50"
                   }`}
                 >
-                  {t === "visits" ? `Visit list (${openVisits.length})` : "District standings"}
+                  {t === "visits"
+                    ? `Visit list (${openVisits.length})`
+                    : t === "standings"
+                      ? "Cooperative results"
+                      : "Sector & district results"}
                 </button>
               ))}
             </div>
@@ -306,14 +375,18 @@ export function MonthlyAudit() {
             )}
           </div>
 
-          {tab === "visits" ? (
+          {tab === "rollup" ? (
+            <AuditRollup period={period} />
+          ) : tab === "visits" ? (
             <div className="space-y-4">
               {openVisits.length === 0 ? (
                 <Card className="p-10 text-center">
                   <CheckCircle2 className="w-8 h-8 text-[#2D6A4F] mx-auto" />
-                  <p className="font-medium text-gray-900 mt-3">Nobody needs a visit</p>
-                  <p className="text-sm text-gray-500 mt-1">
-                    Every cooperative in scope is trading, meeting and keeping its members engaged.
+                  <p className="font-medium text-gray-900 mt-3">No visits on the list</p>
+                  <p className="text-sm text-gray-500 mt-1 max-w-md mx-auto">
+                    Either every cooperative in scope is trading, meeting and keeping its members
+                    engaged — or this month has not been assessed yet. The visit list is produced by
+                    running the monthly audit, using <strong>Run the audit</strong> above.
                   </p>
                 </Card>
               ) : (
@@ -468,9 +541,40 @@ export function MonthlyAudit() {
                           </div>
                         </div>
 
+                        {visitError[v.id] && (
+                          <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                            {visitError[v.id]}
+                          </p>
+                        )}
+
+                        {/*
+                          The server refuses a close without findings of at
+                          least 20 characters and an outcome. Enforcing the same
+                          two rules here means the button is only live when it
+                          will actually succeed, and the reason is under the
+                          cursor rather than in a banner off the top of the page.
+                        */}
+                        {(form.findings.trim().length < 20 || !form.outcome) && (
+                          <p className="text-xs text-gray-500">
+                            To close this visit you need{" "}
+                            {form.findings.trim().length < 20 && (
+                              <strong>
+                                {20 - form.findings.trim().length} more character
+                                {20 - form.findings.trim().length === 1 ? "" : "s"} of findings
+                              </strong>
+                            )}
+                            {form.findings.trim().length < 20 && !form.outcome && " and "}
+                            {!form.outcome && <strong>an outcome</strong>}.
+                          </p>
+                        )}
+
                         <Button
                           variant="primary"
-                          disabled={busyVisit === v.id}
+                          disabled={
+                            busyVisit === v.id ||
+                            form.findings.trim().length < 20 ||
+                            !form.outcome
+                          }
                           onClick={() =>
                             updateVisit(v.id, {
                               status: "completed",
@@ -520,7 +624,7 @@ export function MonthlyAudit() {
               )}
             </div>
           ) : (
-            /* District standings */
+            /* Cooperative results */
             <Card className="p-6">
               <div className="space-y-3">
                 {rows.map((r) => {
@@ -545,6 +649,11 @@ export function MonthlyAudit() {
                               {signals.flaggedOnSilenceAlone && (
                                 <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-700">
                                   <Info className="w-3 h-3" /> Flagged on missing records
+                                </span>
+                              )}
+                              {signals.issues?.some((i) => i.severity === "critical") && (
+                                <span className="rounded-full bg-red-600 px-2 py-0.5 text-xs font-semibold text-white">
+                                  {signals.issues.filter((i) => i.severity === "critical").length} critical finding(s)
                                 </span>
                               )}
                             </div>
@@ -607,6 +716,42 @@ export function MonthlyAudit() {
                             </div>
                           )}
 
+                          {signals.issues && signals.issues.length > 0 && (
+                            <div className="overflow-x-auto">
+                              <p className="text-xs uppercase tracking-wide text-gray-500 mb-2">
+                                Findings ({signals.issues.length})
+                              </p>
+                              <table className="w-full text-sm">
+                                <thead>
+                                  <tr className="border-b border-gray-200 text-left text-xs uppercase tracking-wide text-gray-500">
+                                    <th className="py-1.5 pr-3">Code</th>
+                                    <th className="py-1.5 pr-3">Finding</th>
+                                    <th className="py-1.5 pr-3">Severity</th>
+                                    <th className="py-1.5 pr-3 text-right">Measured</th>
+                                    <th className="py-1.5 pr-3 text-right">Threshold</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {signals.issues.map((i) => (
+                                    <tr key={i.code} className="border-b border-gray-100">
+                                      <td className="py-1.5 pr-3 font-mono text-xs">{i.code}</td>
+                                      <td className="py-1.5 pr-3 text-gray-900">{i.title}</td>
+                                      <td className="py-1.5 pr-3">
+                                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${ISSUE_SEVERITY_BADGE[i.severity]}`}>
+                                          {i.severity}
+                                        </span>
+                                      </td>
+                                      <td className="py-1.5 pr-3 text-right tabular-nums">{formatMeasure(i.value, i.unit)}</td>
+                                      <td className="py-1.5 pr-3 text-right tabular-nums text-gray-500">
+                                        {i.threshold == null ? "—" : formatMeasure(i.threshold, i.unit)}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
                           {r.reasons && r.reasons.length > 0 && (
                             <div>
                               <p className="text-xs uppercase tracking-wide text-gray-500 mb-2">
@@ -663,7 +808,7 @@ export function MonthlyAudit() {
           <div className="flex items-start gap-3">
             <Inbox className="w-5 h-5 text-gray-400 mt-0.5" />
             <p className="text-sm text-gray-600">
-              Nothing to show yet. The district office runs this audit monthly.
+              Nothing to show yet. The audit is run monthly by the sector, district or RCA office.
             </p>
           </div>
         </Card>

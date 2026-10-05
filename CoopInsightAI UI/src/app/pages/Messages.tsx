@@ -26,6 +26,22 @@ interface Message {
   replies: Reply[];
 }
 
+interface Recipient {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  oversight_level: string | null;
+  cooperative_name: string | null;
+}
+
+/** The audiences the server says this account may address. */
+interface CanSend {
+  personal: boolean;
+  cooperative: { cooperativeId: string; cooperativeName: string | null } | null;
+  broadcast: { scope: string; sector: string | null; label: string } | null;
+}
+
 export function Messages() {
   const { user } = useAuth();
   const location = useLocation();
@@ -37,22 +53,32 @@ export function Messages() {
   const [replyText, setReplyText] = useState("");
   const [showCompose, setShowCompose] = useState(false);
   const [sendError, setSendError] = useState("");
+  const [sendResult, setSendResult] = useState<string>("");
   const [composeForm, setComposeForm] = useState({
     receiver_id: "",
     subject: "",
     body: "",
-    type: "personal" as "personal" | "broadcast",
+    type: "personal" as "personal" | "broadcast" | "cooperative",
   });
-  const [userOptions, setUserOptions] = useState<{ id: string; name: string; email: string }[]>([]);
+  const [userOptions, setUserOptions] = useState<Recipient[]>([]);
+  const [canSend, setCanSend] = useState<CanSend | null>(null);
 
-  // Fetch available recipients (all users except self)
+  // Who this account may write to, and which audiences it may address.
+  //
+  // This replaced a call to /members. A message is addressed to a user ACCOUNT;
+  // the member register is a different table with no foreign key to it, so
+  // sending a member id produced a foreign-key violation on every personal
+  // message and surfaced as a bare "Server error".
   useEffect(() => {
-    if (user?.role !== "member") {
-      api.get<any>("/members?page=1&limit=100").then((res: any) => {
-        const list: any[] = (res as any).data ?? [];
-        setUserOptions(list.map((m: any) => ({ id: m.id, name: m.full_name ?? m.name, email: m.email ?? "" })));
-      }).catch(() => {});
-    }
+    api
+      .get<{ data: Recipient[]; canSend: CanSend }>("/messages/recipients")
+      .then((res) => {
+        setUserOptions(res.data ?? []);
+        setCanSend(res.canSend);
+      })
+      .catch(() => {
+        /* compose still works; the recipient list is just empty */
+      });
   }, [user?.role]);
 
   // Handle navigation state from Notifications / SecurityAudit broadcast buttons
@@ -141,6 +167,11 @@ export function Messages() {
       const res = await api.post<any>("/messages", payload);
       const newMessage = (res as any).data ?? res;
       setMessages((prev) => [newMessage, ...prev]);
+      // The server reports how far this actually reached — most people on a
+      // cooperative's register have no login, and the sender needs to know
+      // that rather than assume everyone saw it.
+      const reachNote = res?.reach?.note ? ` ${res.reach.note}` : "";
+      setSendResult(`${res?.message ?? "Message sent."}${reachNote}`);
       setComposeForm({ receiver_id: "", subject: "", body: "", type: "personal" });
       setShowCompose(false);
     } catch (err: any) {
@@ -154,6 +185,10 @@ export function Messages() {
   };
 
   const filteredMessages = messages.filter((msg) => {
+    // getMessageType already folds anything without a named recipient into
+    // "broadcast", so a manager's message to their own cooperative lands under
+    // Announcements alongside a district one — which is how a reader thinks of
+    // it: addressed to a group rather than to them.
     const type = getMessageType(msg);
     const matchesFilter = filter === "all" || type === filter;
     const matchesSearch =
@@ -182,6 +217,19 @@ export function Messages() {
 
   return (
     <div className="space-y-6">
+      {sendResult && (
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 flex items-start justify-between gap-4">
+          <span>{sendResult}</span>
+          <button
+            onClick={() => setSendResult("")}
+            className="text-green-900/60 hover:text-green-900 shrink-0"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-foreground">Messages</h1>
@@ -193,7 +241,7 @@ export function Messages() {
         </div>
         {user?.role !== "member" ? (
           <button
-            onClick={() => setShowCompose(true)}
+            onClick={() => { setShowCompose(true); setSendResult(""); }}
             className="flex items-center gap-2 px-4 py-2 bg-[#2D6A4F] text-white rounded-lg hover:bg-[#1B4332] transition-colors"
           >
             <Plus className="w-4 h-4" />
@@ -219,33 +267,74 @@ export function Messages() {
               {sendError && (
                 <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">{sendError}</div>
               )}
-              {user?.role !== "member" && (
-                <div>
-                  <label className="block text-sm font-medium text-card-foreground mb-2">Message Type</label>
-                  <div className="flex gap-4">
-                    <label className="flex items-center gap-2 cursor-pointer">
+              {/* Only the audiences this account may actually address are
+                  offered, and each says plainly who will receive it. */}
+              <div>
+                <label className="block text-sm font-medium text-card-foreground mb-2">
+                  Who is this for?
+                </label>
+                <div className="space-y-2">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      value="personal"
+                      checked={composeForm.type === "personal"}
+                      onChange={(e) => setComposeForm({ ...composeForm, type: e.target.value as any })}
+                      className="mt-0.5 w-4 h-4 text-[#2D6A4F] focus:ring-[#2D6A4F]"
+                    />
+                    <span className="text-sm text-card-foreground">
+                      One person
+                      <span className="block text-xs text-muted-foreground">
+                        A single account you choose below.
+                      </span>
+                    </span>
+                  </label>
+
+                  {canSend?.cooperative && (
+                    <label className="flex items-start gap-2 cursor-pointer">
                       <input
                         type="radio"
-                        value="personal"
-                        checked={composeForm.type === "personal"}
+                        value="cooperative"
+                        checked={composeForm.type === "cooperative"}
                         onChange={(e) => setComposeForm({ ...composeForm, type: e.target.value as any })}
-                        className="w-4 h-4 text-[#2D6A4F] focus:ring-[#2D6A4F]"
+                        className="mt-0.5 w-4 h-4 text-[#2D6A4F] focus:ring-[#2D6A4F]"
                       />
-                      <span className="text-sm text-card-foreground">Personal Message</span>
+                      <span className="text-sm text-card-foreground">
+                        My whole cooperative
+                        <span className="block text-xs text-muted-foreground">
+                          Every account attached to {canSend.cooperative.cooperativeName}.
+                        </span>
+                      </span>
                     </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
+                  )}
+
+                  {canSend?.broadcast && (
+                    <label className="flex items-start gap-2 cursor-pointer">
                       <input
                         type="radio"
                         value="broadcast"
                         checked={composeForm.type === "broadcast"}
                         onChange={(e) => setComposeForm({ ...composeForm, type: e.target.value as any })}
-                        className="w-4 h-4 text-[#2D6A4F] focus:ring-[#2D6A4F]"
+                        className="mt-0.5 w-4 h-4 text-[#2D6A4F] focus:ring-[#2D6A4F]"
                       />
-                      <span className="text-sm text-card-foreground">Broadcast to All Members</span>
+                      <span className="text-sm text-card-foreground">
+                        Broadcast
+                        <span className="block text-xs text-muted-foreground">
+                          {canSend.broadcast.label}.
+                        </span>
+                      </span>
                     </label>
-                  </div>
+                  )}
                 </div>
-              )}
+
+                {composeForm.type !== "personal" && (
+                  <p className="mt-3 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-900">
+                    This reaches people who hold a <strong>login</strong>. Members who are only on
+                    the register will not see it — use the SMS panel for those. You will be told
+                    how many of each after sending.
+                  </p>
+                )}
+              </div>
 
               {composeForm.type === "personal" && (
                 <div>
@@ -258,7 +347,16 @@ export function Messages() {
                     >
                       <option value="">— Select recipient —</option>
                       {userOptions.map((u) => (
-                        <option key={u.id} value={u.id}>{u.name}{u.email ? ` (${u.email})` : ""}</option>
+                        <option key={u.id} value={u.id}>
+                          {u.name}
+                          {u.cooperative_name
+                            ? ` — ${u.cooperative_name}`
+                            : u.oversight_level
+                              ? ` — ${u.oversight_level.toUpperCase()} officer`
+                              : u.role
+                                ? ` — ${u.role}`
+                                : ""}
+                        </option>
                       ))}
                     </select>
                   ) : (
@@ -364,7 +462,7 @@ export function Messages() {
                     : "bg-muted text-muted-foreground hover:bg-muted/80"
                 }`}
               >
-                Broadcast
+                Announcements
               </button>
             </div>
           </div>

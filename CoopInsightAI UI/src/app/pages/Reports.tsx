@@ -1,689 +1,587 @@
 import { useEffect, useMemo, useState } from "react";
 import { Card } from "../components/Card";
-import { FileText, Download, Calendar, Eye } from "lucide-react";
 import { Button } from "../components/Button";
+import { Input } from "../components/Input";
+import { Select } from "../components/Select";
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../services/api";
+import {
+  FileText,
+  Download,
+  Eye,
+  X,
+  CalendarClock,
+  Trash2,
+  Plus,
+  AlertTriangle,
+  Wallet,
+  Users,
+  PiggyBank,
+  Landmark,
+  ShieldCheck,
+  BarChart3,
+} from "lucide-react";
 
-interface Report {
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * REPORTS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * This page had eight panels — a template generator, an export-options picker,
+ * a charts toggle, a custom report builder, an executive-summary previewer, a
+ * report library, an available-reports list and a history archive — and most of
+ * them fabricated their contents in the browser and threw them away on reload.
+ * The schedules were a hardcoded array with fictional recipients, and the View
+ * and Download buttons opened `file_url`, which the backend always set to the
+ * literal string "pending".
+ *
+ * What is actually needed is three things, so there are three:
+ *
+ *   1. GENERATE   pick what kind of report, over what period, for whom
+ *   2. YOUR REPORTS  what has been generated, grouped by kind, each one
+ *                    genuinely viewable and downloadable
+ *   3. SCHEDULES  reports that run on a timetable, created and deleted here
+ *
+ * The classifications are kept — they are how anyone finds anything — but every
+ * button now does what it says.
+ */
+
+interface Template {
+  id: string;
+  name: string;
+  description: string;
+  type: string;
+  parameters: string[];
+}
+
+interface ReportRow {
   id: string;
   title: string;
   type: string;
-  status: string;
-  period: string;
-  generated_at: string;
-  cooperative_name: string;
-  file_url?: string;
-  // local-only fields for custom/template-generated reports
-  description?: string;
-  date?: string;
-  cooperative?: string;
-  content?: {
-    summary: string;
-    sections: Array<{
-      title: string;
-      data: Array<{ label: string; value: string }>;
-    }>;
-    recommendations: string[];
-  };
+  format: string;
+  file_url: string | null;
+  row_count: number | null;
+  period_from: string | null;
+  period_to: string | null;
+  generated_at: string | null;
+  created_at: string;
+  cooperative_id: string | null;
 }
 
-interface ScheduledReport {
+interface ReportContent {
+  title: string;
+  type: string;
+  cooperativeName: string | null;
+  periodFrom: string | null;
+  periodTo: string | null;
+  generatedAt: string;
+  summary: Array<{ label: string; value: string }>;
+  sections: Array<{ title: string; note?: string; columns: string[]; rows: Array<Array<string | number | null>> }>;
+  rowCount: number;
+}
+
+interface Schedule {
   id: string;
   title: string;
+  type: string;
   frequency: string;
-  nextRun: string;
-  status: string;
-  recipients: string[];
+  format: string;
+  recipients: string[] | string;
+  next_run_at: string | null;
+  active: boolean;
 }
 
-const templates = [
-  { id: "financial", name: "Financial Report", description: "Revenue, expenses, and performance metrics for a selected cooperative." },
-  { id: "membership", name: "Membership Report", description: "Member engagement, attendance and retention analysis." },
-  { id: "activity", name: "Activity Outcomes Report", description: "Activity performance, outcomes, and resource utilization." },
-  { id: "compliance", name: "Compliance Report", description: "Regulatory readiness, audit status, and risk areas." },
-];
+/** How each classification is presented. Icons make the list scannable. */
+const TYPE_STYLE: Record<string, { icon: typeof FileText; tone: string }> = {
+  financial_summary: { icon: Wallet, tone: "bg-[#2D6A4F]/10 text-[#2D6A4F]" },
+  member_activity: { icon: Users, tone: "bg-indigo-100 text-indigo-700" },
+  savings_growth: { icon: PiggyBank, tone: "bg-emerald-100 text-emerald-700" },
+  loan_performance: { icon: Landmark, tone: "bg-amber-100 text-amber-800" },
+  compliance: { icon: ShieldCheck, tone: "bg-purple-100 text-purple-700" },
+  budget_variance: { icon: BarChart3, tone: "bg-sky-100 text-sky-700" },
+  annual: { icon: FileText, tone: "bg-gray-100 text-gray-700" },
+};
 
-const scheduledReports: ScheduledReport[] = [
-  { id: "S1", title: "Weekly Compliance Summary", frequency: "Weekly", nextRun: "2026-04-21", status: "Scheduled", recipients: ["compliance@gov.rw"] },
-  { id: "S2", title: "Monthly Performance Dashboard", frequency: "Monthly", nextRun: "2026-05-01", status: "Scheduled", recipients: ["minister@gov.rw", "audit@gov.rw"] },
-  { id: "S3", title: "Quarterly Member Engagement Review", frequency: "Quarterly", nextRun: "2026-06-30", status: "Scheduled", recipients: ["membership@gov.rw"] },
-];
+const FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "annually"];
 
-const reportTypes = ["All", "Financial", "Membership", "Activity", "Compliance", "Custom"];
+const formatDate = (v: string | null) =>
+  v ? new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "—";
+
+/** First of the month twelve months back, and today — a sensible default span. */
+const defaultRange = () => {
+  const to = new Date();
+  const from = new Date(to.getFullYear() - 1, to.getMonth(), 1);
+  return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+};
 
 export function Reports() {
   const { user } = useAuth();
+  const isOversight = ["admin", "generalManager", "government"].includes(user?.role ?? "");
 
-  const [reportList, setReportList] = useState<Report[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [reports, setReports] = useState<ReportRow[]>([]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [cooperatives, setCooperatives] = useState<Array<{ id: string; name: string }>>([]);
+
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
 
-  const [activeType, setActiveType] = useState<string>("All");
-  const [selectedCooperative, setSelectedCooperative] = useState<string>("All Cooperatives");
-  const [dateRange, setDateRange] = useState({ start: "2026-03-01", end: "2026-04-30" });
-  const [selectedTemplate, setSelectedTemplate] = useState<string>(templates[0].id);
-  const [includeGraphs, setIncludeGraphs] = useState(true);
-  const [includeExecutiveSummary] = useState(true);
-  const [includeChatSummary, setIncludeChatSummary] = useState(true);
-  const [customTitle, setCustomTitle] = useState("");
-  const [customDescription, setCustomDescription] = useState("");
-  const [customSections, setCustomSections] = useState<{ title: string; value: string }[]>([
-    { title: "Executive Summary", value: "" },
-  ]);
-  const [customExecutiveSummary, setCustomExecutiveSummary] = useState("");
-  const [showReportHistory, setShowReportHistory] = useState(false);
-  const [exportFormat, setExportFormat] = useState<"txt" | "pdf" | "xlsx">("txt");
-  const [cooperativeOptions, setCooperativeOptions] = useState<string[]>(["All Cooperatives"]);
-
-  const isReportAllAllowed =
-    user?.role === "admin" || user?.role === "government" || user?.role === "generalManager";
-  const effectiveSelectedCooperative =
-    !isReportAllAllowed && user?.cooperativeName ? user.cooperativeName : selectedCooperative;
-  const visibleCooperativeOptions = isReportAllAllowed
-    ? cooperativeOptions
-    : user?.cooperativeName
-    ? [user.cooperativeName]
-    : ["All Cooperatives"];
-
-  useEffect(() => {
-    if (!isReportAllAllowed && user?.cooperativeName) {
-      setSelectedCooperative(user.cooperativeName);
-    }
-  }, [isReportAllAllowed, user?.cooperativeName]);
-
-  useEffect(() => {
-    const fetchReports = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const coopParam = effectiveSelectedCooperative === "All Cooperatives" ? "" : effectiveSelectedCooperative;
-        const typeParam = activeType === "All" ? "" : activeType;
-        const data = await api.get<any>(
-          `/reports?page=1&limit=100&type=${encodeURIComponent(typeParam)}&cooperative_id=${encodeURIComponent(coopParam)}`
-        );
-        const fetched: any[] = (data as any).data ?? [];
-        setReportList(fetched);
-
-        // Build cooperative options from fetched data for admin/government users
-        if (isReportAllAllowed) {
-          const names = Array.from(
-            new Set(
-              fetched
-                .map((r: any) => r.cooperative_name)
-                .filter((n: unknown): n is string => typeof n === "string" && n.length > 0)
-            )
-          );
-          setCooperativeOptions(["All Cooperatives", ...names]);
-        }
-      } catch (err: any) {
-        setError(err?.message ?? "Failed to load reports.");
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchReports();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Normalise a report record so older local fields and API fields both work
-  const normalise = (r: Report) => ({
-    ...r,
-    displayDate: r.generated_at
-      ? new Date(r.generated_at).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
-      : r.date ?? "",
-    displayCoop: r.cooperative_name || r.cooperative || "",
+  const range = defaultRange();
+  const [form, setForm] = useState({
+    type: "financial_summary",
+    from: range.from,
+    to: range.to,
+    cooperativeId: "",
   });
 
-  const filteredReports = useMemo(() => {
-    return reportList
-      .map(normalise)
-      .filter((report) => {
-        const typeMatch = activeType === "All" || report.type === activeType;
-        const coopMatch =
-          effectiveSelectedCooperative === "All Cooperatives"
-            ? isReportAllAllowed
-            : report.displayCoop === effectiveSelectedCooperative;
-        const rawDate = report.generated_at || report.date || "";
-        const reportDate = rawDate ? new Date(rawDate) : null;
-        const startDate = new Date(dateRange.start);
-        const endDate = new Date(dateRange.end);
-        const dateMatch = !reportDate || (reportDate >= startDate && reportDate <= endDate);
-        return typeMatch && coopMatch && dateMatch;
-      });
-  }, [activeType, effectiveSelectedCooperative, dateRange, reportList, isReportAllAllowed]);
+  const [filter, setFilter] = useState("All");
+  const [viewing, setViewing] = useState<ReportContent | null>(null);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [scheduleForm, setScheduleForm] = useState({
+    type: "financial_summary",
+    frequency: "monthly",
+    recipients: user?.email ?? "",
+  });
 
-  const downloadReport = (report: Report & { displayDate?: string; displayCoop?: string }, format: "txt" | "pdf" | "xlsx" = "txt") => {
-    if (report.file_url) {
-      const a = document.createElement("a");
-      a.href = report.file_url;
-      a.download = `${report.title.replace(/\s+/g, "_")}.${format}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      return;
-    }
-    const lines = [
-      report.title,
-      `Generated: ${report.displayDate || report.generated_at || report.date || ""}`,
-      `Type: ${report.type}`,
-      `Cooperative: ${report.displayCoop || ""}`,
-    ];
-    if (report.content) {
-      lines.push("", "EXECUTIVE SUMMARY", report.content.summary, "");
-      report.content.sections.forEach((section) => {
-        lines.push(section.title.toUpperCase());
-        section.data.forEach((item) => lines.push(`${item.label}: ${item.value}`));
-        lines.push("");
-      });
-      lines.push("RECOMMENDATIONS");
-      report.content.recommendations.forEach((rec, i) => lines.push(`${i + 1}. ${rec}`));
-    }
-    const blob = new Blob([lines.join("\n")], {
-      type:
-        format === "xlsx"
-          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          : format === "pdf"
-          ? "application/pdf"
-          : "text/plain",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${report.title.replace(/\s+/g, "_")}.${format}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const generateExecutiveSummary = () => {
-    const header = customTitle || "Custom Report";
-    const overview = customDescription
-      ? `${customDescription.trim()}`
-      : "This custom report provides a tailored cooperative view.";
-    const sectionDetails = customSections
-      .filter((section) => section.title && section.value)
-      .map((section) => `${section.title}: ${section.value}`)
-      .join(" ");
-    const summary = `${header}. ${overview} ${sectionDetails}`;
-    setCustomExecutiveSummary(summary);
-    return summary;
-  };
-
-  const handleCreateCustomReport = () => {
-    if (!customTitle) return;
-    const reportCooperative =
-      effectiveSelectedCooperative === "All Cooperatives" ? "Portfolio" : effectiveSelectedCooperative;
-    const summaryText = customExecutiveSummary || generateExecutiveSummary();
-    const newReport: Report = {
-      id: `local-${Date.now()}`,
-      title: customTitle,
-      description: customDescription || "Custom report generated from user inputs.",
-      date: new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
-      generated_at: new Date().toISOString(),
-      type: "Custom",
-      status: "Generated",
-      period: `${dateRange.start} – ${dateRange.end}`,
-      cooperative_name: reportCooperative,
-      cooperative: reportCooperative,
-      content: {
-        summary: summaryText,
-        sections: customSections
-          .filter((section) => section.title && section.value)
-          .map((section) => ({ title: section.title, data: [{ label: section.title, value: section.value }] })),
-        recommendations: ["Review the custom report and refine it with your management team."],
-      },
-    };
-    setReportList([newReport, ...reportList]);
-    setCustomTitle("");
-    setCustomDescription("");
-    setCustomSections([{ title: "Executive Summary", value: "" }]);
-    setCustomExecutiveSummary("");
-  };
-
-  const addCustomSection = () => {
-    setCustomSections((prev) => [...prev, { title: "", value: "" }]);
-  };
-
-  const updateCustomSection = (index: number, field: "title" | "value", value: string) => {
-    setCustomSections((prev) =>
-      prev.map((section, idx) => (idx === index ? { ...section, [field]: value } : section))
-    );
-  };
-
-  const handleGenerateReport = async () => {
-    const template = templates.find((item) => item.id === selectedTemplate);
-    if (!template) return;
-
-    const reportCooperative =
-      effectiveSelectedCooperative === "All Cooperatives" ? "Portfolio" : effectiveSelectedCooperative;
-
-    setGenerating(true);
+  const load = async () => {
+    setLoading(true);
     try {
-      const typeMap: Record<string, string> = {
-        "Financial Report": "financial_summary",
-        "Membership Report": "member_activity",
-        "Activity Outcomes Report": "member_activity",
-        "Compliance Report": "compliance",
-      };
-      const data = await api.post<any>("/reports/generate", {
-        type: typeMap[template.name] ?? "financial_summary",
-        title: `${template.name} - ${reportCooperative}`,
-        from: dateRange.start,
-        to: dateRange.end,
-        format: exportFormat === "txt" ? "pdf" : exportFormat,
-      });
-      if ((data as any).data) {
-        setReportList((prev) => [(data as any).data, ...prev]);
-      }
+      const [t, r, s] = await Promise.all([
+        api.get<{ data: Template[] }>("/reports/templates"),
+        api.get<{ data: ReportRow[] }>("/reports?limit=50"),
+        api.get<{ data: Schedule[] }>("/reports/schedules"),
+      ]);
+      setTemplates(t.data ?? []);
+      setReports(r.data ?? []);
+      setSchedules(s.data ?? []);
     } catch (err: any) {
-      // Fallback: add a local placeholder so the user sees something
-      const newReport: Report = {
-        id: `local-${Date.now()}`,
-        title: `${template.name} - ${reportCooperative}`,
-        description: template.description,
-        date: new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
-        generated_at: new Date().toISOString(),
-        type:
-          template.name === "Financial Report"
-            ? "Financial"
-            : template.name === "Membership Report"
-            ? "Membership"
-            : template.name === "Activity Outcomes Report"
-            ? "Activity"
-            : "Compliance",
-        status: "Generated",
-        period: `${dateRange.start} – ${dateRange.end}`,
-        cooperative_name: reportCooperative,
-        cooperative: reportCooperative,
-        content: {
-          summary: includeExecutiveSummary
-            ? `Generated executive summary for ${template.name.toLowerCase()} with optional chart and chat content.`
-            : "Executive summary not included.",
-          sections: [
-            {
-              title: "Template Overview",
-              data: [
-                { label: "Template", value: template.name },
-                { label: "Cooperative", value: reportCooperative },
-                { label: "Charts Included", value: includeGraphs ? "Yes" : "No" },
-                { label: "Chat Summary", value: includeChatSummary ? "Enabled" : "Disabled" },
-              ],
-            },
-          ],
-          recommendations: [
-            `Use the ${template.name.toLowerCase()} to brief management and regulators.`,
-            "Share the report in PDF or Excel format for executive review.",
-          ],
-        },
-      };
-      setReportList((prev) => [newReport, ...prev]);
+      setError(err?.message ?? "Could not load reports.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    if (isOversight) {
+      api
+        .get<{ data: Array<{ id: string; name: string }> }>("/cooperatives?limit=100")
+        .then((r) => setCooperatives(r.data ?? []))
+        .catch(() => setCooperatives([]));
+    }
+  }, []);
+
+  const generate = async () => {
+    setGenerating(true);
+    setError("");
+    setMessage("");
+    try {
+      const res = await api.post<{ message: string }>("/reports/generate", {
+        type: form.type,
+        from: form.from,
+        to: form.to,
+        format: "csv",
+        cooperativeId: form.cooperativeId || undefined,
+      });
+      setMessage(res.message);
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not generate the report.");
     } finally {
       setGenerating(false);
     }
   };
 
+  /** Opens the stored content in a panel — this is what "View" means. */
+  const view = async (report: ReportRow) => {
+    setBusy(report.id);
+    setError("");
+    try {
+      const token = localStorage.getItem("coopinsight_access_token");
+      const res = await fetch(`${BASE_URL}/reports/${report.id}/download?format=json`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message ?? "Could not open this report.");
+      }
+      setViewing(await res.json());
+    } catch (err: any) {
+      setError(err?.message ?? "Could not open this report.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Downloads the real file.
+   *
+   * It goes through fetch rather than a plain link because the endpoint needs
+   * the bearer token; the blob is then handed to the browser as a save.
+   */
+  const download = async (report: ReportRow, format: "csv" | "json") => {
+    setBusy(report.id);
+    setError("");
+    try {
+      const token = localStorage.getItem("coopinsight_access_token");
+      const res = await fetch(`${BASE_URL}/reports/${report.id}/download?format=${format}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message ?? "Could not download this report.");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${report.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err?.message ?? "Could not download this report.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const createSchedule = async () => {
+    const recipients = scheduleForm.recipients
+      .split(",")
+      .map((r) => r.trim())
+      .filter(Boolean);
+    if (!recipients.length) return setError("Who should the scheduled report go to?");
+
+    setBusy("schedule");
+    setError("");
+    try {
+      await api.post("/reports/schedule", {
+        type: scheduleForm.type,
+        frequency: scheduleForm.frequency,
+        format: "csv",
+        recipients,
+      });
+      setMessage("Schedule created.");
+      setShowSchedule(false);
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not create the schedule.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const deleteSchedule = async (id: string) => {
+    setBusy(id);
+    setError("");
+    try {
+      await api.delete(`/reports/schedules/${id}`);
+      setMessage("Schedule removed.");
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not remove the schedule.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const nameFor = (type: string) =>
+    templates.find((t) => t.type === type)?.name ?? type.replace(/_/g, " ");
+
+  const visible = useMemo(
+    () => (filter === "All" ? reports : reports.filter((r) => r.type === filter)),
+    [reports, filter]
+  );
+
+  /** Counts per classification, so the filter chips carry their own evidence. */
+  const counts = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const r of reports) out[r.type] = (out[r.type] ?? 0) + 1;
+    return out;
+  }, [reports]);
+
+  if (loading) return <p className="text-gray-500">Loading reports…</p>;
+
   return (
-    <div className="max-w-[1440px] mx-auto">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Reports</h1>
-          <p className="text-gray-600 mt-2">Generate, filter, export, and schedule cooperative reports.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={handleGenerateReport} disabled={generating}>
-            <FileText className="w-4 h-4 mr-2" />
-            {generating ? "Generating…" : "Generate Report"}
-          </Button>
-        </div>
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold text-gray-900">Reports</h1>
+        <p className="text-gray-600 mt-1 max-w-3xl">
+          Generate a report from the cooperative's own records, read it here, and download it as a
+          spreadsheet. Every report is a snapshot: it keeps the figures as they stood when it was
+          run, so it still means the same thing when it is read months later.
+        </p>
       </div>
 
+      {message && (
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          {message}
+        </div>
+      )}
       {error && (
-        <div className="mb-6 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </div>
       )}
 
-      <Card className="p-6 mb-8">
-        <div className="grid gap-4 xl:grid-cols-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Report Type</label>
-            <select
-              className="w-full rounded-lg border border-gray-300 px-4 py-3"
-              value={activeType}
-              onChange={(event) => setActiveType(event.target.value)}
-            >
-              {reportTypes.map((type) => (
-                <option key={type} value={type}>
-                  {type}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Cooperative Filter</label>
-            {isReportAllAllowed ? (
-              <select
-                className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                value={selectedCooperative}
-                onChange={(event) => setSelectedCooperative(event.target.value)}
-              >
-                {visibleCooperativeOptions.map((cooperative) => (
-                  <option key={cooperative} value={cooperative}>
-                    {cooperative}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div className="w-full rounded-lg border border-gray-300 bg-gray-50 px-4 py-3 text-gray-700">
-                {user?.cooperativeName || "My Cooperative"}
-              </div>
-            )}
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Start Date</label>
-            <input
-              type="date"
-              className="w-full rounded-lg border border-gray-300 px-4 py-3"
-              value={dateRange.start}
-              onChange={(event) => setDateRange({ ...dateRange, start: event.target.value })}
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">End Date</label>
-            <input
-              type="date"
-              className="w-full rounded-lg border border-gray-300 px-4 py-3"
-              value={dateRange.end}
-              onChange={(event) => setDateRange({ ...dateRange, end: event.target.value })}
-            />
-          </div>
-        </div>
-      </Card>
+      {/* ── 1. Generate ──────────────────────────────────────────────────── */}
+      <Card className="p-6">
+        <h2 className="text-lg font-semibold text-gray-900">Generate a report</h2>
+        <p className="mt-1 text-sm text-gray-600">
+          {templates.find((t) => t.type === form.type)?.description ??
+            "Choose what kind of report you need."}
+        </p>
 
-      <Card className="p-6 mb-8">
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Template</label>
-            <select
-              className="w-full rounded-lg border border-gray-300 px-4 py-3"
-              value={selectedTemplate}
-              onChange={(event) => setSelectedTemplate(event.target.value)}
-            >
-              {templates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-center gap-3">
-            <input
-              type="checkbox"
-              id="graphs"
-              checked={includeGraphs}
-              onChange={(event) => setIncludeGraphs(event.target.checked)}
-              className="h-4 w-4 text-[#2D6A4F] border-gray-300 rounded"
+        <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Select
+            label="Kind of report"
+            value={form.type}
+            onChange={(e) => setForm({ ...form, type: e.target.value })}
+            options={templates.map((t) => ({ value: t.type, label: t.name }))}
+          />
+          <Input
+            label="From"
+            type="date"
+            value={form.from}
+            onChange={(e) => setForm({ ...form, from: e.target.value })}
+          />
+          <Input
+            label="To"
+            type="date"
+            value={form.to}
+            onChange={(e) => setForm({ ...form, to: e.target.value })}
+          />
+          {isOversight ? (
+            <Select
+              label="Cooperative"
+              value={form.cooperativeId}
+              onChange={(e) => setForm({ ...form, cooperativeId: e.target.value })}
+              options={[
+                { value: "", label: "All in scope" },
+                ...cooperatives.map((c) => ({ value: c.id, label: c.name })),
+              ]}
             />
-            <label htmlFor="graphs" className="text-sm text-gray-700">
-              Include charts &amp; graphs
-            </label>
-          </div>
-          <div className="flex items-center gap-3">
-            <input
-              type="checkbox"
-              id="chatSummary"
-              checked={includeChatSummary}
-              onChange={(event) => setIncludeChatSummary(event.target.checked)}
-              className="h-4 w-4 text-[#2D6A4F] border-gray-300 rounded"
-            />
-            <label htmlFor="chatSummary" className="text-sm text-gray-700">
-              Include AI chat summary
-            </label>
-          </div>
-        </div>
-      </Card>
-
-      {includeGraphs && (
-        <Card className="p-6 mb-8">
-          <div className="flex flex-col gap-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">Charts &amp; Graphs</h2>
-                <p className="text-sm text-gray-600">Visual report summaries for the selected cooperative.</p>
-              </div>
-              <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700">
-                {effectiveSelectedCooperative}
-              </span>
+          ) : (
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Cooperative</label>
+              <p className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-600">
+                {user?.cooperativeName ?? "Your cooperative"}
+              </p>
             </div>
-            <div className="grid gap-4 lg:grid-cols-3">
-              <div className="rounded-3xl border border-gray-200 bg-white p-4">
-                <p className="text-sm text-gray-500 mb-4">Revenue Trend</p>
-                <div className="flex items-end gap-2 h-24">
-                  <span className="h-12 w-full rounded-full bg-[#2D6A4F]/20"></span>
-                  <span className="h-16 w-full rounded-full bg-[#2D6A4F]/30"></span>
-                  <span className="h-20 w-full rounded-full bg-[#2D6A4F]/40"></span>
-                  <span className="h-14 w-full rounded-full bg-[#2D6A4F]/25"></span>
-                </div>
-              </div>
-              <div className="rounded-3xl border border-gray-200 bg-white p-4">
-                <p className="text-sm text-gray-500 mb-4">Expense Breakdown</p>
-                <div className="space-y-3">
-                  <div className="h-3 w-full rounded-full bg-gray-200"><div className="h-3 w-[72%] rounded-full bg-[#2563EB]" /></div>
-                  <div className="h-3 w-full rounded-full bg-gray-200"><div className="h-3 w-[48%] rounded-full bg-[#f97316]" /></div>
-                  <div className="h-3 w-full rounded-full bg-gray-200"><div className="h-3 w-[36%] rounded-full bg-[#e11d48]" /></div>
-                </div>
-              </div>
-              <div className="rounded-3xl border border-gray-200 bg-white p-4">
-                <p className="text-sm text-gray-500 mb-4">Performance Score</p>
-                <div className="rounded-3xl bg-slate-100 p-6 text-center">
-                  <p className="text-4xl font-bold text-slate-900">86%</p>
-                  <p className="text-sm text-gray-500">Aggregate cooperative health</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </Card>
-      )}
+          )}
+        </div>
 
-      <div className="grid gap-6 lg:grid-cols-3 mb-8">
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">Template Generator</h2>
-          <p className="text-sm text-gray-600 mb-4">Use the selected template to generate a new report with optional charts and executive summary.</p>
-          <Button onClick={handleGenerateReport} disabled={generating} className="w-full">
-            <FileText className="w-4 h-4 mr-2" />
-            {generating ? "Generating…" : "Generate New Report"}
+        <div className="mt-5">
+          <Button onClick={generate} disabled={generating}>
+            <span className="flex items-center gap-2">
+              <FileText className="h-4 w-4" />
+              {generating ? "Generating…" : "Generate"}
+            </span>
           </Button>
-        </Card>
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">Export Options</h2>
-          <div className="space-y-3">
-            {(["txt", "pdf", "xlsx"] as const).map((option) => (
+        </div>
+      </Card>
+
+      {/* ── 2. What has been generated ───────────────────────────────────── */}
+      <div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-gray-900">Your reports</h2>
+          <div className="flex flex-wrap gap-2">
+            {["All", ...Object.keys(counts)].map((t) => (
               <button
-                key={option}
-                onClick={() => setExportFormat(option)}
-                className={`w-full text-left rounded-lg border px-4 py-3 ${
-                  exportFormat === option ? "border-[#2D6A4F] bg-[#2D6A4F]/10" : "border-gray-200 bg-white"
+                key={t}
+                onClick={() => setFilter(t)}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors ${
+                  filter === t
+                    ? "border-[#2D6A4F] bg-[#2D6A4F] text-white"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
                 }`}
               >
-                {option.toUpperCase()}
+                {t === "All" ? "All" : nameFor(t)}
+                <span
+                  className={`rounded-full px-1.5 font-semibold ${
+                    filter === t ? "bg-white/20" : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {t === "All" ? reports.length : counts[t]}
+                </span>
               </button>
             ))}
           </div>
-        </Card>
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">Scheduled Reports</h2>
+        </div>
+
+        {visible.length === 0 ? (
+          <Card className="p-10 text-center">
+            <FileText className="mx-auto h-8 w-8 text-gray-400" />
+            <p className="mt-3 font-medium text-gray-900">Nothing generated yet</p>
+            <p className="mt-1 text-sm text-gray-500">
+              Use the panel above — a report takes a moment and is saved here.
+            </p>
+          </Card>
+        ) : (
           <div className="space-y-3">
-            {scheduledReports.map((schedule) => (
-              <div key={schedule.id} className="p-4 rounded-lg bg-gray-50 border border-gray-200">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="font-medium text-gray-900">{schedule.title}</p>
-                  <span className="text-xs text-gray-500">{schedule.frequency}</span>
-                </div>
-                <p className="text-sm text-gray-600">Next Run: {schedule.nextRun}</p>
-                <p className="text-sm text-gray-600">Recipients: {schedule.recipients.join(", ")}</p>
-              </div>
-            ))}
-          </div>
-        </Card>
-      </div>
-
-      <Card className="p-6 mb-8">
-        <div className="grid gap-6 lg:grid-cols-2">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900 mb-3">Custom Report Builder</h2>
-            <p className="text-sm text-gray-600 mb-4">Create a custom report with your own sections, summary, and recommendations.</p>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Report Title</label>
-                <input
-                  value={customTitle}
-                  onChange={(event) => setCustomTitle(event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                  placeholder="Enter a custom report title"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
-                <textarea
-                  value={customDescription}
-                  onChange={(event) => setCustomDescription(event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                  rows={4}
-                  placeholder="Add a brief overview for the custom report"
-                />
-              </div>
-              <div className="space-y-3">
-                {customSections.map((section, index) => (
-                  <div key={index} className="rounded-xl border border-gray-200 p-4 bg-slate-50">
-                    <div className="grid gap-3 sm:grid-cols-[0.4fr_1fr]">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Section Title</label>
-                        <input
-                          value={section.title}
-                          onChange={(event) => updateCustomSection(index, "title", event.target.value)}
-                          className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                          placeholder="Section title"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Section Data</label>
-                        <input
-                          value={section.value}
-                          onChange={(event) => updateCustomSection(index, "value", event.target.value)}
-                          className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                          placeholder="Key figures, insights, or commentary"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <Button variant="secondary" onClick={addCustomSection} className="w-full sm:w-auto">
-                  Add Section
-                </Button>
-                <Button onClick={generateExecutiveSummary} className="w-full sm:w-auto">
-                  Generate Executive Summary
-                </Button>
-              </div>
-            </div>
-          </div>
-          <div className="rounded-3xl border border-gray-200 bg-white p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-3">Executive Summary Preview</h3>
-            <div className="rounded-2xl bg-slate-50 p-4 min-h-[220px] text-sm text-gray-700">
-              {customExecutiveSummary ? (
-                <p>{customExecutiveSummary}</p>
-              ) : (
-                <p className="text-gray-500">Generate a summary to preview how the report will position key insights and recommendations.</p>
-              )}
-            </div>
-            <div className="mt-6 space-y-3">
-              <Button className="w-full" onClick={handleCreateCustomReport}>
-                Create Custom Report
-              </Button>
-              <Button variant="secondary" className="w-full" onClick={() => setCustomExecutiveSummary(generateExecutiveSummary())}>
-                Refresh Summary
-              </Button>
-            </div>
-          </div>
-        </div>
-      </Card>
-
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h2 className="text-xl font-semibold text-gray-900">Report Library</h2>
-          <p className="text-sm text-gray-500">
-            {loading
-              ? "Loading reports…"
-              : `Showing ${filteredReports.length} report(s) based on current filters.`}
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setShowReportHistory(!showReportHistory)}
-          className="text-sm text-[#2D6A4F] hover:text-[#1b4332]"
-        >
-          {showReportHistory ? "Hide" : "Show"} History Archive
-        </button>
-      </div>
-
-      <Card className="overflow-hidden mb-8">
-        <div className="p-6 border-b border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900">Available Reports</h3>
-        </div>
-        <div className="divide-y divide-gray-200">
-          {loading ? (
-            <div className="p-6 text-center text-gray-500">Loading…</div>
-          ) : filteredReports.length === 0 ? (
-            <div className="p-6 text-center text-gray-500">No reports match the current filters.</div>
-          ) : (
-            filteredReports.map((report) => {
-              const n = normalise(report);
+            {visible.map((r) => {
+              const style = TYPE_STYLE[r.type] ?? TYPE_STYLE.annual;
+              const Icon = style.icon;
+              const downloadable = Boolean(r.file_url && r.file_url !== "unavailable");
               return (
-                <div key={report.id} className="p-6 hover:bg-gray-50 transition-colors">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="flex gap-4 flex-1">
-                      <div className="w-12 h-12 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
-                        <FileText className="w-6 h-6 text-gray-600" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="font-semibold text-gray-900 mb-1">{report.title}</h3>
-                        {report.description && (
-                          <p className="text-sm text-gray-600 mb-2">{report.description}</p>
+                <Card key={r.id} className="p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <span className={`rounded-lg p-2.5 ${style.tone}`}>
+                        <Icon className="h-5 w-5" />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="font-semibold text-gray-900">{r.title}</p>
+                        <p className="text-sm text-gray-500">
+                          {nameFor(r.type)}
+                          {r.period_from && r.period_to &&
+                            ` · ${formatDate(r.period_from)} to ${formatDate(r.period_to)}`}
+                          {` · generated ${formatDate(r.generated_at ?? r.created_at)}`}
+                        </p>
+                        {r.row_count != null && (
+                          <p className="text-xs text-gray-400">
+                            {r.row_count} row{r.row_count === 1 ? "" : "s"}
+                          </p>
                         )}
-                        <div className="flex flex-wrap items-center gap-3 text-sm text-gray-500">
-                          <span className="flex items-center gap-1">
-                            <Calendar className="w-4 h-4" />
-                            {n.displayDate}
-                          </span>
-                          <span className="px-2 py-1 bg-[#2D6A4F]/10 text-[#2D6A4F] rounded-md text-xs font-medium">
-                            {report.type}
-                          </span>
-                          <span className="px-2 py-1 bg-gray-100 text-gray-800 rounded-md text-xs font-medium">
-                            {n.displayCoop}
-                          </span>
-                          <span className="px-2 py-1 bg-green-100 text-green-800 rounded-md text-xs font-medium">
-                            {report.status}
-                          </span>
-                        </div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {report.file_url && (
-                        <Button variant="secondary" onClick={() => window.open(report.file_url, "_blank")}>
-                          <Eye className="w-4 h-4 mr-2" />
-                          View
-                        </Button>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {downloadable ? (
+                        <>
+                          <Button size="sm" variant="secondary" disabled={busy === r.id} onClick={() => view(r)}>
+                            <span className="flex items-center gap-1.5">
+                              <Eye className="h-4 w-4" />
+                              View
+                            </span>
+                          </Button>
+                          <Button size="sm" disabled={busy === r.id} onClick={() => download(r, "csv")}>
+                            <span className="flex items-center gap-1.5">
+                              <Download className="h-4 w-4" />
+                              CSV
+                            </span>
+                          </Button>
+                          <Button size="sm" variant="outline" disabled={busy === r.id} onClick={() => download(r, "json")}>
+                            JSON
+                          </Button>
+                        </>
+                      ) : (
+                        // Honest about the old rows rather than offering a
+                        // button that opens nothing.
+                        <span className="inline-flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-800">
+                          <AlertTriangle className="h-3.5 w-3.5" />
+                          No file — generate it again
+                        </span>
                       )}
-                      <Button onClick={() => downloadReport(n as any, exportFormat)}>
-                        <Download className="w-4 h-4 mr-2" />
-                        Export {exportFormat.toUpperCase()}
-                      </Button>
                     </div>
                   </div>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ── 3. Schedules ─────────────────────────────────────────────────── */}
+      <Card className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-2">
+            <CalendarClock className="mt-0.5 h-5 w-5 text-gray-700" />
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Scheduled reports</h2>
+              <p className="text-sm text-gray-600">
+                Reports that run on a timetable and go out to a named list of people.
+              </p>
+            </div>
+          </div>
+          {!showSchedule && (
+            <Button variant="outline" onClick={() => setShowSchedule(true)}>
+              <span className="flex items-center gap-2">
+                <Plus className="h-4 w-4" />
+                Add a schedule
+              </span>
+            </Button>
+          )}
+        </div>
+
+        {showSchedule && (
+          <div className="mt-5 space-y-4 border-t border-gray-200 pt-5">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Select
+                label="Kind of report"
+                value={scheduleForm.type}
+                onChange={(e) => setScheduleForm({ ...scheduleForm, type: e.target.value })}
+                options={templates.map((t) => ({ value: t.type, label: t.name }))}
+              />
+              <Select
+                label="How often"
+                value={scheduleForm.frequency}
+                onChange={(e) => setScheduleForm({ ...scheduleForm, frequency: e.target.value })}
+                options={FREQUENCIES.map((f) => ({ value: f, label: f[0].toUpperCase() + f.slice(1) }))}
+              />
+              <Input
+                label="Send to (comma separated)"
+                value={scheduleForm.recipients}
+                onChange={(e) => setScheduleForm({ ...scheduleForm, recipients: e.target.value })}
+                placeholder="name@example.rw, other@example.rw"
+              />
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <Button disabled={busy === "schedule"} onClick={createSchedule}>
+                {busy === "schedule" ? "Saving…" : "Create the schedule"}
+              </Button>
+              <Button variant="outline" onClick={() => setShowSchedule(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <div className="mt-5 space-y-2">
+          {schedules.length === 0 ? (
+            <p className="text-sm text-gray-500">
+              Nothing is scheduled. Reports are only produced when someone asks for one.
+            </p>
+          ) : (
+            schedules.map((s) => {
+              const recipients = Array.isArray(s.recipients)
+                ? s.recipients
+                : (() => {
+                    try {
+                      return JSON.parse(String(s.recipients));
+                    } catch {
+                      return [String(s.recipients)];
+                    }
+                  })();
+              return (
+                <div
+                  key={s.id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 p-4"
+                >
+                  <div>
+                    <p className="font-medium text-gray-900">{s.title || nameFor(s.type)}</p>
+                    <p className="text-sm text-gray-600 capitalize">
+                      {s.frequency}
+                      {s.next_run_at && ` · next run ${formatDate(s.next_run_at)}`}
+                    </p>
+                    <p className="text-xs text-gray-500">To: {recipients.join(", ")}</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy === s.id}
+                    onClick={() => deleteSchedule(s.id)}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Trash2 className="h-4 w-4" />
+                      Remove
+                    </span>
+                  </Button>
                 </div>
               );
             })
@@ -691,45 +589,88 @@ export function Reports() {
         </div>
       </Card>
 
-      {showReportHistory && (
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Report History Archive</h3>
-            <span className="text-sm text-gray-500">Archived reports</span>
-          </div>
-          <div className="grid gap-4 lg:grid-cols-2">
-            {reportList
-              .filter((r) => r.status === "Archived")
-              .map((history) => {
-                const n = normalise(history);
-                return (
-                  <div key={history.id} className="rounded-xl border border-gray-200 p-5 bg-white">
-                    <div className="flex items-center justify-between mb-3">
-                      <div>
-                        <p className="text-sm text-gray-500">{n.displayDate}</p>
-                        <h4 className="text-lg font-semibold text-gray-900">{history.title}</h4>
-                      </div>
-                      <span className="px-2 py-1 bg-gray-100 text-gray-800 rounded-md text-xs font-medium">
-                        {history.status}
-                      </span>
+      {/* ── The viewer ───────────────────────────────────────────────────── */}
+      {viewing && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
+          <div className="my-8 w-full max-w-5xl rounded-2xl bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-4 border-b border-gray-200 p-6">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900">{viewing.title}</h2>
+                <p className="text-sm text-gray-500">
+                  {viewing.cooperativeName ?? "All cooperatives in scope"}
+                  {viewing.periodFrom && viewing.periodTo &&
+                    ` · ${formatDate(viewing.periodFrom)} to ${formatDate(viewing.periodTo)}`}
+                  {` · generated ${formatDate(viewing.generatedAt)}`}
+                </p>
+              </div>
+              <button
+                onClick={() => setViewing(null)}
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-6 p-6">
+              {viewing.summary.length > 0 && (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  {viewing.summary.map((item) => (
+                    <div key={item.label} className="rounded-xl border border-gray-200 p-4">
+                      <p className="text-xs text-gray-500">{item.label}</p>
+                      <p className="mt-1 text-lg font-semibold text-gray-900">{item.value}</p>
                     </div>
-                    {history.description && (
-                      <p className="text-sm text-gray-600 mb-4">{history.description}</p>
-                    )}
-                    {history.file_url && (
-                      <Button variant="secondary" onClick={() => window.open(history.file_url, "_blank")}>
-                        <Eye className="w-4 h-4 mr-2" />
-                        View Archive
-                      </Button>
-                    )}
+                  ))}
+                </div>
+              )}
+
+              {viewing.sections.map((section) => (
+                <div key={section.title}>
+                  <p className="font-medium text-gray-900">{section.title}</p>
+                  {section.note && <p className="text-xs text-gray-500">{section.note}</p>}
+                  <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          {section.columns.map((c) => (
+                            <th key={c} className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-700">
+                              {c}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        {section.rows.length === 0 ? (
+                          <tr>
+                            <td colSpan={section.columns.length} className="px-3 py-4 text-center text-gray-500">
+                              Nothing in this period.
+                            </td>
+                          </tr>
+                        ) : (
+                          section.rows.map((row, i) => (
+                            <tr key={i}>
+                              {row.map((cell, j) => (
+                                <td key={j} className="whitespace-nowrap px-3 py-2 text-gray-800">
+                                  {cell}
+                                </td>
+                              ))}
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
                   </div>
-                );
-              })}
-            {reportList.filter((r) => r.status === "Archived").length === 0 && (
-              <p className="text-sm text-gray-500 col-span-2">No archived reports found.</p>
-            )}
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-gray-200 p-6">
+              <Button variant="outline" onClick={() => setViewing(null)}>
+                Close
+              </Button>
+            </div>
           </div>
-        </Card>
+        </div>
       )}
     </div>
   );

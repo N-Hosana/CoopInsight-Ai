@@ -11,12 +11,9 @@ import { Button } from "../components/Button";
 import { useAuth } from "../contexts/AuthContext";
 import { useNavigate } from "react-router";
 import { api } from "../services/api";
-import {
-  formatFrw,
-  loanRecords,
-  dividendRecords,
-  members,
-} from "../data/financialData";
+import { MyFinances } from "../components/MyFinances";
+import { formatFrw } from "../data/financialData";
+import type { LoanRecord, DividendRecord, MemberContribution } from "../data/financialData";
 
 interface Transaction {
   id: string;
@@ -54,7 +51,16 @@ interface FinancialPeriod {
   status: "open" | "closed";
 }
 
+/**
+ * A member sees their own financial history; every other role sees the
+ * cooperative books below, scoped by the backend to what that role supervises.
+ */
 export function Financials() {
+  const { user } = useAuth();
+  return user?.role === "member" ? <MyFinances /> : <CooperativeFinancials />;
+}
+
+function CooperativeFinancials() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [selectedPeriod, setSelectedPeriod] = useState("Current Period");
@@ -156,6 +162,82 @@ export function Financials() {
       .catch(() => setPeriods([]));
   }, [selectedCooperativeId, user?.cooperativeId, user?.role]);
 
+  // Loans, dividends and savings accounts, from the cooperative-wide endpoints.
+  // These three tabs used to show sample data because no such endpoints existed.
+  const [loanRecords, setLoanRecords] = useState<LoanRecord[]>([]);
+  const [dividendRecords, setDividendRecords] = useState<DividendRecord[]>([]);
+  const [members, setMembers] = useState<MemberContribution[]>([]);
+
+  useEffect(() => {
+    const params = selectedCooperativeId !== "all" ? `?cooperativeId=${selectedCooperativeId}` : "";
+    const day = (v: string | null) => (v ? new Date(v).toLocaleDateString() : "—");
+    const title = (v: string) => (v ? v[0].toUpperCase() + v.slice(1) : v);
+
+    api
+      .get<{ data: any[] }>(`/transactions/loans${params}`)
+      .then((res) =>
+        setLoanRecords(
+          (res.data ?? []).map((l) => ({
+            id: l.id,
+            memberId: l.member_id,
+            memberName: l.member_name,
+            amount: Number(l.amount),
+            date: day(l.issued_at),
+            dueDate: day(l.due_at),
+            status: l.status === "repaid" ? "Paid" : l.status === "overdue" ? "Overdue" : "Active",
+            interestRate: Number(l.interest_rate),
+            amountPaid: Number(l.amount_paid),
+            cooperative: l.cooperative_name,
+            cooperativeId: l.cooperative_id,
+          }))
+        )
+      )
+      .catch(() => setLoanRecords([]));
+
+    api
+      .get<{ data: any[] }>(`/transactions/dividends${params}`)
+      .then((res) =>
+        setDividendRecords(
+          (res.data ?? []).map((d) => ({
+            id: d.id,
+            memberId: d.member_id,
+            memberName: d.member_name,
+            amount: Number(d.amount),
+            date: day(d.paid_at),
+            // A dividend row is written when it is paid, so it is distributed.
+            status: d.paid_at ? "Distributed" : "Pending",
+            period: d.period,
+            cooperative: d.cooperative_name,
+            cooperativeId: d.cooperative_id,
+          }))
+        )
+      )
+      .catch(() => setDividendRecords([]));
+
+    api
+      .get<{ data: any[] }>(`/transactions/savings/accounts${params}`)
+      .then((res) =>
+        setMembers(
+          (res.data ?? []).map((m) => ({
+            id: m.id,
+            name: m.full_name,
+            role: title(m.role ?? "member"),
+            contribution: Number(m.total_contributions),
+            cooperative: m.cooperative_name,
+            cooperativeId: m.cooperative_id,
+            phone: m.phone ?? "",
+            status: m.status === "active" ? "Active" : "Inactive",
+            lastContribution: day(m.last_contribution),
+            joinDate: day(m.membership_date),
+            membershipFee: 0,
+            loanBalance: Number(m.loan_balance),
+            savingsBalance: Number(m.total_savings),
+          }))
+        )
+      )
+      .catch(() => setMembers([]));
+  }, [selectedCooperativeId]);
+
   const cooperativeOptions = useMemo(() => {
     const seen = new Set<string>();
     const options = transactions.reduce<{ id: string; name: string }[]>((acc, tx) => {
@@ -193,7 +275,7 @@ export function Financials() {
         : loanRecords.filter((loan) => loan.cooperativeId === selectedCooperativeId);
     }
     return loanRecords.filter((loan) => loan.cooperativeId === user?.cooperativeId);
-  }, [selectedCooperativeId, user?.cooperativeId, isAllCooperativesView]);
+  }, [loanRecords, selectedCooperativeId, user?.cooperativeId, isAllCooperativesView]);
 
   const visibleDividendRecords = useMemo(() => {
     if (isAllCooperativesView) {
@@ -202,7 +284,7 @@ export function Financials() {
         : dividendRecords.filter((dividend) => dividend.cooperativeId === selectedCooperativeId);
     }
     return dividendRecords.filter((dividend) => dividend.cooperativeId === user?.cooperativeId);
-  }, [selectedCooperativeId, user?.cooperativeId, isAllCooperativesView]);
+  }, [dividendRecords, selectedCooperativeId, user?.cooperativeId, isAllCooperativesView]);
 
   const visibleSavingsAccounts = useMemo(() => {
     if (isAllCooperativesView) {
@@ -211,7 +293,7 @@ export function Financials() {
         : members.filter((member) => member.cooperativeId === selectedCooperativeId);
     }
     return members.filter((member) => member.cooperativeId === user?.cooperativeId);
-  }, [selectedCooperativeId, user?.cooperativeId, isAllCooperativesView]);
+  }, [members, selectedCooperativeId, user?.cooperativeId, isAllCooperativesView]);
 
   const visibleLoanDisbursements = useMemo(
     () => visibleTransactions.filter((transaction) => transaction.category === "loan_disbursements"),
@@ -251,23 +333,22 @@ export function Financials() {
   const stats = useMemo(() => {
     const totalIncome = summary.totalIncome ?? 0;
     const totalExpenses = summary.totalExpenses ?? 0;
-    const totalLoans = visibleTransactions
-      .filter((item) => item.category === "loan_disbursements")
-      .reduce((sum, item) => sum + item.amount, 0);
-    const totalDividends = visibleTransactions
-      .filter((item) => item.category === "dividends")
-      .reduce((sum, item) => sum + item.amount, 0);
-    const totalSavings = visibleTransactions
-      .filter((item) => item.category === "member_contributions")
-      .reduce((sum, item) => sum + item.amount, 0);
+    // Outstanding, not ever-disbursed: what members still owe.
+    const totalLoans = visibleLoanRecords
+      .filter((loan) => loan.status !== "Paid")
+      .reduce((sum, loan) => sum + (loan.amount - loan.amountPaid), 0);
+    const totalDividends = visibleDividendRecords.reduce((sum, d) => sum + d.amount, 0);
+    const totalSavings = visibleSavingsAccounts.reduce((sum, member) => sum + member.savingsBalance, 0);
     return { totalIncome, totalExpenses, totalLoans, totalDividends, totalSavings };
-  }, [summary, visibleTransactions]);
+  }, [summary, visibleTransactions, visibleLoanRecords, visibleSavingsAccounts]);
 
   const financialStats = [
-    { label: "Total Income", value: formatFrw(stats.totalIncome), change: "+12.5%", trend: "up", icon: TrendingUp },
-    { label: "Total Expenses", value: formatFrw(stats.totalExpenses), change: "-3.2%", trend: "down", icon: TrendingDown },
-    { label: "Total Savings", value: formatFrw(stats.totalSavings), change: "+8.3%", trend: "up", icon: PiggyBank },
-    { label: "Active Loans", value: formatFrw(stats.totalLoans), change: "+5.1%", trend: "up", icon: CreditCard },
+    // The captions are facts from the same records; the percentages that used
+    // to sit here (+12.5%, -3.2%, +8.3%, +5.1%) were invented.
+    { label: "Total Income", value: formatFrw(stats.totalIncome), change: "all completed income", trend: "up", icon: TrendingUp },
+    { label: "Total Expenses", value: formatFrw(stats.totalExpenses), change: `net ${formatFrw(stats.totalIncome - stats.totalExpenses)}`, trend: "down", icon: TrendingDown },
+    { label: "Total Savings", value: formatFrw(stats.totalSavings), change: `held for ${visibleSavingsAccounts.length} members`, trend: "up", icon: PiggyBank },
+    { label: "Active Loans", value: formatFrw(stats.totalLoans), change: `${visibleLoanRecords.filter((l) => l.status !== "Paid").length} loans outstanding`, trend: "up", icon: CreditCard },
   ];
 
   const currentBalanceSheet = selectedDetailBalanceSheet;
@@ -390,7 +471,7 @@ Role: ${user?.role}
                     onClick={() => setSelectedDetailView(view)}
                     className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
                       selectedDetailView === view
-                        ? "bg-[#2563EB] text-white"
+                        ? "bg-[#2D6A4F] text-white"
                         : "border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
                     }`}
                   >
@@ -441,12 +522,10 @@ Role: ${user?.role}
                 <div className={`p-3 rounded-lg ${stat.trend === "up" ? "bg-green-50" : "bg-red-50"}`}>
                   <Icon className={`w-6 h-6 ${stat.trend === "up" ? "text-green-600" : "text-red-600"}`} />
                 </div>
-                <span className={`text-sm font-medium ${stat.trend === "up" ? "text-green-600" : "text-red-600"}`}>
-                  {stat.change}
-                </span>
               </div>
               <p className="text-sm text-gray-600 mb-1">{stat.label}</p>
               <p className="text-2xl font-bold text-gray-900">{stat.value}</p>
+              <p className="mt-1 text-xs text-gray-500">{stat.change}</p>
             </div>
           );
         })}
@@ -470,7 +549,7 @@ Role: ${user?.role}
             </div>
             <div className="flex justify-between items-center pt-2">
               <span className="font-semibold text-gray-900">Net Profit</span>
-              <span className="font-bold text-[#2563EB] text-xl">{formatFrw(stats.totalIncome - stats.totalExpenses)}</span>
+              <span className="font-bold text-[#2D6A4F] text-xl">{formatFrw(stats.totalIncome - stats.totalExpenses)}</span>
             </div>
           </div>
         </div>
@@ -515,7 +594,7 @@ Role: ${user?.role}
                 onClick={() => setSelectedPeriod(period.label)}
                 className={`p-4 rounded-lg border-2 cursor-pointer transition-colors ${
                   selectedPeriod === period.label
-                    ? "border-[#2563EB] bg-blue-50"
+                    ? "border-[#2D6A4F] bg-[#2D6A4F]/10"
                     : "border-gray-200 hover:border-gray-300"
                 }`}
               >
@@ -639,7 +718,6 @@ Role: ${user?.role}
         ) : selectedDetailView === "Active Loans" ? (
           <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Active Loans Tracking</h2>
-            <p className="text-xs text-amber-600 mb-4">Sample data — a cooperative-wide loans endpoint isn't available yet.</p>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-gray-50">
@@ -688,7 +766,7 @@ Role: ${user?.role}
               </div>
               <div className="text-right">
                 <p className="text-sm text-gray-600">Disbursed Loans</p>
-                <p className="text-xl font-semibold text-[#2563EB]">{formatFrw(visibleLoanDisbursements.reduce((sum, transaction) => sum + transaction.amount, 0))}</p>
+                <p className="text-xl font-semibold text-[#2D6A4F]">{formatFrw(visibleLoanDisbursements.reduce((sum, transaction) => sum + transaction.amount, 0))}</p>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -728,11 +806,10 @@ Role: ${user?.role}
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Savings Account Management</h2>
                 <p className="text-sm text-gray-500">Review savings balances and member savings health across the cooperative.</p>
-                <p className="text-xs text-amber-600 mt-1">Sample data — a cooperative-wide savings endpoint isn't available yet.</p>
               </div>
               <div className="rounded-2xl bg-slate-50 p-4 text-sm text-gray-700">
                 <p className="text-gray-600">Total Savings Balance</p>
-                <p className="mt-1 text-xl font-semibold text-[#2563EB]">{formatFrw(savingsTotal)}</p>
+                <p className="mt-1 text-xl font-semibold text-[#2D6A4F]">{formatFrw(savingsTotal)}</p>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -751,7 +828,7 @@ Role: ${user?.role}
                     <tr key={member.id} className="hover:bg-gray-50">
                       <td className="px-4 py-3">{member.name}</td>
                       <td className="px-4 py-3 text-gray-600">{member.role}</td>
-                      <td className="px-4 py-3 font-medium text-blue-600">{formatFrw(member.savingsBalance)}</td>
+                      <td className="px-4 py-3 font-medium text-[#2D6A4F]">{formatFrw(member.savingsBalance)}</td>
                       <td className="px-4 py-3">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${member.status === "Active" ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-800"}`}>
                           {member.status}
@@ -767,7 +844,6 @@ Role: ${user?.role}
         ) : (
           <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Dividend Distribution Records</h2>
-            <p className="text-xs text-amber-600 mb-4">Sample data — a cooperative-wide dividends endpoint isn't available yet.</p>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-gray-50">

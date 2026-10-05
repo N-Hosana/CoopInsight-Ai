@@ -4,9 +4,62 @@ import { useAuth } from "../contexts/AuthContext";
 import { AuthBackground } from "../components/AuthBackground";
 import { LogIn, Mail, Lock, AlertCircle, ArrowLeft } from "lucide-react";
 
+/**
+ * The accounts `pnpm seed` creates. Kept in one place so the panel below and the
+ * click-to-fill handler cannot drift apart from each other.
+ *
+ * The three oversight tiers are listed because they are the point of the
+ * approval chain: a formation or dissolution request has to be signed off by
+ * the SECTOR officer, then the DISTRICT officer, then the RCA, and the only way
+ * to see that working is to log in as each of them in turn. Leaving them off
+ * the panel — as it did — made a three-stage workflow look like a one-stage one.
+ *
+ * The sector account is Remera's, because that is the sector TMC sits in and
+ * TMC is the cooperative the manager and member accounts belong to. Any request
+ * they file lands on this officer's desk.
+ */
+const SEEDED_ACCOUNTS = [
+  {
+    label: "Member",
+    email: "member@coopinsight.rw",
+    password: "Member@1234",
+    note: "TMC member — files requests",
+  },
+  {
+    label: "Manager",
+    email: "manager@coopinsight.rw",
+    password: "Manager@1234",
+    note: "TMC president — calls assemblies",
+  },
+  {
+    label: "1. Sector",
+    email: "remera.officer@coopinsight.rw",
+    password: "Officer@1234",
+    note: "Remera sector officer — TMC's sector, reviews first",
+  },
+  {
+    label: "2. District",
+    email: "district.officer@coopinsight.rw",
+    password: "Officer@1234",
+    note: "Froduard, Gasabo district officer — reviews second",
+  },
+  {
+    label: "3. RCA",
+    email: "gov@coopinsight.rw",
+    password: "Gov@1234!",
+    note: "RCA officer — audits and decides last",
+  },
+  {
+    label: "Admin",
+    email: "admin@coopinsight.rw",
+    password: "Admin@1234",
+    note: "Platform administrator — may act at any stage",
+  },
+] as const;
+
 export function Login() {
   const navigate = useNavigate();
-  const { sendOTP, verifyOTP, loginWithOTP, loginAttempts, lastLoginAttempt, devOtp } = useAuth();
+  const { sendOTP, verifyOTP, loginWithOTP, loginAttempts, lastLoginAttempt, devOtp, loginError } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<"admin" | "manager" | "generalManager" | "member" | "government">("member");
@@ -32,15 +85,39 @@ export function Login() {
 
     setIsLoading(true);
 
-    // Send OTP for all users (now validates credentials)
-    const otpSent = await sendOTP(email, password, role);
+    // The email is trimmed because it is routinely copied off the panel below
+    // and picks up surrounding whitespace. The password deliberately is not:
+    // silently stripping characters from a password hides real mistakes.
+    const otpSent = await sendOTP(email.trim(), password, role);
     if (otpSent) {
       setShowOTP(true);
     } else {
-      setError("Invalid email, password, or role. Please check your credentials.");
+      // Only claim the credentials were wrong when they actually were. A
+      // backend that is down, restarting, or on another port produces the same
+      // failed promise, and blaming the password for that sends people off
+      // retyping something that was right all along.
+      setError(
+        loginError ??
+          "That email and password did not match an account. Passwords are case-sensitive; " +
+            "use the Fill buttons below to enter a test account exactly."
+      );
     }
 
     setIsLoading(false);
+  };
+
+  /**
+   * Put a seeded account straight into React state.
+   *
+   * Typing these by hand is the single most common way a demo login fails: a
+   * trailing space off the panel, a missed capital, or the browser password
+   * manager quietly overwriting the field with a saved credential for
+   * localhost. Setting state directly sidesteps all three.
+   */
+  const fillCredentials = (demoEmail: string, demoPassword: string) => {
+    setEmail(demoEmail);
+    setPassword(demoPassword);
+    setError("");
   };
 
   const handleOTPChange = (index: number, value: string) => {
@@ -117,7 +194,7 @@ export function Login() {
           )}
 
           {!showOTP ? (
-            <form onSubmit={handleSubmit} className="space-y-5">
+            <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off">
               <div>
                 <label className="block text-sm font-medium text-card-foreground mb-2">I am a</label>
                 <select
@@ -128,9 +205,17 @@ export function Login() {
                   <option value="member">Cooperative Member</option>
                   <option value="manager">Cooperative Manager</option>
                   <option value="generalManager">Gasabo General Manager</option>
-                  <option value="government">RCA Officer</option>
+                  {/*
+                    One option, not three. All three oversight tiers
+                    authenticate as `government`; which tier an officer acts at
+                    comes from their account, never from this dropdown. Listing
+                    them separately would put three entries with the same value
+                    in the select, and picking any of them would show the first.
+                  */}
+                  <option value="government">
+                    Oversight Officer — sector, district or RCA
+                  </option>
                   <option value="admin">System Administrator</option>
-                  {/* cooperative account removed */}
                 </select>
               </div>
             <div>
@@ -141,6 +226,7 @@ export function Login() {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="off"
                   className="w-full pl-10 pr-4 py-3 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
                   placeholder="you@example.com"
                   required
@@ -157,10 +243,16 @@ export function Login() {
               </div>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
+                {/*
+                  autoComplete="new-password" is what actually stops Chrome
+                  pasting a saved credential over this field. autoComplete="off"
+                  alone does not — Chrome ignores it on password inputs.
+                */}
                 <input
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
                   className="w-full pl-10 pr-4 py-3 bg-input-background border border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent outline-none text-foreground"
                   placeholder="••••••••"
                   required
@@ -244,35 +336,41 @@ export function Login() {
             </p>
           </div>
 
-          {/* Seeded Credentials */}
+          {/* Seeded credentials — click to fill, never typed */}
           <div className="mt-8 p-4 bg-muted rounded-lg border border-border">
-            <p className="text-xs font-semibold text-card-foreground mb-3">Test Accounts (seeded):</p>
-            <div className="text-xs text-muted-foreground space-y-1.5 font-mono">
-              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2">
-                <span className="text-[10px] font-sans font-semibold text-muted-foreground uppercase tracking-wide">Role</span>
-                <span className="text-[10px] font-sans font-semibold text-muted-foreground uppercase tracking-wide">Email</span>
-                <span className="text-[10px] font-sans font-semibold text-muted-foreground uppercase tracking-wide">Password</span>
+            <p className="text-xs font-semibold text-card-foreground mb-1">Test accounts (seeded)</p>
+            <p className="text-[10px] text-muted-foreground mb-3">
+              Click a row to fill the form exactly. Rows 1–3 are the approval chain, in order:
+              nothing reaches the RCA until the sector and district officers have signed it off.
+            </p>
+            <div className="space-y-1">
+              <div className="grid grid-cols-[76px_1fr_92px] gap-x-2 px-2">
+                <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Role</span>
+                <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Email</span>
+                <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Password</span>
               </div>
-              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2 text-card-foreground">
-                <span>Admin</span>
-                <span>admin@coopinsight.rw</span>
-                <span>Admin@1234</span>
-              </div>
-              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2 text-card-foreground">
-                <span>Manager</span>
-                <span>manager@coopinsight.rw</span>
-                <span>Manager@1234</span>
-              </div>
-              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2 text-card-foreground">
-                <span>Member</span>
-                <span>member@coopinsight.rw</span>
-                <span>Member@1234</span>
-              </div>
-              <div className="grid grid-cols-[80px_1fr_1fr] gap-x-2 text-card-foreground">
-                <span>RCA</span>
-                <span>gov@coopinsight.rw</span>
-                <span>Gov@1234!</span>
-              </div>
+              {SEEDED_ACCOUNTS.map((account) => (
+                <button
+                  key={account.email}
+                  type="button"
+                  onClick={() => fillCredentials(account.email, account.password)}
+                  title={`${account.note} — click to fill the form with ${account.email}`}
+                  className={`w-full rounded px-2 py-1.5 text-left transition-colors ${
+                    email === account.email
+                      ? "bg-primary/10 text-card-foreground"
+                      : "text-card-foreground hover:bg-background"
+                  }`}
+                >
+                  <span className="grid grid-cols-[76px_1fr_92px] gap-x-2 items-center text-xs font-mono">
+                    <span className="font-sans font-medium">{account.label}</span>
+                    <span className="truncate">{account.email}</span>
+                    <span>{account.password}</span>
+                  </span>
+                  <span className="block pl-[84px] text-[10px] text-muted-foreground">
+                    {account.note}
+                  </span>
+                </button>
+              ))}
             </div>
           </div>
         </div>

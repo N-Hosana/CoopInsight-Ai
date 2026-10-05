@@ -113,7 +113,7 @@ export function FinancialSummary() {
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
-          { label: "Total Income", value: formatFrw(summary.totalIncome), icon: TrendingUp, color: "text-[#2563EB]", detail: `From ${incomeTransactions.length} income transactions` },
+          { label: "Total Income", value: formatFrw(summary.totalIncome), icon: TrendingUp, color: "text-[#2D6A4F]", detail: `From ${incomeTransactions.length} income transactions` },
           { label: "Total Expenses", value: formatFrw(summary.totalExpenses), icon: TrendingDown, color: "text-[#dc2626]", detail: `From ${expenseTransactions.length} spending items` },
           { label: "Net Profit", value: formatFrw(summary.netBalance ?? (summary.totalIncome - summary.totalExpenses)), icon: ShieldCheck, color: "text-[#2D6A4F]", detail: "Income minus expenses" },
         ].map((item) => {
@@ -187,7 +187,7 @@ export function FinancialSummary() {
                 <h2 className="text-xl font-semibold text-gray-900">Suggested outreach</h2>
                 <p className="text-sm text-gray-600">Messages to send to members who need a nudge.</p>
               </div>
-              <MessageCircle className="w-6 h-6 text-[#2563EB]" />
+              <MessageCircle className="w-6 h-6 text-[#2D6A4F]" />
             </div>
             <div className="space-y-4">
               {suggestions.map((suggestion) => (

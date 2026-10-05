@@ -20,15 +20,15 @@ import {
   Menu,
   X,
   ChevronDown,
-  UserMinus,
-  ClipboardCheck,
-  Trophy,
   BadgeCheck,
   Stethoscope,
   HandCoins,
+  FileSignature,
+  IdCard,
+  ClipboardList,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { AuthProvider, describeRole, useAuth } from "./contexts/AuthContext";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { NotificationProvider } from "./contexts/NotificationContext";
 import { Login } from "./pages/Login";
@@ -52,6 +52,9 @@ import { Messages } from "./pages/Messages";
 import { AddMember } from "./pages/AddMember";
 import { CreateActivity } from "./pages/CreateActivity";
 import { RecordTransaction } from "./pages/RecordTransaction";
+import { RecordContributions } from "./pages/RecordContributions";
+import { BalanceSheetEntry } from "./pages/BalanceSheetEntry";
+import { Records } from "./pages/Records";
 import { MemberDetails } from "./pages/MemberDetails";
 import { TransactionDetails } from "./pages/TransactionDetails";
 import { FinancialSummary } from "./pages/FinancialSummary";
@@ -59,12 +62,10 @@ import { ActivityDetails } from "./pages/ActivityDetails";
 import { AIInsightDetail } from "./pages/AIInsightDetail";
 import { CooperativeProfile } from "./pages/CooperativeProfile";
 import { CooperativeDocuments } from "./pages/CooperativeDocuments";
-import { Membership } from "./pages/Membership";
-import { CooperativeRequests } from "./pages/CooperativeRequests";
-import { CooperativeRankings } from "./pages/CooperativeRankings";
 import { Permits } from "./pages/Permits";
 import { MonthlyAudit } from "./pages/MonthlyAudit";
 import { Funding } from "./pages/Funding";
+import { RcaServices } from "./pages/RcaServices";
 import { NotificationBar } from "./components/NotificationBar";
 
 function ProfileDropdown() {
@@ -95,7 +96,7 @@ function ProfileDropdown() {
         >
           <div className="text-right hidden sm:block">
             <p className="text-sm font-medium text-card-foreground">{user?.name}</p>
-            <p className="text-xs text-muted-foreground capitalize">{user?.role}</p>
+            <p className="text-xs text-muted-foreground">{describeRole(user ?? null)}</p>
           </div>
           <div className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-medium cursor-pointer">
             {initials}
@@ -112,7 +113,7 @@ function ProfileDropdown() {
                 <div>
                   <p className="font-semibold text-card-foreground">{user?.name}</p>
                   <p className="text-sm text-muted-foreground">{user?.email}</p>
-                  <span className="inline-block mt-1 px-2 py-0.5 bg-primary/10 text-primary text-xs rounded-full capitalize">{user?.role}</span>
+                  <span className="inline-block mt-1 px-2 py-0.5 bg-primary/10 text-primary text-xs rounded-full">{describeRole(user ?? null)}</span>
                 </div>
               </div>
               {user?.phone && <p className="text-xs text-muted-foreground mt-2">{user.phone}</p>}
@@ -141,43 +142,99 @@ function ProfileDropdown() {
   );
 }
 
-// Navigation items with role-based visibility
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE SIDEBAR
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Grouped, because a flat list of twenty-two links is not navigation — it is a
+ * pile. Each group answers one question:
+ *
+ *   Overview     where am I
+ *   My cooperative   the things a cooperative does for itself
+ *   Oversight    the things an officer does to cooperatives
+ *   RCA          asking the agency for something, and what it licenses
+ *   Admin        the platform itself
+ *
+ * SECURITY & AUDIT is admin-only. It was previously offered to every
+ * `government` account, which meant sector, district and RCA officers all saw a
+ * menu item whose every request the server answers with 403 — a link that
+ * exists only to fail. The backend has always restricted it to administrators;
+ * the sidebar now agrees with the backend, and `RoleRoute` below stops anyone
+ * reaching it by typing the URL.
+ */
+type NavRole = "admin" | "manager" | "member" | "government" | "generalManager";
+
 interface NavigationItem {
   name: string;
   path: string;
   icon: typeof LayoutDashboard;
-  roles: Array<"admin" | "manager" | "member" | "government" | "generalManager">;
+  roles: NavRole[];
+  group: string;
   requireCooperative?: boolean;
+  /** Restricts an item to particular tiers of the oversight chain. */
+  oversightLevels?: Array<"sector" | "district" | "rca">;
 }
 
-const getNavigationForUser = (user: { role: string; cooperativeId?: string } | null) => {
+/** Who may open the security console. Mirrors the backend's `authorize` list. */
+export const SECURITY_ROLES = ["admin", "generalManager"];
+
+const NAV_GROUPS = ["Overview", "My cooperative", "Oversight", "RCA", "Admin"];
+
+const getNavigationForUser = (
+  user: { role: string; cooperativeId?: string; oversightLevel?: string | null } | null
+) => {
   const allNavigation: NavigationItem[] = [
-    { name: "Dashboard", path: "/", icon: LayoutDashboard, roles: ["admin", "manager", "member", "government", "generalManager"] },
-    { name: "Cooperatives", path: "/cooperatives", icon: Users, roles: ["admin", "manager", "government", "generalManager"] },
-    { name: "Members", path: "/members", icon: UserCircle, roles: ["admin", "manager", "generalManager"] },
-    { name: "Activities", path: "/activities", icon: Activity, roles: ["manager", "member", "generalManager"] },
-    { name: "Messages", path: "/messages", icon: MessageSquare, roles: ["admin", "manager", "member", "government", "generalManager"] },
-    { name: "Financials", path: "/financials", icon: DollarSign, roles: ["admin", "manager", "member", "government", "generalManager"] },
-    { name: "AI Insights", path: "/ai-insights", icon: Brain, roles: ["admin", "manager", "member", "generalManager"] },
-    { name: "Government Monitoring", path: "/government-monitoring", icon: Building2, roles: ["government", "admin", "generalManager"] },
-    { name: "League Table", path: "/rankings", icon: Trophy, roles: ["government", "admin", "generalManager"] },
-    { name: "Monthly Audit", path: "/monthly-audit", icon: Stethoscope, roles: ["government", "admin", "generalManager"] },
-    { name: "Operating Permits", path: "/permits", icon: BadgeCheck, roles: ["government", "admin", "generalManager", "manager", "member"] },
-    { name: "External Support", path: "/funding", icon: HandCoins, roles: ["government", "admin", "generalManager", "manager", "member"] },
-    { name: "Reports", path: "/reports", icon: FileText, roles: ["admin", "manager", "government", "generalManager"] },
-    { name: "Cooperative Profile", path: "/cooperative-profile", icon: Building2, roles: ["manager", "member"], requireCooperative: true },
-    { name: "Documents", path: "/cooperative-documents", icon: FileText, roles: ["manager", "member", "government"] },
-    { name: "Membership", path: "/membership", icon: UserMinus, roles: ["member", "manager", "admin", "generalManager"] },
-    { name: "Cooperative Requests", path: "/cooperative-requests", icon: ClipboardCheck, roles: ["member", "manager", "admin", "government", "generalManager"] },
-    { name: "Notifications", path: "/notifications", icon: BellIcon, roles: ["admin", "manager", "member", "government", "generalManager"] },
-    { name: "Integrations", path: "/integrations", icon: Plug, roles: ["admin", "manager", "generalManager"] },
-    { name: "Security & Audit", path: "/security-audit", icon: Shield, roles: ["admin", "government", "generalManager"] },
+    // ── Overview ──────────────────────────────────────────────────────────
+    { name: "Dashboard", path: "/", icon: LayoutDashboard, group: "Overview", roles: ["admin", "manager", "member", "government", "generalManager"] },
+    { name: "Messages", path: "/messages", icon: MessageSquare, group: "Overview", roles: ["admin", "manager", "member", "government", "generalManager"] },
+    { name: "Notifications", path: "/notifications", icon: BellIcon, group: "Overview", roles: ["admin", "manager", "member", "government", "generalManager"] },
+
+    // ── My cooperative ────────────────────────────────────────────────────
+    { name: "Cooperative Profile", path: "/cooperative-profile", icon: Building2, group: "My cooperative", roles: ["manager", "member"], requireCooperative: true },
+    // Everything the oversight officers and the audit see comes from these
+    // records; this is where the manager sees which are going stale.
+    { name: "Records", path: "/records", icon: ClipboardList, group: "My cooperative", roles: ["manager"], requireCooperative: true },
+    // Administrators keep records for any cooperative, choosing it on the page.
+    { name: "Record keeping", path: "/records", icon: ClipboardList, group: "Admin", roles: ["admin", "generalManager"] },
+    // Every member, attached or not: a member who has left still reads their
+    // own history, and hiding this when the cooperative link was cleared is how
+    // a member lost sight of their savings and activity.
+    { name: "My Record", path: "/members/me", icon: IdCard, group: "My cooperative", roles: ["member"] },
+    { name: "Members", path: "/members", icon: UserCircle, group: "My cooperative", roles: ["admin", "manager", "generalManager"] },
+    { name: "Activities", path: "/activities", icon: Activity, group: "My cooperative", roles: ["manager", "member", "generalManager"] },
+    { name: "Financials", path: "/financials", icon: DollarSign, group: "My cooperative", roles: ["admin", "manager", "member", "government", "generalManager"] },
+    { name: "Documents", path: "/cooperative-documents", icon: FileText, group: "My cooperative", roles: ["manager", "member"] },
+
+    // ── Oversight ─────────────────────────────────────────────────────────
+    { name: "Cooperative register", path: "/cooperatives", icon: Users, group: "Oversight", roles: ["admin", "manager", "government", "generalManager"] },
+    { name: "District monitoring", path: "/government-monitoring", icon: Building2, group: "Oversight", roles: ["government", "admin", "generalManager"] },
+    { name: "Monthly audit", path: "/monthly-audit", icon: Stethoscope, group: "Oversight", roles: ["government", "admin", "generalManager"] },
+    { name: "Cooperative documents", path: "/cooperative-documents", icon: FileText, group: "Oversight", roles: ["admin", "government", "generalManager"] },
+    { name: "Reports", path: "/reports", icon: FileText, group: "Oversight", roles: ["admin", "manager", "government", "generalManager"] },
+    { name: "AI insights", path: "/ai-insights", icon: Brain, group: "Oversight", roles: ["admin", "manager", "member", "generalManager"] },
+
+    // ── RCA ───────────────────────────────────────────────────────────────
+    // Formation, dissolution and the four certificate services are one page
+    // with tabs. They were two, which left a president guessing which of them
+    // held the form they needed.
+    { name: "Services & requests", path: "/rca-services", icon: FileSignature, group: "RCA", roles: ["member", "manager", "admin", "generalManager", "government"] },
+    { name: "Operating permits", path: "/permits", icon: BadgeCheck, group: "RCA", roles: ["government", "admin", "generalManager", "manager", "member"] },
+    { name: "External support", path: "/funding", icon: HandCoins, group: "RCA", roles: ["government", "admin", "generalManager", "manager", "member"] },
+
+    // ── Admin ─────────────────────────────────────────────────────────────
+    { name: "Integrations", path: "/integrations", icon: Plug, group: "Admin", roles: ["admin", "generalManager"] },
+    { name: "Security & audit", path: "/security-audit", icon: Shield, group: "Admin", roles: SECURITY_ROLES as NavRole[] },
   ];
 
   return allNavigation.filter((item) => {
     if (!user) return false;
-    if (!item.roles.includes(user.role as any)) return false;
+    if (!item.roles.includes(user.role as NavRole)) return false;
     if (item.requireCooperative && !user.cooperativeId) return false;
+    if (item.oversightLevels) {
+      const level = user.oversightLevel as "sector" | "district" | "rca" | null | undefined;
+      if (!level || !item.oversightLevels.includes(level)) return false;
+    }
     return true;
   });
 };
@@ -240,24 +297,38 @@ function Layout() {
           <p className="text-sm text-sidebar-foreground/80 mt-1">Gasabo District</p>
         </div>
 
-        <nav className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-1 scrollbar-hidden">
-          {navigation.map((item) => {
-            const Icon = item.icon;
-            const active = isActive(item.path);
-
+        <nav className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4 scrollbar-hidden">
+          {NAV_GROUPS.map((group) => {
+            const items = navigation.filter((item) => item.group === group);
+            if (!items.length) return null;
             return (
-              <Link
-                key={item.path}
-                to={item.path}
-                className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                  active
-                    ? "bg-[#2D6A4F] text-white"
-                    : "text-sidebar-foreground hover:bg-sidebar-accent"
-                }`}
-              >
-                <Icon className="w-5 h-5" />
-                <span>{item.name}</span>
-              </Link>
+              <div key={group}>
+                <p className="px-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/50">
+                  {group}
+                </p>
+                <div className="space-y-1">
+                  {items.map((item) => {
+                    const Icon = item.icon;
+                    const active = isActive(item.path);
+
+                    return (
+                      <Link
+                        key={item.path}
+                        to={item.path}
+                        onClick={() => setSidebarOpen(false)}
+                        className={`flex items-center gap-3 px-4 py-2.5 rounded-lg transition-colors ${
+                          active
+                            ? "bg-[#2D6A4F] text-white"
+                            : "text-sidebar-foreground hover:bg-sidebar-accent"
+                        }`}
+                      >
+                        <Icon className="w-5 h-5 flex-shrink-0" />
+                        <span className="text-sm">{item.name}</span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
             );
           })}
         </nav>
@@ -339,6 +410,17 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Redirects to `to`, carrying the query string across.
+ *
+ * `<Navigate>` drops it, which for the cooperative-profile redirect would mean
+ * every "View details" link landing on the page with no cooperative selected.
+ */
+function RedirectKeepingQuery({ to }: { to: string }) {
+  const location = useLocation();
+  return <Navigate to={`${to}${location.search}`} replace />;
+}
+
 function RoleRoute({ roles, requireCooperative, children }: { roles: Array<string>; requireCooperative?: boolean; children: React.ReactNode }) {
   const { user } = useAuth();
 
@@ -405,51 +487,82 @@ function AppRoutes() {
           }
         />
         <Route path="transactions/new" element={<RecordTransaction />} />
+        <Route
+          path="records"
+          element={
+            <RoleRoute roles={["manager", "admin", "generalManager"]}>
+              <Records />
+            </RoleRoute>
+          }
+        />
+        <Route
+          path="contributions/new"
+          element={
+            <RoleRoute roles={["manager", "admin", "generalManager"]}>
+              <RecordContributions />
+            </RoleRoute>
+          }
+        />
+        <Route
+          path="balance-sheets/new"
+          element={
+            <RoleRoute roles={["manager", "admin", "generalManager"]}>
+              <BalanceSheetEntry />
+            </RoleRoute>
+          }
+        />
         <Route path="transactions/:id" element={<TransactionDetails />} />
         <Route path="ai-insights" element={<AIInsights />} />
         <Route path="ai-insights/:id" element={<AIInsightDetail />} />
         <Route path="government-monitoring" element={<GovernmentMonitoring />} />
         <Route path="reports" element={<Reports />} />
+        {/*
+          One cooperative profile page, not two. /cooperatives/profile?id=… and
+          /cooperative-profile rendered the identical component from different
+          paths, so a fix applied to one was still missing from the other. This
+          is now the only one; the old path redirects, keeping its ?id=.
+        */}
         <Route
           path="cooperative-profile"
-          element={
-            <RoleRoute roles={["manager", "member"]} requireCooperative>
-              <CooperativeProfile />
-            </RoleRoute>
-          }
-        />
-        <Route
-          path="cooperatives/profile"
           element={
             <RoleRoute roles={["admin", "manager", "member", "government", "generalManager"]}>
               <CooperativeProfile />
             </RoleRoute>
           }
         />
+        <Route path="cooperatives/profile" element={<RedirectKeepingQuery to="/cooperative-profile" />} />
         <Route
           path="cooperative-documents"
           element={
-            <RoleRoute roles={["manager", "member", "government"]}>
+            <RoleRoute roles={["manager", "member", "government", "admin", "generalManager"]}>
               <CooperativeDocuments />
             </RoleRoute>
           }
         />
-        <Route
-          path="membership"
-          element={
-            <RoleRoute roles={["member", "manager", "admin", "generalManager"]}>
-              <Membership />
-            </RoleRoute>
-          }
-        />
-        <Route path="cooperative-requests" element={<CooperativeRequests />} />
+        {/*
+          Leaving a cooperative is now a tab of Services & requests — it is a
+          formal request like the others, it just happens to be decided by the
+          general assembly rather than by the RCA. The old path is kept as a
+          redirect because notifications already sitting in people's inboxes
+          link to it, and it carries the tab so those links still land on the
+          right panel.
+        */}
+        <Route path="membership" element={<Navigate to="/rca-services?tab=membership" replace />} />
+        {/*
+          Formation, dissolution and the certificate services all live on
+          /rca-services now. The old path is kept as a redirect rather than
+          deleted, because it is in notification links already sitting in
+          people's inboxes.
+        */}
+        <Route path="cooperative-requests" element={<Navigate to="/rca-services" replace />} />
+        {/*
+          The league table is a tab of District Monitoring now — it answers the
+          same question that page exists for. The old path redirects so links
+          already in notifications and bookmarks land on the right tab.
+        */}
         <Route
           path="rankings"
-          element={
-            <RoleRoute roles={["government", "admin", "generalManager"]}>
-              <CooperativeRankings />
-            </RoleRoute>
-          }
+          element={<Navigate to="/government-monitoring?tab=league" replace />}
         />
         <Route
           path="monthly-audit"
@@ -461,10 +574,39 @@ function AppRoutes() {
         />
         <Route path="permits" element={<Permits />} />
         <Route path="funding" element={<Funding />} />
+        <Route
+          path="rca-services"
+          element={
+            <RoleRoute roles={["member", "manager", "admin", "generalManager", "government"]}>
+              <RcaServices />
+            </RoleRoute>
+          }
+        />
         <Route path="messages" element={<Messages />} />
         <Route path="notifications" element={<Notifications />} />
-        <Route path="integrations" element={<Integrations />} />
-        <Route path="security-audit" element={<SecurityAudit />} />
+        <Route
+          path="integrations"
+          element={
+            <RoleRoute roles={["admin", "generalManager"]}>
+              <Integrations />
+            </RoleRoute>
+          }
+        />
+        {/*
+          The security console reads every account's login history, the audit
+          log and the anomaly queue. The backend restricts all of it to
+          administrators; without this guard the page still rendered for anyone
+          who typed the URL and simply filled with failed requests, which looks
+          like a broken page rather than a closed door.
+        */}
+        <Route
+          path="security-audit"
+          element={
+            <RoleRoute roles={SECURITY_ROLES}>
+              <SecurityAudit />
+            </RoleRoute>
+          }
+        />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>

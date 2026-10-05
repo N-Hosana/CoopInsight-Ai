@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../services/api";
+import { AssemblyCaller } from "../components/AssemblyCaller";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { Input } from "../components/Input";
@@ -15,6 +16,7 @@ import {
   Undo2,
   Brain,
   FileSearch,
+  ClipboardList,
   Upload,
   ListChecks,
   ArrowRight,
@@ -38,17 +40,23 @@ interface CriterionResult extends Criterion {
   finding: string;
 }
 
+/**
+ * `ai_assessment` holds one of two shapes: a formation assessment
+ * (`criteria`, `confidence`, `assessedAt`) or a service-request assessment —
+ * which is what a dissolution carries — with `results` and neither of the others.
+ */
 interface Assessment {
   eligible: boolean;
   score: number;
-  confidence: number;
+  confidence?: number;
   passMark: number;
-  criteria: CriterionResult[];
+  criteria?: CriterionResult[];
+  results?: Array<Pick<CriterionResult, "id" | "label" | "mandatory" | "passed" | "finding">>;
   failedMandatory: string[];
   missingDocuments: string[];
   recommendations: string[];
   model: string;
-  assessedAt: string;
+  assessedAt?: string;
 }
 
 interface RequestDocument {
@@ -71,7 +79,7 @@ interface Review {
 
 interface CoopRequest {
   id: string;
-  request_type: "formation" | "dissolution";
+  request_type: "formation" | "dissolution" | "issue_report";
   reference: string;
   submitted_by: string;
   submitted_by_name: string;
@@ -105,6 +113,53 @@ interface CoopRequest {
   audits: RcaAudit[];
   filed_as_role: string | null;
   target_completion_at: string | null;
+
+  // ── The two-stage dissolution (Law 057/2024, arts. 132-142) ──────────────
+  dissolution_stage: "decision" | "distribution" | "complete" | null;
+  liquidator_name: string | null;
+  liquidator_qualification: string | null;
+  liquidator_phone: string | null;
+  liquidator_email: string | null;
+  monitoring_committee: Array<string | { name?: string }> | null;
+  assembly_held_on: string | null;
+  second_assembly_held_on: string | null;
+  assets_distributed: boolean;
+  certificate_returned: boolean;
+  creditors_notified: boolean;
+  loans_recovered: string | null;
+  creditors_paid: string | null;
+  rca_informed_at: string | null;
+
+  /** Every named stage this request passes through. Computed by the server. */
+  process: RequestProcess;
+}
+
+/**
+ * One named stage of forming or dissolving a cooperative.
+ *
+ * The three-chip sector → district → RCA trail was accurate and useless: it
+ * showed a dissolution sitting "with the RCA" when what was actually holding it
+ * up was the liquidator's report, which is not a stage the chain knows about.
+ * The server now returns every real stage, and this page draws all of them.
+ */
+interface RequestStage {
+  key: string;
+  order: number;
+  title: string;
+  description: string;
+  actor: "cooperative" | "liquidator" | "sector" | "district" | "rca" | "system";
+  state: "done" | "current" | "blocked" | "pending" | "failed" | "skipped";
+  completedAt?: string | null;
+  detail?: string;
+  blockedReason?: string;
+}
+
+interface RequestProcess {
+  stages: RequestStage[];
+  currentStageKey: string | null;
+  percentComplete: number;
+  nextAction: string | null;
+  blockedBy: string | null;
 }
 
 /** The RCA's own audit of a dissolution request, which gates the strike-off. */
@@ -208,7 +263,133 @@ function StageTrail({ request }: { request: CoopRequest }) {
   );
 }
 
+const STAGE_ACTOR_LABELS: Record<string, string> = {
+  cooperative: "The cooperative",
+  liquidator: "The appointed liquidator",
+  sector: "Sector cooperative officer",
+  district: "District cooperative officer",
+  rca: "RCA",
+  system: "Automatic",
+};
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE WHOLE PROCEDURE, DRAWN
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * For a dissolution this is eight stages, not three: the committee calls the
+ * assembly, the assembly resolves and appoints the liquidator, the request is
+ * filed, the sector reviews it, the district reviews it, the liquidator
+ * collects and distributes, the RCA audits the grounds, and only then is the
+ * cooperative struck off.
+ *
+ * Every stage says who moves it and what is outstanding. A blocked stage says
+ * what is blocking it, which is the thing "pending_rca" never told anyone.
+ */
+function ProcessTrail({ process }: { process: RequestProcess }) {
+  if (!process?.stages?.length) return null;
+
+  const styles: Record<string, { ring: string; label: string }> = {
+    done: { ring: "bg-green-600 border-green-600 text-white", label: "text-gray-900" },
+    current: { ring: "bg-white border-[#2D6A4F] text-[#2D6A4F]", label: "text-gray-900 font-medium" },
+    blocked: { ring: "bg-white border-red-500 text-red-600", label: "text-gray-900 font-medium" },
+    failed: { ring: "bg-red-600 border-red-600 text-white", label: "text-red-700 font-medium" },
+    pending: { ring: "bg-white border-gray-300 text-gray-400", label: "text-gray-500" },
+    skipped: { ring: "bg-gray-100 border-gray-200 text-gray-400", label: "text-gray-400" },
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-gray-900">Every stage this request passes through</p>
+        <span className="text-xs font-semibold text-gray-600">{process.percentComplete}% complete</span>
+      </div>
+      <div className="mb-4 h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
+        <div
+          className="h-full rounded-full bg-[#2D6A4F] transition-all"
+          style={{ width: `${process.percentComplete}%` }}
+        />
+      </div>
+
+      <ol className="space-y-0">
+        {process.stages.map((stage, index) => {
+          const style = styles[stage.state] ?? styles.pending;
+          const last = index === process.stages.length - 1;
+          return (
+            <li key={stage.key} className="flex gap-3">
+              <div className="flex flex-col items-center">
+                <span
+                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 text-[11px] font-semibold ${style.ring}`}
+                >
+                  {stage.state === "done" ? (
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  ) : stage.state === "failed" ? (
+                    <XCircle className="h-3.5 w-3.5" />
+                  ) : (
+                    stage.order
+                  )}
+                </span>
+                {!last && (
+                  <span
+                    className={`w-0.5 flex-1 ${stage.state === "done" ? "bg-green-600" : "bg-gray-200"}`}
+                    style={{ minHeight: 14 }}
+                  />
+                )}
+              </div>
+              <div className={last ? "pb-0" : "pb-4"}>
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <p className={`text-sm ${style.label}`}>{stage.title}</p>
+                  <span className="text-[11px] uppercase tracking-wide text-gray-400">
+                    {STAGE_ACTOR_LABELS[stage.actor] ?? stage.actor}
+                  </span>
+                  {stage.completedAt && (
+                    <span className="text-[11px] text-gray-400">{formatDate(stage.completedAt)}</span>
+                  )}
+                </div>
+                <p className="mt-0.5 text-xs text-gray-600">{stage.description}</p>
+                {stage.detail && <p className="mt-0.5 text-xs text-gray-500">{stage.detail}</p>}
+                {stage.blockedReason && (
+                  <p className="mt-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">
+                    {stage.blockedReason}
+                  </p>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+
+      {process.nextAction && (
+        <p className="mt-2 rounded-lg border border-[#2D6A4F]/20 bg-white px-3 py-2 text-xs text-[#1b4332]">
+          <strong>Next:</strong> {process.nextAction}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One requirement of the liquidation, done or not done.
+ *
+ * Shown as a row of flags rather than prose because the RCA cannot strike a
+ * cooperative off until every one of them is true, and "which of these is still
+ * missing" is the only question anyone asks of this block.
+ */
+function LiquidationFlag({ done, label }: { done: boolean; label: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+        done ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-500"
+      }`}
+    >
+      {done ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clock className="h-3.5 w-3.5" />}
+      {label}
+    </span>
+  );
+}
+
 function AssessmentPanel({ assessment }: { assessment: Assessment }) {
+  const rows = assessment.criteria ?? assessment.results ?? [];
   return (
     <div
       className={`rounded-xl border p-4 ${
@@ -223,8 +404,8 @@ function AssessmentPanel({ assessment }: { assessment: Assessment }) {
           </p>
         </div>
         <p className="text-xs text-gray-600">
-          Score {Math.round(assessment.score * 100)}% · pass mark {Math.round(assessment.passMark * 100)}% ·
-          confidence {Math.round(assessment.confidence * 100)}%
+          Score {Math.round(assessment.score * 100)}% · pass mark {Math.round(assessment.passMark * 100)}%
+          {assessment.confidence != null && <> · confidence {Math.round(assessment.confidence * 100)}%</>}
         </p>
       </div>
 
@@ -236,7 +417,7 @@ function AssessmentPanel({ assessment }: { assessment: Assessment }) {
       </div>
 
       <ul className="mt-4 space-y-1.5">
-        {assessment.criteria.map((c) => (
+        {rows.map((c) => (
           <li key={c.id} className="flex items-start gap-2 text-sm">
             {c.passed ? (
               <CheckCircle2 className="w-4 h-4 text-green-600 mt-0.5 shrink-0" />
@@ -253,7 +434,8 @@ function AssessmentPanel({ assessment }: { assessment: Assessment }) {
       </ul>
 
       <p className="mt-4 text-xs text-gray-600 border-t border-black/5 pt-3">
-        {assessment.model} · assessed {new Date(assessment.assessedAt).toLocaleString()}. This is a prediction against
+        {assessment.model}
+        {assessment.assessedAt && <> · assessed {new Date(assessment.assessedAt).toLocaleString()}</>}. This is a prediction against
         the configured criteria — the decision remains with the officer.
       </p>
     </div>
@@ -271,11 +453,24 @@ export function CooperativeRequests() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // The liquidator's close-out report, recorded against a dissolution.
+  const [liquidatingFor, setLiquidatingFor] = useState<string | null>(null);
+  const [liquidation, setLiquidation] = useState({
+    loansRecovered: "",
+    creditorsPaid: "",
+    creditorsNotified: false,
+    assetsDistributed: false,
+    certificateReturned: false,
+    secondAssemblyHeldOn: "",
+    report: "",
+  });
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [auditFindings, setAuditFindings] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const [mode, setMode] = useState<"none" | "formation" | "dissolution">("none");
+  const formRef = useRef<HTMLDivElement>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
 
@@ -285,14 +480,35 @@ export function CooperativeRequests() {
     contactName: user?.name ?? "", contactPhone: user?.phone ?? "", contactEmail: user?.email ?? "",
   });
 
-  const [dissolution, setDissolution] = useState({
+  const emptyDissolution = () => ({
     dissolutionReason: "", votesFor: "", votesAgainst: "", votesAbstain: "",
     outstandingLiabilities: "", assetDisposalPlan: "",
     contactName: user?.name ?? "", contactPhone: user?.phone ?? "",
+    // Stage 1: what the resolving assembly decided and who it appointed.
+    assemblyHeldOn: "", membersPresent: "",
+    liquidatorName: "", liquidatorQualification: "", liquidatorPhone: "", liquidatorEmail: "",
+    liquidatorIsMember: false,
+    monitoringCommittee: "",
+    rcaNotifiedAt: "", assetInventoryDone: false, cmisReference: "",
   });
+  const [dissolution, setDissolution] = useState(emptyDissolution);
+
+  // The forms sit below the published-criteria panel, which is tall enough to
+  // push them off screen entirely. Without this, pressing the button changed
+  // state correctly and looked like it had done nothing at all.
+  useEffect(() => {
+    if (mode !== "none") {
+      formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [mode]);
 
   const isOfficer = viewerStage !== null;
   const isRca = viewerStage === "rca" || viewerStage === "any";
+  // Only serving oversight officers are kept out of the application forms.
+  // Administrators review at every stage (`viewerStage === "any"`), but they are
+  // not officers and the backend lets them file, so gating the button on
+  // `isOfficer` hid it from them for no reason.
+  const canApply = user?.role !== "government";
   const canFileDissolution = ["manager", "cooperative", "admin", "generalManager"].includes(user?.role ?? "");
 
   const load = async () => {
@@ -303,7 +519,11 @@ export function CooperativeRequests() {
         api.get<{ data: CoopRequest[]; viewerStage: string | null }>("/cooperative-requests"),
         api.get<{ data: any }>("/cooperative-requests/criteria"),
       ]);
-      setRequests(list.data ?? []);
+      // Issue reports share this endpoint and the same review chain, but they
+      // belong to the "Report an issue" tab. They are filtered out here rather
+      // than with `?type=` on the request, because this tab needs BOTH
+      // formation and dissolution and the endpoint takes only one type.
+      setRequests((list.data ?? []).filter((r) => r.request_type !== "issue_report"));
       setViewerStage(list.viewerStage ?? null);
       setCriteria(rules.data);
     } catch (err: any) {
@@ -362,6 +582,22 @@ export function CooperativeRequests() {
     if (dissolution.assetDisposalPlan.trim().length < 30) {
       return setFormError("An asset disposal and settlement plan of at least 30 characters is required.");
     }
+    if (!dissolution.assemblyHeldOn || !dissolution.membersPresent) {
+      return setFormError("Record the date of the general assembly and how many attended.");
+    }
+    if (!dissolution.liquidatorName.trim() || !dissolution.liquidatorQualification) {
+      return setFormError("Name the liquidator the assembly appointed and their qualification.");
+    }
+    if (!dissolution.liquidatorPhone.trim()) {
+      return setFormError("Give a telephone number for the liquidator.");
+    }
+    const committee = dissolution.monitoringCommittee
+      .split(/[\n,]/)
+      .map((n) => n.trim())
+      .filter(Boolean);
+    if (committee.length === 0) {
+      return setFormError("Name at least one member of the monitoring committee.");
+    }
     setSubmitting(true);
     try {
       const res = await api.post<{ message: string }>("/cooperative-requests/dissolution", {
@@ -371,9 +607,15 @@ export function CooperativeRequests() {
         votesAgainst: dissolution.votesAgainst ? Number(dissolution.votesAgainst) : undefined,
         votesAbstain: dissolution.votesAbstain ? Number(dissolution.votesAbstain) : undefined,
         outstandingLiabilities: dissolution.outstandingLiabilities ? Number(dissolution.outstandingLiabilities) : undefined,
+        membersPresent: Number(dissolution.membersPresent),
+        monitoringCommittee: committee,
+        liquidatorEmail: dissolution.liquidatorEmail.trim() || undefined,
+        rcaNotifiedAt: dissolution.rcaNotifiedAt || undefined,
+        cmisReference: dissolution.cmisReference.trim() || undefined,
       });
       setMessage(res.message);
       setMode("none");
+      setDissolution(emptyDissolution());
       await load();
     } catch (err: any) {
       setFormError(err?.message ?? "Could not submit the dissolution request.");
@@ -456,6 +698,45 @@ export function CooperativeRequests() {
     }
   };
 
+  /**
+   * Recording the second stage of a dissolution: what the liquidator recovered,
+   * who was paid, and the assembly that received their report.
+   *
+   * This existed as an endpoint with no way to reach it, which meant a
+   * dissolution could be filed and then sat at the RCA forever, because the one
+   * thing that unblocks it — the liquidation being finished — could not be
+   * recorded anywhere.
+   */
+  const recordLiquidation = async (id: string) => {
+    setBusyId(id);
+    setError("");
+    try {
+      const res = await api.patch<{ message: string }>(
+        `/service-requests/${id}/dissolution-stage`,
+        {
+          loansRecovered:
+            liquidation.loansRecovered === "" ? undefined : Number(liquidation.loansRecovered),
+          creditorsPaid:
+            liquidation.creditorsPaid === "" ? undefined : Number(liquidation.creditorsPaid),
+          creditorsNotified: liquidation.creditorsNotified || undefined,
+          assetsDistributed: liquidation.assetsDistributed || undefined,
+          certificateReturned: liquidation.certificateReturned || undefined,
+          secondAssemblyHeldOn: liquidation.secondAssemblyHeldOn || undefined,
+          liquidatorReport: liquidation.report.trim()
+            ? { summary: liquidation.report.trim() }
+            : undefined,
+        }
+      );
+      setMessage(res.message);
+      setLiquidatingFor(null);
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not record the liquidation.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const withdraw = async (id: string) => {
     setBusyId(id);
     try {
@@ -513,7 +794,7 @@ export function CooperativeRequests() {
               : "Apply to start a new cooperative, or request that an existing one be wound up. Requests are reviewed by the sector officer, then the district, then the RCA."}
           </p>
         </div>
-        {!isOfficer && (
+        {canApply && (
           <div className="flex flex-wrap gap-3">
             <Button onClick={() => { setMode("formation"); setFormError(""); }}>
               <span className="flex items-center gap-2">
@@ -573,7 +854,10 @@ export function CooperativeRequests() {
         </Card>
       )}
 
-      {/* ── Formation form ───────────────────────────────────────────────── */}
+      {/* ── Application forms ─────────────────────────────────────────────
+          Anchored so opening one scrolls it into view; see the effect above. */}
+      <div ref={formRef} />
+
       {mode === "formation" && (
         <Card className="p-6">
           <h2 className="text-lg font-semibold text-gray-900">Apply to start a cooperative</h2>
@@ -678,10 +962,22 @@ export function CooperativeRequests() {
             <p className="text-sm text-amber-900">
               Dissolution is final once the RCA approves it. The cooperative is removed from the active register, its
               operating permit is revoked and every member is unlinked. Only the president may file this request, it
-              must be backed by a general assembly resolution carried by two thirds of the votes cast, and the RCA
-              audits the grounds before anything takes effect. The whole chain targets 14 days, though a contested
+              must be backed by a general assembly attended by three-quarters of the members, carried by three-quarters
+              of the votes cast, which also appoints a liquidator and a monitoring committee. The RCA audits the grounds
+              before anything takes effect. The whole chain targets 14 days, though a contested
               case or unsettled accounts will take longer.
             </p>
+          </div>
+
+          {/* Step one: the assembly that decides. It is called from here so it
+              lands on every member's calendar; its outcome is what the form
+              below records. */}
+          <div className="mt-6">
+            <AssemblyCaller
+              stage="decision"
+              cooperativeId={user?.cooperativeId}
+              intro="First call the general assembly that will vote on dissolving and appoint the liquidator. It goes on the activities calendar with every member registered and notified. Once it has sat, fill in its outcome below."
+            />
           </div>
 
           <form onSubmit={submitDissolution} className="mt-6 space-y-5">
@@ -693,6 +989,13 @@ export function CooperativeRequests() {
                 onChange={(e) => setDissolution({ ...dissolution, dissolutionReason: e.target.value })}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F] focus:border-transparent"
               />
+            </div>
+
+            <div className="grid gap-5 sm:grid-cols-2">
+              <Input label="Date of the general assembly *" type="date" value={dissolution.assemblyHeldOn}
+                onChange={(e) => setDissolution({ ...dissolution, assemblyHeldOn: e.target.value })} />
+              <Input label="Members (or delegates) present *" type="number" min={0} value={dissolution.membersPresent}
+                onChange={(e) => setDissolution({ ...dissolution, membersPresent: e.target.value })} />
             </div>
 
             <div className="grid gap-5 sm:grid-cols-3">
@@ -724,6 +1027,59 @@ export function CooperativeRequests() {
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F] focus:border-transparent"
               />
             </div>
+
+            {/* The assembly that resolves to dissolve must also appoint the person
+                who collects and distributes the assets, and the members who watch them. */}
+            <fieldset className="space-y-5 rounded-lg border border-gray-200 p-4">
+              <legend className="px-1 text-sm font-semibold text-gray-900">Liquidator appointed by the assembly</legend>
+              <div className="grid gap-5 sm:grid-cols-2">
+                <Input label="Full name *" value={dissolution.liquidatorName}
+                  onChange={(e) => setDissolution({ ...dissolution, liquidatorName: e.target.value })} />
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Qualification *</label>
+                  <select
+                    value={dissolution.liquidatorQualification}
+                    onChange={(e) => setDissolution({ ...dissolution, liquidatorQualification: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F] focus:border-transparent"
+                  >
+                    <option value="">Select…</option>
+                    <option value="financial_auditor">Financial auditor</option>
+                    <option value="accountant">Accountant</option>
+                    <option value="authorised_by_competent_authority">Authorised by a competent authority</option>
+                  </select>
+                </div>
+                <Input label="Telephone *" type="tel" value={dissolution.liquidatorPhone}
+                  onChange={(e) => setDissolution({ ...dissolution, liquidatorPhone: e.target.value })} />
+                <Input label="Email" type="email" value={dissolution.liquidatorEmail}
+                  onChange={(e) => setDissolution({ ...dissolution, liquidatorEmail: e.target.value })} />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={dissolution.liquidatorIsMember}
+                  onChange={(e) => setDissolution({ ...dissolution, liquidatorIsMember: e.target.checked })} />
+                The liquidator is a member of the cooperative
+              </label>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Monitoring committee *</label>
+                <textarea
+                  rows={3}
+                  value={dissolution.monitoringCommittee}
+                  onChange={(e) => setDissolution({ ...dissolution, monitoringCommittee: e.target.value })}
+                  placeholder="Members appointed to monitor the liquidator — one name per line, or separated by commas."
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2D6A4F] focus:border-transparent"
+                />
+              </div>
+              <div className="grid gap-5 sm:grid-cols-2">
+                <Input label="Date the RCA was notified" type="date" value={dissolution.rcaNotifiedAt}
+                  onChange={(e) => setDissolution({ ...dissolution, rcaNotifiedAt: e.target.value })} />
+                <Input label="CMIS reference" value={dissolution.cmisReference}
+                  onChange={(e) => setDissolution({ ...dissolution, cmisReference: e.target.value })} />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={dissolution.assetInventoryDone}
+                  onChange={(e) => setDissolution({ ...dissolution, assetInventoryDone: e.target.checked })} />
+                An inventory of the cooperative's assets has been taken
+              </label>
+            </fieldset>
 
             {formError && (
               <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{formError}</div>
@@ -793,6 +1149,18 @@ export function CooperativeRequests() {
                   <StageTrail request={r} />
                 </div>
 
+                {/*
+                  The compact trail above is the oversight chain. This is the
+                  whole procedure, which for a dissolution is five stages more
+                  than the chain: two general assemblies, the liquidation, and
+                  the RCA's audit of the grounds.
+                */}
+                {r.process && (
+                  <div className="mt-4">
+                    <ProcessTrail process={r.process} />
+                  </div>
+                )}
+
                 {r.ai_assessment && (
                   <div className="mt-5">
                     <AssessmentPanel assessment={r.ai_assessment} />
@@ -843,6 +1211,80 @@ export function CooperativeRequests() {
                           <div className="sm:col-span-2">
                             <dt className="text-gray-500">Asset disposal plan</dt>
                             <dd className="text-gray-900 mt-1 whitespace-pre-wrap">{r.asset_disposal_plan}</dd>
+                          </div>
+
+                          {/*
+                            Stage 1 of the statutory procedure: who the assembly
+                            put in charge of collecting and distributing the
+                            assets, and who watches them do it. Without these
+                            names on the record there is nobody to hold to it.
+                          */}
+                          <div>
+                            <dt className="text-gray-500">Appointed liquidator</dt>
+                            <dd className="font-medium text-gray-900">
+                              {r.liquidator_name ?? "—"}
+                              {r.liquidator_qualification && (
+                                <span className="font-normal text-gray-500">
+                                  {" "}
+                                  ({r.liquidator_qualification.replace(/_/g, " ")})
+                                </span>
+                              )}
+                              {(r.liquidator_phone || r.liquidator_email) && (
+                                <span className="block font-normal text-gray-600">
+                                  {[r.liquidator_phone, r.liquidator_email].filter(Boolean).join(" · ")}
+                                </span>
+                              )}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-gray-500">Monitoring committee</dt>
+                            <dd className="font-medium text-gray-900">
+                              {Array.isArray(r.monitoring_committee) && r.monitoring_committee.length
+                                ? r.monitoring_committee
+                                    .map((m) => (typeof m === "string" ? m : m?.name ?? ""))
+                                    .filter(Boolean)
+                                    .join(", ")
+                                : "—"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-gray-500">First assembly held</dt>
+                            <dd className="font-medium text-gray-900">
+                              {formatDate(r.assembly_held_on)}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-gray-500">Second assembly held</dt>
+                            <dd className="font-medium text-gray-900">
+                              {formatDate(r.second_assembly_held_on)}
+                            </dd>
+                          </div>
+                          <div className="sm:col-span-2">
+                            <dt className="text-gray-500">Liquidation</dt>
+                            <dd className="mt-1 flex flex-wrap gap-2">
+                              <LiquidationFlag done={Boolean(r.creditors_notified)} label="Creditors notified" />
+                              <LiquidationFlag
+                                done={r.loans_recovered != null}
+                                label={
+                                  r.loans_recovered != null
+                                    ? `Loans recovered ${money(r.loans_recovered)}`
+                                    : "Loans recovered"
+                                }
+                              />
+                              <LiquidationFlag
+                                done={r.creditors_paid != null}
+                                label={
+                                  r.creditors_paid != null
+                                    ? `Creditors paid ${money(r.creditors_paid)}`
+                                    : "Creditors paid"
+                                }
+                              />
+                              <LiquidationFlag done={Boolean(r.assets_distributed)} label="Assets distributed" />
+                              <LiquidationFlag
+                                done={Boolean(r.certificate_returned)}
+                                label="Original certificate returned"
+                              />
+                            </dd>
                           </div>
                         </>
                       )}
@@ -923,6 +1365,177 @@ export function CooperativeRequests() {
                     )}
                   </div>
                 )}
+
+                {/*
+                  ── Stage 6: the liquidation ──────────────────────────────
+                  The liquidator recovers what is owed to the cooperative, pays
+                  what the cooperative owes, distributes what is left, and
+                  reports to a second general assembly. Only when all of that is
+                  recorded — and the original certificate handed back — can the
+                  RCA strike the cooperative off.
+                */}
+                {r.request_type === "dissolution" &&
+                  r.dissolution_stage === "distribution" &&
+                  r.status.startsWith("pending") && (
+                    <div className="mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4">
+                      {liquidatingFor !== r.id ? (
+                        <>
+                          <div className="flex items-start gap-2">
+                            <ClipboardList className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                            <div>
+                              <p className="text-sm font-medium text-amber-900">
+                                Record the liquidation and the second assembly
+                              </p>
+                              <p className="mt-0.5 text-xs text-amber-800">
+                                {r.liquidator_name
+                                  ? `${r.liquidator_name} was appointed to collect and distribute the assets. `
+                                  : ""}
+                                The RCA cannot strike {r.cooperative_name ?? "the cooperative"} off
+                                until the creditors are paid, what remains is distributed, the
+                                second assembly has received the report, and the original
+                                certificate is back with the RCA.
+                              </p>
+                            </div>
+                          </div>
+                          {canFileDissolution &&
+                            (user?.cooperativeId === r.cooperative_id ||
+                              ["admin", "generalManager"].includes(user?.role ?? "")) && (
+                              <div className="mt-3">
+                                <AssemblyCaller
+                                  stage="distribution"
+                                  requestId={r.id}
+                                  cooperativeId={r.cooperative_id}
+                                  intro="Call the second general assembly to receive the liquidator's report. Every member is registered for it and notified."
+                                />
+                              </div>
+                            )}
+                          <Button
+                            size="sm"
+                            className="mt-3"
+                            onClick={() => {
+                              setLiquidatingFor(r.id);
+                              setLiquidation({
+                                loansRecovered: r.loans_recovered ?? "",
+                                creditorsPaid: r.creditors_paid ?? "",
+                                creditorsNotified: Boolean(r.creditors_notified),
+                                assetsDistributed: Boolean(r.assets_distributed),
+                                certificateReturned: Boolean(r.certificate_returned),
+                                secondAssemblyHeldOn: r.second_assembly_held_on
+                                  ? String(r.second_assembly_held_on).slice(0, 10)
+                                  : "",
+                                report: "",
+                              });
+                            }}
+                          >
+                            Record the liquidation
+                          </Button>
+                        </>
+                      ) : (
+                        <div className="space-y-4">
+                          <div className="grid gap-4 sm:grid-cols-2">
+                            <Input
+                              label="Loans recovered (RWF)"
+                              type="number"
+                              min={0}
+                              value={liquidation.loansRecovered}
+                              onChange={(e) =>
+                                setLiquidation({ ...liquidation, loansRecovered: e.target.value })
+                              }
+                            />
+                            <Input
+                              label="Creditors paid (RWF)"
+                              type="number"
+                              min={0}
+                              value={liquidation.creditorsPaid}
+                              onChange={(e) =>
+                                setLiquidation({ ...liquidation, creditorsPaid: e.target.value })
+                              }
+                            />
+                            <Input
+                              label="Second general assembly held on"
+                              type="date"
+                              value={liquidation.secondAssemblyHeldOn}
+                              onChange={(e) =>
+                                setLiquidation({
+                                  ...liquidation,
+                                  secondAssemblyHeldOn: e.target.value,
+                                })
+                              }
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            {(
+                              [
+                                ["creditorsNotified", "Every creditor has been notified"],
+                                [
+                                  "assetsDistributed",
+                                  "What remained after paying creditors has been distributed to the members",
+                                ],
+                                [
+                                  "certificateReturned",
+                                  "The original legal personality certificate has been returned to the RCA",
+                                ],
+                              ] as const
+                            ).map(([key, label]) => (
+                              <label
+                                key={key}
+                                className="flex cursor-pointer items-start gap-2 text-sm text-gray-800"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={liquidation[key]}
+                                  onChange={(e) =>
+                                    setLiquidation({ ...liquidation, [key]: e.target.checked })
+                                  }
+                                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-[#2D6A4F] focus:ring-[#2D6A4F]"
+                                />
+                                <span>{label}</span>
+                              </label>
+                            ))}
+                          </div>
+
+                          <div>
+                            <label className="mb-1 block text-sm font-medium text-gray-700">
+                              The liquidator's report to the second assembly
+                            </label>
+                            <textarea
+                              rows={3}
+                              value={liquidation.report}
+                              onChange={(e) =>
+                                setLiquidation({ ...liquidation, report: e.target.value })
+                              }
+                              placeholder="What was recovered, what was paid, what each member received, and anything still outstanding."
+                              className="w-full rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-[#2D6A4F]"
+                            />
+                          </div>
+
+                          <p className="text-xs text-gray-600">
+                            The dissolution only reaches the RCA as complete once the assets are
+                            distributed <strong>and</strong> the original certificate has been
+                            returned. Until both are ticked it stays at this stage.
+                          </p>
+
+                          <div className="flex flex-wrap gap-3">
+                            <Button
+                              size="sm"
+                              disabled={busyId === r.id}
+                              onClick={() => recordLiquidation(r.id)}
+                            >
+                              {busyId === r.id ? "Recording…" : "Save the liquidation record"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setLiquidatingFor(null)}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                 {/* Actions */}
                 <div className="mt-5 border-t border-gray-200 pt-4 flex flex-wrap gap-3">

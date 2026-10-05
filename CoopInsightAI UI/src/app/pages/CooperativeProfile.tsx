@@ -306,7 +306,7 @@ ${cooperative.description}
       {comingFromList && (
         <button
           onClick={() => navigate("/cooperatives")}
-          className="flex items-center gap-2 text-[#2563EB] hover:text-[#1d4ed8] text-sm font-medium"
+          className="flex items-center gap-2 text-[#2D6A4F] hover:text-[#1B5E20] text-sm font-medium"
         >
           ← Back to Cooperatives
         </button>
@@ -340,7 +340,7 @@ ${cooperative.description}
         <div className="space-y-6">
           <div className="rounded-2xl border border-gray-200 bg-white p-6">
             <div className="flex items-center gap-4 mb-4">
-              <div className="rounded-2xl bg-[#2563EB] p-3 text-white">
+              <div className="rounded-2xl bg-[#2D6A4F] p-3 text-white">
                 <Building2 className="w-5 h-5" />
               </div>
               <div>
@@ -359,7 +359,7 @@ ${cooperative.description}
                     type="text"
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   />
                 </div>
                 <div>
@@ -367,7 +367,7 @@ ${cooperative.description}
                   <select
                     value={formData.status}
                     onChange={(e) => setFormData({ ...formData, status: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                   >
                     <option value="Active">Active</option>
                     <option value="Inactive">Inactive</option>
@@ -408,7 +408,7 @@ ${cooperative.description}
                   type="text"
                   value={formData.operatingArea}
                   onChange={(e) => setFormData({ ...formData, operatingArea: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                 />
               ) : (
                 <p className="text-gray-900">{cooperative.operatingArea}</p>
@@ -436,7 +436,7 @@ ${cooperative.description}
                     type="text"
                     value={formData.president}
                     onChange={(e) => setFormData({ ...formData, president: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB] mt-1"
+                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F] mt-1"
                   />
                 ) : (
                   <p className="font-medium text-gray-900">{formData.president || "—"}</p>
@@ -452,7 +452,7 @@ ${cooperative.description}
                     type="text"
                     value={formData.vicePresident}
                     onChange={(e) => setFormData({ ...formData, vicePresident: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB] mt-1"
+                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F] mt-1"
                   />
                 ) : (
                   <p className="font-medium text-gray-900">{formData.vicePresident || "—"}</p>
@@ -468,7 +468,7 @@ ${cooperative.description}
                     type="text"
                     value={formData.secretary}
                     onChange={(e) => setFormData({ ...formData, secretary: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2563EB] mt-1"
+                    className="w-full rounded-lg border border-gray-300 px-4 py-2 outline-none focus:ring-2 focus:ring-[#2D6A4F] mt-1"
                   />
                 ) : (
                   <p className="font-medium text-gray-900">{formData.secretary || "Vacant"}</p>
@@ -518,7 +518,7 @@ ${cooperative.description}
                           href={doc.file_url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="font-medium text-[#2563EB] hover:underline truncate block"
+                          className="font-medium text-[#2D6A4F] hover:underline truncate block"
                         >
                           {doc.name}
                         </a>
@@ -565,7 +565,7 @@ ${cooperative.description}
             <div className="rounded-2xl border border-gray-200 bg-white p-6">
               <h3 className="text-sm font-medium text-gray-700 mb-4">Health Score</h3>
               <div className="flex items-center gap-4 mb-4">
-                <span className="text-4xl font-bold text-[#2563EB]">{healthScore.score}</span>
+                <span className="text-4xl font-bold text-[#2D6A4F]">{healthScore.score}</span>
                 <span
                   className={`text-xs px-2 py-1 rounded-full font-medium ${
                     healthScore.trend === "up"
@@ -587,7 +587,7 @@ ${cooperative.description}
                         <span>{val}%</span>
                       </div>
                       <div className="w-full bg-gray-200 rounded-full h-1.5">
-                        <div className="bg-[#2563EB] h-1.5 rounded-full" style={{ width: `${val}%` }}></div>
+                        <div className="bg-[#2D6A4F] h-1.5 rounded-full" style={{ width: `${val}%` }}></div>
                       </div>
                     </div>
                   ))}

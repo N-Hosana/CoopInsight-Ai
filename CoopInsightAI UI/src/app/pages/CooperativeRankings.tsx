@@ -16,7 +16,25 @@ import {
   RefreshCw,
 } from "lucide-react";
 
-type DimensionKey = "finance" | "growth" | "engagement" | "governance" | "scale";
+/**
+ * The three things a cooperative is ranked on.
+ *
+ * There were five. Two of them — `growth` and `scale` — were dropped: growth is
+ * a financial question and now sits inside Finances, and scale measured how old
+ * and how rich a cooperative already was rather than how it performed, which
+ * flattered established cooperatives over new ones doing better work. Savings
+ * per member is still shown as context; it no longer moves the rank.
+ */
+type DimensionKey = "finances" | "engagement" | "activities";
+
+/** One of the measures that makes up a pillar, as the AI service declares it. */
+interface PillarMeasure {
+  key: string;
+  label: string;
+  weight: number;
+  description: string;
+  unit: string;
+}
 
 interface Standing {
   cooperativeId: string;
@@ -30,18 +48,22 @@ interface Standing {
   compositeScore: number;
   band: "leading" | "solid" | "needs_support" | "at_risk";
   scores: Record<DimensionKey, number | null>;
+  /** Percentile per underlying measure, so a pillar score can be taken apart. */
+  measureScores: Record<string, number>;
   unmeasured: string[];
   evidence: {
     income: number;
     expense: number;
     surplus: number;
     surplusPerMember: number;
-    savingsGrowthPerMember: number;
+    savingsGrowthPerMember: number | null;
     contributors: number;
     contributorShare: number;
     activitiesScheduled: number;
     activitiesCompleted: number;
+    activitiesPer10Members: number | null;
     attendanceRate: number | null;
+    completionRate: number | null;
     savingsPerMember: number;
   };
 }
@@ -52,14 +74,26 @@ interface LeagueTable {
   availablePeriods: string[];
   standings: Standing[];
   districtAverage: Record<DimensionKey, number>;
+  districtAverageMeasures?: Record<string, number>;
   weights: Record<DimensionKey, number>;
   dimensions: Record<DimensionKey, string>;
   dimensionDescriptions: Record<DimensionKey, string>;
+  pillarMeasures?: Record<DimensionKey, PillarMeasure[]>;
   note?: string;
   reachable?: boolean;
 }
 
-const DIMENSION_ORDER: DimensionKey[] = ["finance", "growth", "engagement", "governance", "scale"];
+/**
+ * Column order. Taken from the weights the service actually returned rather
+ * than hardcoded, so adding or reweighting a pillar on the AI side cannot leave
+ * this table showing a stale set of columns.
+ */
+const dimensionOrder = (table: LeagueTable | null): DimensionKey[] => {
+  const fallback: DimensionKey[] = ["finances", "engagement", "activities"];
+  if (!table?.weights) return fallback;
+  const keys = Object.keys(table.weights) as DimensionKey[];
+  return keys.length ? keys.sort((a, b) => table.weights[b] - table.weights[a]) : fallback;
+};
 
 const BAND_STYLES: Record<string, { label: string; chip: string; bar: string }> = {
   leading: { label: "Leading", chip: "bg-green-100 text-green-800", bar: "bg-green-600" },
@@ -114,7 +148,11 @@ function ScoreCell({ value }: { value: number | null }) {
   return <span className={`font-medium ${tone}`}>{value.toFixed(0)}</span>;
 }
 
-export function CooperativeRankings() {
+/**
+ * `embedded` is set when this is rendered as a tab of District Monitoring,
+ * which owns the page heading. Without it the tab carries two titles.
+ */
+export function CooperativeRankings({ embedded = false }: { embedded?: boolean } = {}) {
   const navigate = useNavigate();
   const [table, setTable] = useState<LeagueTable | null>(null);
   const [period, setPeriod] = useState<string>("");
@@ -146,17 +184,18 @@ export function CooperativeRankings() {
   }, []);
 
   const podium = useMemo(() => (table?.standings ?? []).slice(0, 3), [table]);
+  const dimensions = useMemo(() => dimensionOrder(table), [table]);
 
   const exportCsv = () => {
     if (!table) return;
     const header = [
       "Rank", "Cooperative", "Sector", "Type", "Members", "Composite",
-      ...DIMENSION_ORDER.map((d) => table.dimensions[d]),
+      ...dimensions.map((d) => table.dimensions[d]),
       "Previous rank", "Band",
     ];
     const rows = table.standings.map((s) => [
       s.rank, s.name, s.sector, s.type, s.memberCount, s.compositeScore,
-      ...DIMENSION_ORDER.map((d) => (s.scores[d] === null ? "n/a" : s.scores[d])),
+      ...dimensions.map((d) => (s.scores[d] === null ? "n/a" : s.scores[d])),
       s.previousRank ?? "n/a", BAND_STYLES[s.band]?.label ?? s.band,
     ]);
     const csv = [header, ...rows]
@@ -178,11 +217,14 @@ export function CooperativeRankings() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
+        <div className={embedded ? "sr-only" : undefined}>
           <h1 className="text-2xl font-semibold text-gray-900">District League Table</h1>
-          <p className="text-gray-600 mt-1">
-            How every cooperative in Gasabo compares this month, across five dimensions. Use it to
-            see who is leading, who is slipping, and exactly why.
+          <p className="text-gray-600 mt-1 max-w-3xl">
+            How every cooperative in Gasabo compares this month, on three things: its{" "}
+            <strong>finances</strong>, its <strong>member engagement</strong>, and the{" "}
+            <strong>activities</strong> it actually delivered. Every score opens into the figures
+            behind it, so a cooperative that disagrees with its position can be shown exactly why it
+            sits there.
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
@@ -276,13 +318,16 @@ export function CooperativeRankings() {
                     <th className="px-4 py-3 text-left font-medium text-gray-700">#</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-700">Cooperative</th>
                     <th className="px-4 py-3 text-right font-medium text-gray-700">Overall</th>
-                    {DIMENSION_ORDER.map((d) => (
+                    {dimensions.map((d) => (
                       <th
                         key={d}
                         className="px-3 py-3 text-right font-medium text-gray-700 whitespace-nowrap"
                         title={`${table.dimensionDescriptions[d]} Weight ${Math.round(table.weights[d] * 100)}%.`}
                       >
                         {table.dimensions[d]}
+                        <span className="ml-1 font-normal text-gray-400">
+                          {Math.round(table.weights[d] * 100)}%
+                        </span>
                       </th>
                     ))}
                     <th className="px-4 py-3 text-right font-medium text-gray-700">Move</th>
@@ -311,7 +356,7 @@ export function CooperativeRankings() {
                               {s.compositeScore.toFixed(0)}
                             </span>
                           </td>
-                          {DIMENSION_ORDER.map((d) => (
+                          {dimensions.map((d) => (
                             <td key={d} className="px-3 py-3 text-right">
                               <ScoreCell value={s.scores[d]} />
                             </td>
@@ -328,10 +373,57 @@ export function CooperativeRankings() {
 
                         {open && (
                           <tr key={`${s.cooperativeId}-detail`} className="bg-gray-50 border-b border-gray-200">
-                            <td colSpan={9} className="px-6 py-5">
+                            <td colSpan={dimensions.length + 5} className="px-6 py-5">
                               <p className="text-sm font-medium text-gray-900 mb-3">
                                 The figures behind this month's score
                               </p>
+
+                              {/*
+                                Each pillar, broken into the measures that made
+                                it, with this cooperative's percentile on each.
+                                A score nobody can take apart is a score nobody
+                                can argue with, and a league table that cannot
+                                be argued with will not be believed.
+                              */}
+                              {table.pillarMeasures && (
+                                <div className="mb-5 grid gap-3 sm:grid-cols-3">
+                                  {dimensions.map((d) => (
+                                    <div key={d} className="rounded-xl border border-gray-200 bg-white p-3">
+                                      <div className="flex items-baseline justify-between gap-2">
+                                        <p className="text-sm font-medium text-gray-900">
+                                          {table.dimensions[d]}
+                                        </p>
+                                        <span className="text-sm font-semibold text-gray-900">
+                                          {s.scores[d] === null ? "—" : s.scores[d]!.toFixed(0)}
+                                        </span>
+                                      </div>
+                                      <ul className="mt-2 space-y-1">
+                                        {(table.pillarMeasures?.[d] ?? []).map((m) => (
+                                          <li
+                                            key={m.key}
+                                            className="flex items-baseline justify-between gap-2 text-xs"
+                                            title={m.description}
+                                          >
+                                            <span className="text-gray-600">
+                                              {m.label}
+                                              <span className="text-gray-400">
+                                                {" "}
+                                                ({Math.round(m.weight * 100)}%)
+                                              </span>
+                                            </span>
+                                            <span className="font-medium text-gray-900">
+                                              {s.measureScores?.[m.key] != null
+                                                ? s.measureScores[m.key].toFixed(0)
+                                                : "—"}
+                                            </span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
                               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 text-sm">
                                 <div>
                                   <p className="text-gray-500">Income / expenses</p>
@@ -348,12 +440,16 @@ export function CooperativeRankings() {
                                 <div>
                                   <p className="text-gray-500">Savings growth per member</p>
                                   <p className="font-medium text-gray-900">
-                                    {money(s.evidence.savingsGrowthPerMember)}
+                                    {s.evidence.savingsGrowthPerMember === null
+                                      ? "No prior month to compare"
+                                      : money(s.evidence.savingsGrowthPerMember)}
                                   </p>
                                 </div>
                                 <div>
                                   <p className="text-gray-500">Savings held per member</p>
                                   <p className="font-medium text-gray-900">{money(s.evidence.savingsPerMember)}</p>
+                                  {/* Context only - this figure does not affect the rank. */}
+                                  <p className="text-[11px] text-gray-400">Context; not scored</p>
                                 </div>
                                 <div>
                                   <p className="text-gray-500">Members contributing</p>
@@ -365,6 +461,15 @@ export function CooperativeRankings() {
                                   <p className="text-gray-500">Activities completed</p>
                                   <p className="font-medium text-gray-900">
                                     {s.evidence.activitiesCompleted} of {s.evidence.activitiesScheduled} scheduled
+                                    {s.evidence.completionRate !== null && ` (${s.evidence.completionRate}%)`}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-500">Activities per 10 members</p>
+                                  <p className="font-medium text-gray-900">
+                                    {s.evidence.activitiesPer10Members === null
+                                      ? "Nothing recorded this month"
+                                      : s.evidence.activitiesPer10Members.toFixed(1)}
                                   </p>
                                 </div>
                                 <div>
@@ -393,7 +498,7 @@ export function CooperativeRankings() {
                                   variant="outline"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    navigate(`/cooperatives/profile?id=${s.cooperativeId}`);
+                                    navigate(`/cooperative-profile?id=${s.cooperativeId}`);
                                   }}
                                 >
                                   Open cooperative profile
@@ -416,22 +521,50 @@ export function CooperativeRankings() {
               <Info className="w-4 h-4 text-gray-700" />
               <h2 className="text-lg font-semibold text-gray-900">How the score is built</h2>
             </div>
+            <p className="text-sm text-gray-600 mb-4 max-w-3xl">
+              Three pillars, each built from named measures. Every measure is a position within the
+              month's field rather than a score against a fixed target, so a small cooperative is
+              compared fairly with a large one. A measure that cannot be computed is left out of a
+              cooperative's score instead of counted as a zero.
+            </p>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {DIMENSION_ORDER.map((d) => (
-                <div key={d} className="rounded-xl border border-gray-200 p-3">
+              {dimensions.map((d) => (
+                <div key={d} className="rounded-xl border border-gray-200 p-4">
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-medium text-gray-900 text-sm">{table.dimensions[d]}</p>
-                    <span className="text-xs font-semibold text-gray-500">
+                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-700">
                       {Math.round(table.weights[d] * 100)}%
                     </span>
                   </div>
                   <p className="text-xs text-gray-600 mt-1">{table.dimensionDescriptions[d]}</p>
-                  <p className="text-xs text-gray-500 mt-2">
-                    District average: <span className="font-medium">{Math.round(table.districtAverage[d]).toLocaleString()}</span>
+                  {table.pillarMeasures?.[d] && (
+                    <ul className="mt-3 space-y-1.5 border-t border-gray-100 pt-3">
+                      {table.pillarMeasures[d].map((m) => (
+                        <li key={m.key} className="text-xs">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="font-medium text-gray-800">{m.label}</span>
+                            <span className="text-gray-500">{Math.round(m.weight * 100)}%</span>
+                          </div>
+                          <p className="text-gray-500">{m.description}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="text-xs text-gray-500 mt-3">
+                    District average score:{" "}
+                    <span className="font-medium">
+                      {Math.round(table.districtAverage[d] ?? 0).toLocaleString()}
+                    </span>
                   </p>
                 </div>
               ))}
             </div>
+            <p className="mt-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+              <strong>Deliberately not scored:</strong> accumulated savings and share capital per
+              member. It measures how long a cooperative has existed and how much it has banked, not
+              how it is performing now, and scoring it simply ranked the oldest cooperatives highest.
+              It is still shown in the figures behind each row, as context.
+            </p>
             {table.note && (
               <p className="mt-4 text-xs text-gray-600 border-t border-gray-200 pt-3">{table.note}</p>
             )}

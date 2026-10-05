@@ -298,7 +298,7 @@ export function Integrations() {
                       <>
                         <button
                           onClick={() => handleConnect(integration.id)}
-                          className="px-3 py-1.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] text-xs font-medium"
+                          className="px-3 py-1.5 bg-[#2D6A4F] text-white rounded-lg hover:bg-[#1B5E20] text-xs font-medium"
                         >
                           Connect
                         </button>
@@ -418,7 +418,7 @@ export function Integrations() {
                       type="text"
                       value={endpointInputs[selectedIntegration.id] ?? (selectedIntegration.config?.endpoint as string ?? "")}
                       onChange={(e) => setEndpointInputs((prev) => ({ ...prev, [selectedIntegration.id]: e.target.value }))}
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-[#2563EB]"
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                     />
                   </div>
                   <div>
@@ -427,7 +427,7 @@ export function Integrations() {
                       type="text"
                       value={apiKeyInputs[selectedIntegration.id] ?? (selectedIntegration.config?.apiKey as string ?? "")}
                       onChange={(e) => setApiKeyInputs((prev) => ({ ...prev, [selectedIntegration.id]: e.target.value }))}
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-[#2563EB]"
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                       placeholder="Enter API key…"
                     />
                   </div>
@@ -452,7 +452,7 @@ export function Integrations() {
                     <button
                       onClick={() => handleSaveConfig(selectedIntegration.id)}
                       disabled={savingConfig}
-                      className="px-4 py-2 bg-[#2563EB] text-white rounded-lg text-sm hover:bg-[#1d4ed8] disabled:opacity-60"
+                      className="px-4 py-2 bg-[#2D6A4F] text-white rounded-lg text-sm hover:bg-[#1B5E20] disabled:opacity-60"
                     >
                       {savingConfig ? "Saving…" : "Save Configuration"}
                     </button>
@@ -480,7 +480,7 @@ export function Integrations() {
                     >
                       {selectedWebhook.status === "active" ? "Disable Webhook" : "Enable Webhook"}
                     </button>
-                    <button onClick={() => setModal(null)} className="px-4 py-2 bg-[#2563EB] text-white rounded-lg text-sm hover:bg-[#1d4ed8]">Close</button>
+                    <button onClick={() => setModal(null)} className="px-4 py-2 bg-[#2D6A4F] text-white rounded-lg text-sm hover:bg-[#1B5E20]">Close</button>
                   </div>
                 </>
               )}
@@ -529,7 +529,7 @@ export function Integrations() {
                       onChange={(e) => setResolutionText(e.target.value)}
                       rows={3}
                       placeholder="Describe how this was resolved…"
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-[#2563EB]"
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-[#2D6A4F]"
                     />
                   </div>
                   <div className="flex gap-3 justify-end">

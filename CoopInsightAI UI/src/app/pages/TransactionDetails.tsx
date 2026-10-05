@@ -183,7 +183,7 @@ export function TransactionDetails() {
           </div>
           <div className="rounded-2xl border border-gray-200 p-6 bg-gray-50">
             <div className="flex items-center gap-3 mb-4">
-              <Calendar className="w-5 h-5 text-[#2563EB]" />
+              <Calendar className="w-5 h-5 text-[#2D6A4F]" />
               <h2 className="text-lg font-semibold text-gray-900">Summary</h2>
             </div>
             <p className="text-sm text-gray-600">Amount recorded in Rwandan francs. Review this transaction if the amount or date needs adjustment.</p>
@@ -242,7 +242,7 @@ export function TransactionDetails() {
                     type="text"
                     value={reason}
                     onChange={(e) => setReason(e.target.value)}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] outline-none"
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2D6A4F] outline-none"
                     placeholder="Explain why this transaction is being changed"
                   />
                 </div>

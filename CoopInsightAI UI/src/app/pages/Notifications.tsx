@@ -1,7 +1,8 @@
-import { Bell, Send, Clock, Check, X, AlertTriangle, Mail, History, Eye, Plus, Trash2 } from "lucide-react";
-import { useState, useEffect } from "react";
-import { useNavigate } from "react-router";
+import { Bell, Send, Clock, Check, X, History, Eye, Plus, Trash2 } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { useNavigate, useSearchParams } from "react-router";
 import { api } from "../services/api";
+import { useNotifications } from "../contexts/NotificationContext";
 
 interface ApiNotification {
   id: string;
@@ -10,6 +11,8 @@ interface ApiNotification {
   type: "info" | "warning" | "success" | "alert";
   read: boolean;
   created_at: string;
+  /** Where the thing the notification is about lives, if anywhere. */
+  link?: string | null;
 }
 
 const getRelativeTime = (timestamp: string) => {
@@ -21,19 +24,6 @@ const getRelativeTime = (timestamp: string) => {
   if (h < 24) return `${h} hour${h !== 1 ? "s" : ""} ago`;
   return `${d} day${d !== 1 ? "s" : ""} ago`;
 };
-
-const complianceDeadlines = [
-  { id: "c1", title: "Q2 Financial Audit Report", dueDate: "2026-04-30", daysLeft: 2, priority: "high" },
-  { id: "c2", title: "Member Registry Update", dueDate: "2026-05-05", daysLeft: 7, priority: "medium" },
-  { id: "c3", title: "Tax Compliance Filing", dueDate: "2026-05-31", daysLeft: 33, priority: "low" },
-  { id: "c4", title: "Safety Certification Renewal", dueDate: "2026-05-15", daysLeft: 17, priority: "medium" },
-];
-
-const smsEmailStatus = [
-  { channel: "SMS Gateway (Pindo)", status: "operational", lastSent: "2 mins ago", sent: 1248, failed: 3 },
-  { channel: "Email (SMTP)", status: "operational", lastSent: "15 mins ago", sent: 892, failed: 1 },
-  { channel: "WhatsApp API", status: "degraded", lastSent: "2 hours ago", sent: 234, failed: 18 },
-];
 
 const broadcastHistory = [
   { id: 1, subject: "Monthly Meeting Reminder", recipients: 145, sent: "2026-04-25", status: "Delivered", readCount: 132, channel: "SMS+Email" },
@@ -52,9 +42,13 @@ const alertHistoryLog = [
 
 export function Notifications() {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<"inbox" | "compliance" | "sms-status" | "broadcast" | "history">("inbox");
+  const [activeTab, setActiveTab] = useState<"inbox" | "broadcast" | "history">("inbox");
   const [selectedBroadcast, setSelectedBroadcast] = useState<typeof broadcastHistory[0] | null>(null);
-  const [popupQueue, setPopupQueue] = useState<{ id: string; title: string; message: string; type: string }[]>([]);
+  const [searchParams] = useSearchParams();
+  // The notification opened from the bell or a real-time alert.
+  const openId = searchParams.get("open");
+  const openRef = useRef<HTMLDivElement | null>(null);
+  const bell = useNotifications();
 
   // API-driven notifications state
   const [notifications, setNotifications] = useState<ApiNotification[]>([]);
@@ -67,7 +61,9 @@ export function Notifications() {
       try {
         setLoadingNotifications(true);
         const data = await api.get<any>("/notifications?page=1&limit=30");
-        setNotifications((data as any).data ?? []);
+        // The API stores read_at; the page read a `read` field that never
+        // existed, so every notification showed as unread here.
+        setNotifications(((data as any).data ?? []).map((n: any) => ({ ...n, read: Boolean(n.read_at) })));
         setUnreadCount((data as any).unreadCount ?? 0);
       } catch (err) {
         console.error("Failed to fetch notifications:", err);
@@ -76,7 +72,17 @@ export function Notifications() {
       }
     };
     fetchNotifications();
-  }, []);
+  }, [openId]);
+
+  // Bring the opened notification into view, and count it as read.
+  useEffect(() => {
+    if (!openId || loadingNotifications) return;
+    setActiveTab("inbox");
+    const target = notifications.find((n) => n.id === openId);
+    if (target && !target.read) markAsRead(target.id);
+    setTimeout(() => openRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openId, loadingNotifications]);
 
   const markAsRead = async (id: string) => {
     try {
@@ -85,6 +91,7 @@ export function Notifications() {
         prev.map((n) => (n.id === id ? { ...n, read: true } : n))
       );
       setUnreadCount((prev) => Math.max(0, prev - 1));
+      bell.refresh();
     } catch (err) {
       console.error("Failed to mark notification as read:", err);
     }
@@ -113,62 +120,21 @@ export function Notifications() {
     }
   };
 
-  // Simulate real-time alert pop-ups
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      const alert = {
-        id: `rt-${Date.now()}`,
-        title: "Real-Time Alert",
-        message: "Compliance deadline in 2 days: Q2 Financial Audit Report",
-        type: "warning",
-      };
-      setPopupQueue((q) => [...q, alert]);
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, []);
-
-  const dismissPopup = (id: string) => setPopupQueue((q) => q.filter((p) => p.id !== id));
+  // Real-time alerts are raised by the notification bell on every page (see
+  // NotificationContext). The fake "Compliance deadline" pop-up that used to be
+  // simulated here, on this page only, has been removed.
 
   const tabs = [
     { id: "inbox", label: "Inbox", icon: Bell, badge: unreadCount },
-    { id: "compliance", label: "Compliance Reminders", icon: AlertTriangle },
-    { id: "sms-status", label: "SMS/Email Status", icon: Mail },
     { id: "broadcast", label: "Broadcasts", icon: Send },
     { id: "history", label: "Alert History", icon: History },
   ];
 
   return (
     <div className="space-y-6">
-      {/* Real-time popup alerts */}
-      <div className="fixed top-4 right-4 z-50 space-y-2 max-w-sm">
-        {popupQueue.map((popup) => (
-          <div
-            key={popup.id}
-            className={`flex items-start gap-3 p-4 rounded-xl shadow-lg border animate-in slide-in-from-right ${
-              popup.type === "warning"
-                ? "bg-yellow-50 border-yellow-200"
-                : popup.type === "alert"
-                ? "bg-red-50 border-red-200"
-                : "bg-blue-50 border-blue-200"
-            }`}
-          >
-            <AlertTriangle
-              className={`w-5 h-5 mt-0.5 flex-shrink-0 ${popup.type === "warning" ? "text-yellow-600" : "text-red-600"}`}
-            />
-            <div className="flex-1 min-w-0">
-              <p className="font-semibold text-gray-900 text-sm">{popup.title}</p>
-              <p className="text-xs text-gray-600 mt-0.5">{popup.message}</p>
-            </div>
-            <button onClick={() => dismissPopup(popup.id)} className="text-gray-400 hover:text-gray-600 flex-shrink-0">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        ))}
-      </div>
-
       <div>
         <h1 className="text-3xl font-bold text-gray-900">Notification Center</h1>
-        <p className="text-gray-600 mt-1">Alerts, compliance reminders, broadcast history, and integration status</p>
+        <p className="text-gray-600 mt-1">Your alerts, the broadcasts sent to you, and the history behind them</p>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
@@ -211,7 +177,7 @@ export function Notifications() {
               </div>
               <button
                 onClick={markAllAsRead}
-                className="text-[#2563EB] text-sm font-medium hover:text-[#1d4ed8]"
+                className="text-[#2D6A4F] text-sm font-medium hover:text-[#1B5E20]"
               >
                 Mark all read
               </button>
@@ -226,7 +192,10 @@ export function Notifications() {
                 {notifications.map((n) => (
                   <div
                     key={n.id}
-                    className={`p-4 rounded-lg border ${n.read ? "bg-white border-gray-200" : "bg-blue-50 border-blue-200"}`}
+                    ref={n.id === openId ? openRef : undefined}
+                    className={`p-4 rounded-lg border ${n.read ? "bg-white border-gray-200" : "bg-blue-50 border-blue-200"} ${
+                      n.id === openId ? "ring-2 ring-[#2D6A4F] ring-offset-2" : ""
+                    }`}
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
@@ -262,12 +231,20 @@ export function Notifications() {
                           <Clock className="w-3 h-3" />
                           {getRelativeTime(n.created_at)}
                         </p>
+                        {n.link && (
+                          <button
+                            onClick={() => navigate(n.link!)}
+                            className="ml-14 mt-2 text-sm font-medium text-[#2D6A4F] hover:underline"
+                          >
+                            Go to it →
+                          </button>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 ml-4">
                         {!n.read && (
                           <button
                             onClick={() => markAsRead(n.id)}
-                            className="text-[#2563EB] text-sm font-medium hover:text-[#1d4ed8]"
+                            className="text-[#2D6A4F] text-sm font-medium hover:text-[#1B5E20]"
                           >
                             Mark read
                           </button>
@@ -288,93 +265,6 @@ export function Notifications() {
           </div>
         )}
 
-        {/* COMPLIANCE REMINDERS */}
-        {activeTab === "compliance" && (
-          <div className="p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Compliance Deadline Reminders</h2>
-            <div className="space-y-3">
-              {complianceDeadlines.map((item) => (
-                <div
-                  key={item.id}
-                  className={`p-4 rounded-lg border-2 ${
-                    item.priority === "high"
-                      ? "border-red-200 bg-red-50"
-                      : item.priority === "medium"
-                      ? "border-yellow-200 bg-yellow-50"
-                      : "border-gray-200 bg-gray-50"
-                  }`}
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h3 className="font-semibold text-gray-900">{item.title}</h3>
-                      <p className="text-sm text-gray-600 mt-1">Due: {item.dueDate}</p>
-                    </div>
-                    <div className="text-right">
-                      <span
-                        className={`px-3 py-1 rounded-full text-xs font-bold ${
-                          item.daysLeft <= 3
-                            ? "bg-red-100 text-red-800"
-                            : item.daysLeft <= 14
-                            ? "bg-yellow-100 text-yellow-800"
-                            : "bg-green-100 text-green-800"
-                        }`}
-                      >
-                        {item.daysLeft} days left
-                      </span>
-                    </div>
-                  </div>
-                  <div className="mt-3 w-full bg-gray-200 rounded-full h-1.5">
-                    <div
-                      className={`h-1.5 rounded-full ${
-                        item.daysLeft <= 3 ? "bg-red-500" : item.daysLeft <= 14 ? "bg-yellow-500" : "bg-green-500"
-                      }`}
-                      style={{ width: `${Math.max(5, 100 - (item.daysLeft / 60) * 100)}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* SMS/EMAIL STATUS */}
-        {activeTab === "sms-status" && (
-          <div className="p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">SMS / Email Integration Status</h2>
-            <div className="space-y-4">
-              {smsEmailStatus.map((s) => (
-                <div key={s.channel} className="p-4 rounded-lg border border-gray-200 bg-gray-50">
-                  <div className="flex items-start justify-between mb-3">
-                    <div>
-                      <h3 className="font-semibold text-gray-900">{s.channel}</h3>
-                      <p className="text-xs text-gray-500 mt-0.5">Last sent: {s.lastSent}</p>
-                    </div>
-                    <span
-                      className={`px-3 py-1 rounded-full text-xs font-medium ${
-                        s.status === "operational" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"
-                      }`}
-                    >
-                      {s.status}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div className="bg-white rounded-lg p-3 border border-gray-200">
-                      <p className="text-xs text-gray-500">Sent</p>
-                      <p className="font-bold text-green-700 text-lg">{s.sent.toLocaleString()}</p>
-                    </div>
-                    <div className="bg-white rounded-lg p-3 border border-gray-200">
-                      <p className="text-xs text-gray-500">Failed</p>
-                      <p className={`font-bold text-lg ${s.failed > 5 ? "text-red-700" : "text-gray-700"}`}>
-                        {s.failed}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* BROADCASTS */}
         {activeTab === "broadcast" && (
           <div className="p-6">
@@ -382,7 +272,7 @@ export function Notifications() {
               <h2 className="text-lg font-semibold text-gray-900">Broadcast Messages</h2>
               <button
                 onClick={() => navigate("/messages", { state: { openCompose: true, type: "broadcast" } })}
-                className="flex items-center gap-2 px-4 py-2 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] transition-colors text-sm font-medium"
+                className="flex items-center gap-2 px-4 py-2 bg-[#2D6A4F] text-white rounded-lg hover:bg-[#1B5E20] transition-colors text-sm font-medium"
               >
                 <Plus className="w-4 h-4" />
                 New Broadcast Message

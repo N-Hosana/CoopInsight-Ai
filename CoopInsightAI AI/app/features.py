@@ -131,6 +131,7 @@ def get_monthly_series(cooperative_id: str, metric: str) -> list[tuple[date, flo
               FROM member_contributions mc
               JOIN members m ON m.id = mc.member_id
              WHERE m.cooperative_id = %s
+               AND mc.notes IS DISTINCT FROM 'Opening balance (reconciliation)'
              GROUP BY 1 ORDER BY 1
         """
     else:
@@ -356,6 +357,15 @@ def get_functionality_features(period_end: date) -> list[dict[str, Any]]:
                    AND a.type = 'meeting' AND a.status = 'completed'
                    AND a.date >= b.next_month - INTERVAL '6 months'
                    AND a.date < b.next_month) AS meetings_last_6_months,
+               -- The RCA fixes the ordinary general assembly in March and
+               -- October, so governance is measured against that calendar
+               -- obligation rather than against a general meeting cadence.
+               (SELECT COUNT(*) FROM activities a
+                 WHERE a.cooperative_id = c.id AND a.deleted_at IS NULL
+                   AND a.type = 'meeting' AND a.status = 'completed'
+                   AND EXTRACT(MONTH FROM a.date)::int IN (3, 10)
+                   AND a.date >= b.next_month - INTERVAL '12 months'
+                   AND a.date < b.next_month) AS ordinary_assemblies_last_12_months,
 
                -- Members actually taking part, measured over a quarter so that one
                -- quiet month does not on its own condemn a cooperative.
@@ -363,7 +373,10 @@ def get_functionality_features(period_end: date) -> list[dict[str, Any]]:
                   JOIN members m ON m.id = mc.member_id
                  WHERE m.cooperative_id = c.id AND m.deleted_at IS NULL
                    AND mc.date >= b.next_month - INTERVAL '3 months'
-                   AND mc.date < b.next_month) AS contributors_last_quarter,
+                   AND mc.date < b.next_month
+                   -- An opening balance written by the money reconciliation is
+                   -- a balance brought forward, not a member paying in.
+                   AND mc.notes IS DISTINCT FROM 'Opening balance (reconciliation)') AS contributors_last_quarter,
                (SELECT COUNT(DISTINCT ap.member_id) FROM activity_participants ap
                   JOIN activities a ON a.id = ap.activity_id
                   JOIN members m ON m.id = ap.member_id
@@ -396,10 +409,14 @@ def get_functionality_features(period_end: date) -> list[dict[str, Any]]:
                    AND bs.period_end < b.next_month) AS last_balance_sheet_on,
                (SELECT COUNT(*) FROM cooperative_documents d
                  WHERE d.cooperative_id = c.id) AS document_count,
+               -- The RCA puts five people on the Board: President, Vice
+               -- President, Secretary and two advisors. The sector cooperative
+               -- officer is recorded alongside them but holds no board seat.
                (SELECT COUNT(*) FROM cooperative_leadership l
                  WHERE l.cooperative_id = c.id
-                   AND l.role IN ('President','Vice President','Secretary')
-                   AND l.name IS NOT NULL AND l.name <> '(Name not recorded)') AS leaders_recorded,
+                   AND (l.end_date IS NULL OR l.end_date > CURRENT_DATE)
+                   AND l.role <> 'Sector Cooperative Officer'
+                   AND l.name IS NOT NULL AND l.name <> '(Name not recorded)') AS board_seats_filled,
 
                -- Licence to operate.
                (SELECT p.permit_type FROM cooperative_permits p

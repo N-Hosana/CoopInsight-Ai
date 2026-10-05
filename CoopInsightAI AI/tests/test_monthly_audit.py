@@ -43,6 +43,7 @@ def coop(**overrides):
         "activities_in_month": 2,
         "activities_completed": 2,
         "meetings_last_6_months": 3,
+        "ordinary_assemblies_last_12_months": 2,
         "contributors_last_quarter": 34,
         "attendees_last_quarter": 30,
         "participation_slots_last_quarter": 60,
@@ -51,7 +52,7 @@ def coop(**overrides):
         "open_exit_requests": 0,
         "last_balance_sheet_on": date(2026, 3, 31),
         "document_count": 4,
-        "leaders_recorded": 3,
+        "board_seats_filled": 5,
         "permit_type": "permanent",
         "permit_expires_on": date(2050, 1, 1),
         "open_visits": 0,
@@ -200,3 +201,79 @@ class TestDefaultPeriod:
     def test_no_data_at_all_still_yields_a_month(self, monkeypatch):
         monkeypatch.setattr(audit.features, "latest_period_with_data", lambda: None)
         assert audit._default_period(today=date(2026, 9, 8)) == date(2026, 8, 1)
+
+
+class TestOrdinaryAssemblyObligation:
+    """
+    The RCA fixes the ordinary general assembly in March and October. Governance
+    is scored against that calendar obligation, not against a cadence we chose,
+    so missing one has to register as a compliance failure.
+    """
+
+    def test_both_statutory_assemblies_held_scores_well(self):
+        score, reasons, measured = audit._score_meeting(coop(), PERIOD_END)
+        assert score > 0.85
+        assert measured is True
+        assert not any("ordinary general assembl" in r.lower() for r in reasons)
+
+    def test_missing_one_assembly_is_flagged_and_penalised(self):
+        both = audit._score_meeting(coop(), PERIOD_END)[0]
+        one = audit._score_meeting(coop(ordinary_assemblies_last_12_months=1), PERIOD_END)
+        assert one[0] < both
+        assert any("Only 1 of the 2 ordinary general assemblies" in r for r in one[1])
+
+    def test_no_statutory_assembly_names_the_months(self):
+        _score, reasons, _measured = audit._score_meeting(
+            coop(ordinary_assemblies_last_12_months=0), PERIOD_END
+        )
+        # The officer has to be told which meetings were missed, not just that
+        # "governance is low", so both statutory months are named.
+        missed = next(r for r in reasons if "ordinary general assembly" in r.lower())
+        assert "March" in missed and "October" in missed
+
+    def test_obligation_is_derived_from_the_month_list(self):
+        assert audit._ordinary_assemblies_due(PERIOD_END) == len(audit.ORDINARY_ASSEMBLY_MONTHS)
+        assert audit.ORDINARY_ASSEMBLY_MONTHS == (3, 10)
+
+
+class TestStructuredIssues:
+    """The coded findings the sector and district roll-ups count."""
+
+    def codes(self, **overrides):
+        return [i["code"] for i in audit._issues(coop(**overrides), PERIOD_END)]
+
+    def test_healthy_cooperative_raises_nothing(self):
+        assert self.codes() == []
+
+    def test_dormant_cooperative_is_critical_trd_001(self):
+        issues = audit._issues(
+            coop(last_transaction_on=date(2025, 10, 1), trading_months_of_6=0), PERIOD_END
+        )
+        assert issues[0]["code"] == "TRD-001"
+        assert issues[0]["severity"] == "critical"
+        assert issues[0]["threshold"] == audit.DORMANCY_MONTHS
+
+    def test_missed_statutory_assemblies_are_coded_separately_from_meetings(self):
+        assert "GOV-001" in self.codes(ordinary_assemblies_last_12_months=0)
+        assert "GOV-002" in self.codes(ordinary_assemblies_last_12_months=1)
+        assert "GOV-003" in self.codes(meetings_last_6_months=0)
+
+    def test_expired_permit_outranks_minor_findings(self):
+        issues = audit._issues(
+            coop(permit_expires_on=date(2026, 1, 1), document_count=1), PERIOD_END
+        )
+        assert issues[0]["code"] == "PRM-002"
+        assert "REC-003" in [i["code"] for i in issues]
+
+    def test_membership_outflow_records_the_measured_ratio(self):
+        issue = next(
+            i for i in audit._issues(coop(members_joined_12m=0, members_exited_12m=8), PERIOD_END)
+            if i["code"] == "MEM-003"
+        )
+        assert issue["severity"] == "major"
+        assert issue["value"] == pytest.approx(-0.2)
+
+    def test_no_activity_offered_is_not_also_reported_as_no_attendance(self):
+        codes = self.codes(participation_slots_last_quarter=0, attendees_last_quarter=0)
+        assert "ENG-005" in codes
+        assert "ENG-003" not in codes

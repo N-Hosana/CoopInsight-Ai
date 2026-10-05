@@ -84,6 +84,19 @@ BAND_THRESHOLDS = {"healthy": 70.0, "monitor": 50.0, "at_risk": 30.0}
 # Months of silence after which a cooperative is treated as dormant regardless of
 # what its other scores say.
 DORMANCY_MONTHS = 6
+
+# The RCA brochure "Cooperative Organs: Their Powers and Responsibilities" fixes
+# the ordinary general assembly in March and October. Governance is therefore
+# scored against a calendar obligation, not against an invented cadence: a
+# cooperative that has passed one of those months without sitting has missed a
+# statutory meeting, which is a far stronger signal than "few meetings lately".
+ORDINARY_ASSEMBLY_MONTHS = (3, 10)
+
+# "The Board has five members: a President, Vice President, Secretary and two
+#  advisors" — RCA brochure. The register routinely records only the three
+#  named offices, so a shortfall here is usually an incomplete record rather
+#  than a vacant board; the reason text says so.
+BOARD_SEATS = 5
 # Months of silence that put it on the watch list.
 QUIET_MONTHS = 3
 
@@ -176,23 +189,43 @@ def _score_trading(row: dict[str, Any], period_end: date) -> tuple[float, list[s
     return 0.6 * recency + 0.4 * consistency, reasons, True
 
 
+def _ordinary_assemblies_due(period_end: date) -> int:
+    """
+    How many ordinary assemblies should have sat in the 12 months ending at
+    `period_end`. A rolling year always spans both March and October exactly
+    once, so this is two — but it is derived rather than hardcoded so the rule
+    survives a change to ORDINARY_ASSEMBLY_MONTHS.
+    """
+    return len(ORDINARY_ASSEMBLY_MONTHS)
+
+
 def _score_meeting(row: dict[str, Any], period_end: date) -> tuple[float, list[str], bool]:
     """Is the cooperative governing itself?"""
     reasons: list[str] = []
     meetings = int(row.get("meetings_last_6_months") or 0)
+    ordinary_held = int(row.get("ordinary_assemblies_last_12_months") or 0)
+    ordinary_due = _ordinary_assemblies_due(period_end)
     months_since_activity = _months_between(row.get("last_activity_on"), period_end)
 
-    if months_since_activity is None and meetings == 0:
+    if months_since_activity is None and meetings == 0 and ordinary_held == 0:
         reasons.append("No activity or meeting has ever been recorded.")
         return 0.0, reasons, False
 
-    # Cooperative bylaws in Rwanda generally expect a general assembly at least
-    # twice a year; two meetings in six months scores full marks here.
-    cadence = _clamp(meetings / 2.0)
+    # The statutory obligation: an ordinary general assembly in March and in
+    # October. Missing one is a compliance failure, not merely a quiet patch.
+    cadence = _clamp(ordinary_held / ordinary_due) if ordinary_due else 1.0
+    if ordinary_held == 0:
+        reasons.append(
+            "No ordinary general assembly recorded in the last 12 months. The RCA requires one "
+            "in March and one in October."
+        )
+    elif ordinary_held < ordinary_due:
+        reasons.append(
+            f"Only {ordinary_held} of the {ordinary_due} ordinary general assemblies "
+            "(March and October) were held in the last 12 months."
+        )
     if meetings == 0:
-        reasons.append("No meeting has been held in the last 6 months.")
-    elif meetings == 1:
-        reasons.append("Only one meeting in the last 6 months.")
+        reasons.append("No meeting of any kind in the last 6 months.")
 
     recency = _clamp(1.0 - (months_since_activity or DORMANCY_MONTHS) / DORMANCY_MONTHS)
 
@@ -217,7 +250,7 @@ def _score_records(row: dict[str, Any], period_end: date) -> tuple[float, list[s
     reasons: list[str] = []
     months_since_balance = _months_between(row.get("last_balance_sheet_on"), period_end)
     documents = int(row.get("document_count") or 0)
-    leaders = int(row.get("leaders_recorded") or 0)
+    board_seats = int(row.get("board_seats_filled") or 0)
 
     if months_since_balance is None:
         balance_score = 0.0
@@ -235,9 +268,12 @@ def _score_records(row: dict[str, Any], period_end: date) -> tuple[float, list[s
     if documents < 2:
         reasons.append(f"Only {documents} document(s) on the cooperative's file.")
 
-    leadership_score = _clamp(leaders / 3.0)
-    if leaders < 3:
-        reasons.append(f"{leaders} of 3 office-bearers are recorded by name.")
+    leadership_score = _clamp(board_seats / BOARD_SEATS)
+    if board_seats < BOARD_SEATS:
+        reasons.append(
+            f"{board_seats} of the {BOARD_SEATS} Board of Directors seats are recorded by name "
+            "(President, Vice President, Secretary and two advisors)."
+        )
 
     permit_type = row.get("permit_type")
     permit_expires = row.get("permit_expires_on")
@@ -343,6 +379,164 @@ def _score_engagement(row: dict[str, Any]) -> tuple[float, dict[str, Any], list[
     }
     measured = contributors > 0 or attendees > 0 or slots > 0
     return score, detail, reasons, measured
+
+
+# ── Structured findings ──────────────────────────────────────────────────────
+#
+# The reasons above are written for the cooperative. The findings below are the
+# same observations in a form the sector and district roll-ups can count: a
+# stable code, the component it belongs to, a severity, and the measured value
+# against the threshold it crossed. "Seven of twelve cooperatives in Nduba carry
+# GOV-001" is a sector problem; seven differently worded sentences are not
+# recognisably the same thing.
+
+SEVERITY_RANK = {"critical": 3, "major": 2, "minor": 1}
+
+# The share of members that has to be visibly taking part before breadth stops
+# being flagged.
+BREADTH_FLOOR = 0.3
+
+
+def _issue(
+    code: str,
+    component: str,
+    severity: str,
+    title: str,
+    value: float | int | None,
+    threshold: float | int | None,
+    unit: str,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "component": component,
+        "severity": severity,
+        "title": title,
+        "value": round(value, 2) if isinstance(value, float) else value,
+        "threshold": threshold,
+        "unit": unit,
+    }
+
+
+def _issues(row: dict[str, Any], period_end: date) -> list[dict[str, Any]]:
+    """Every rule breached by this cooperative, most severe first."""
+    found: list[dict[str, Any]] = []
+
+    # Trading
+    months_quiet = _months_between(row.get("last_transaction_on"), period_end)
+    if months_quiet is None:
+        found.append(_issue("TRD-001", "trading", "critical",
+                            "No transaction ever recorded", None, DORMANCY_MONTHS, "months"))
+    elif months_quiet >= DORMANCY_MONTHS:
+        found.append(_issue("TRD-001", "trading", "critical",
+                            "Dormant: no transaction within the dormancy window",
+                            months_quiet, DORMANCY_MONTHS, "months"))
+    elif months_quiet >= QUIET_MONTHS:
+        found.append(_issue("TRD-002", "trading", "major",
+                            "Trading has gone quiet", months_quiet, QUIET_MONTHS, "months"))
+    trading_months = int(row.get("trading_months_of_6") or 0)
+    if months_quiet is not None and trading_months < 3:
+        found.append(_issue("TRD-003", "trading", "major" if trading_months <= 1 else "minor",
+                            "Irregular trading over the last 6 months", trading_months, 3, "months"))
+    if months_quiet is not None and months_quiet < QUIET_MONTHS and float(row.get("income_in_month") or 0) <= 0:
+        found.append(_issue("TRD-004", "trading", "minor",
+                            "No income in the audited month", 0, 0, "RWF"))
+
+    # Governance
+    ordinary_held = int(row.get("ordinary_assemblies_last_12_months") or 0)
+    ordinary_due = _ordinary_assemblies_due(period_end)
+    if ordinary_held == 0:
+        found.append(_issue("GOV-001", "meeting", "major",
+                            "No ordinary general assembly in 12 months", 0, ordinary_due, "assemblies"))
+    elif ordinary_held < ordinary_due:
+        found.append(_issue("GOV-002", "meeting", "minor",
+                            "Ordinary general assemblies below the statutory two",
+                            ordinary_held, ordinary_due, "assemblies"))
+    meetings = int(row.get("meetings_last_6_months") or 0)
+    if meetings == 0:
+        found.append(_issue("GOV-003", "meeting", "major",
+                            "No meeting of any kind in 6 months", 0, 1, "meetings"))
+    planned = int(row.get("activities_in_month") or 0)
+    completed = int(row.get("activities_completed") or 0)
+    if planned > 0 and completed / planned < 0.5:
+        found.append(_issue("GOV-004", "meeting", "minor",
+                            "Planned activities not delivered", completed / planned, 0.5, "ratio"))
+
+    # Records and compliance
+    months_since_balance = _months_between(row.get("last_balance_sheet_on"), period_end)
+    if months_since_balance is None:
+        found.append(_issue("REC-001", "recordKeeping", "major",
+                            "No balance sheet ever filed", None, 12, "months"))
+    elif months_since_balance > 12:
+        found.append(_issue("REC-002", "recordKeeping",
+                            "major" if months_since_balance > 24 else "minor",
+                            "Balance sheet out of date", months_since_balance, 12, "months"))
+    documents = int(row.get("document_count") or 0)
+    if documents < 2:
+        found.append(_issue("REC-003", "recordKeeping", "minor",
+                            "Thin governance file", documents, 2, "documents"))
+    board = int(row.get("board_seats_filled") or 0)
+    if board < BOARD_SEATS:
+        found.append(_issue("REC-004", "recordKeeping", "minor",
+                            "Board of Directors incompletely recorded", board, BOARD_SEATS, "seats"))
+
+    permit_type = row.get("permit_type")
+    permit_expires = row.get("permit_expires_on")
+    if permit_type is None:
+        found.append(_issue("PRM-001", "recordKeeping", "major",
+                            "No operating permit on record", None, None, "permit"))
+    else:
+        days_left = (permit_expires - period_end).days if permit_expires else 0
+        if days_left < 0:
+            found.append(_issue("PRM-002", "recordKeeping", "critical",
+                                "Operating permit expired", days_left, 0, "days"))
+        elif days_left < 60:
+            found.append(_issue("PRM-003", "recordKeeping", "minor",
+                                "Operating permit expiring", days_left, 60, "days"))
+
+    # Membership
+    total = int(row.get("member_count") or 0)
+    if total == 0:
+        found.append(_issue("MEM-001", "membership", "critical",
+                            "Member register is empty", 0, 1, "members"))
+    else:
+        active_share = int(row.get("active_member_count") or 0) / total
+        if active_share < 0.8:
+            found.append(_issue("MEM-002", "membership", "major" if active_share < 0.5 else "minor",
+                                "High share of suspended or inactive members",
+                                active_share, 0.8, "ratio"))
+        joined = int(row.get("members_joined_12m") or 0)
+        exited = int(row.get("members_exited_12m") or 0)
+        net = (joined - exited) / total
+        if net < 0:
+            found.append(_issue("MEM-003", "membership", "major" if net <= -0.1 else "minor",
+                                "Net membership outflow over 12 months", net, 0, "ratio"))
+        open_exits = int(row.get("open_exit_requests") or 0)
+        if open_exits > 0:
+            found.append(_issue("MEM-004", "membership", "minor",
+                                "Open requests to leave", open_exits, 0, "requests"))
+
+        # Engagement
+        contributors = int(row.get("contributors_last_quarter") or 0)
+        attendees = int(row.get("attendees_last_quarter") or 0)
+        slots = int(row.get("participation_slots_last_quarter") or 0)
+        if contributors == 0:
+            found.append(_issue("ENG-001", "engagement", "major",
+                                "No member contributions last quarter", 0, BREADTH_FLOOR, "ratio"))
+        elif contributors / total < BREADTH_FLOOR:
+            found.append(_issue("ENG-002", "engagement", "minor",
+                                "Narrow contribution base", contributors / total, BREADTH_FLOOR, "ratio"))
+        if slots == 0:
+            found.append(_issue("ENG-005", "engagement", "minor",
+                                "No activity offered to members last quarter", 0, 1, "slots"))
+        elif attendees == 0:
+            found.append(_issue("ENG-003", "engagement", "major",
+                                "Activities held with no recorded attendance", 0, BREADTH_FLOOR, "ratio"))
+        elif attendees / total < BREADTH_FLOOR:
+            found.append(_issue("ENG-004", "engagement", "minor",
+                                "Low attendance breadth", attendees / total, BREADTH_FLOOR, "ratio"))
+
+    found.sort(key=lambda i: -SEVERITY_RANK[i["severity"]])
+    return found
 
 
 def _band(composite: float) -> str:
@@ -502,6 +696,7 @@ def audit(period: str | None = None) -> dict[str, Any]:
                 },
                 "engagementDetail": engagement_detail,
                 "reasons": reasons,
+                "issues": _issues(row, period_end),
                 "recommendedActions": _recommended_actions(row, band, reasons),
                 "evidenceQuality": evidence_quality,
                 "unmeasured": unmeasured,

@@ -150,6 +150,87 @@ class TestLeaguePercentiles:
         assert set(rankings.WEIGHTS) == set(rankings.DIMENSION_DESCRIPTIONS)
 
 
+class TestLeaguePillars:
+    """
+    The table ranks on three things an officer can explain in one sentence.
+    These tests exist because the previous scheme drifted to five dimensions,
+    two of which nobody could defend to a cooperative.
+    """
+
+    def test_the_three_pillars_are_finances_engagement_and_activities(self):
+        from app.analytics import rankings
+
+        assert set(rankings.WEIGHTS) == {"finances", "engagement", "activities"}
+
+    def test_every_pillar_declares_its_measures(self):
+        from app.analytics import rankings
+
+        assert set(rankings.PILLAR_MEASURES) == set(rankings.WEIGHTS)
+        for pillar, measures in rankings.PILLAR_MEASURES.items():
+            assert measures, f"{pillar} has no measures"
+
+    def test_measure_weights_sum_to_one_within_each_pillar(self):
+        """A pillar score is a weighted mean of its measures, so they must too."""
+        from app.analytics import rankings
+
+        for pillar, measures in rankings.PILLAR_MEASURES.items():
+            total = sum(m["weight"] for m in measures)
+            assert total == pytest.approx(1.0), f"{pillar} weights sum to {total}"
+
+    def test_every_measure_is_labelled_and_explained(self):
+        from app.analytics import rankings
+
+        for measures in rankings.PILLAR_MEASURES.values():
+            for measure in measures:
+                assert measure["label"]
+                assert measure["description"]
+
+    def test_accumulated_wealth_does_not_move_the_rank(self):
+        """
+        `scale` — savings per member — was removed as a scored dimension because
+        it measured how rich a cooperative already was rather than how it
+        performed. It must stay out of the scoring.
+        """
+        from app.analytics import rankings
+
+        assert "scale" not in rankings.WEIGHTS
+        assert "savings_per_member" not in rankings.ALL_MEASURE_KEYS
+
+    def test_a_missing_measure_is_excluded_not_scored_zero(self):
+        from app.analytics import rankings
+
+        populations = {key: [0.0, 50.0, 100.0] for key in rankings.ALL_MEASURE_KEYS}
+        # Top of the field on everything it could be measured on, and one
+        # measure it could not.
+        values = {key: 100.0 for key in rankings.ALL_MEASURE_KEYS}
+        values["attendance_rate"] = None
+
+        pillars, _, unmeasured, composite = rankings._score_pillars(values, populations)
+
+        assert unmeasured == [rankings.MEASURE_LABELS["attendance_rate"]]
+        # Engagement still scores, on the measure that survived — not on a zero.
+        assert pillars["engagement"] is not None
+        assert pillars["engagement"] > 50
+        assert composite > 50
+
+    def test_a_pillar_with_nothing_measurable_is_dropped_from_the_composite(self):
+        from app.analytics import rankings
+
+        populations = {key: [0.0, 50.0, 100.0] for key in rankings.ALL_MEASURE_KEYS}
+        values: dict[str, float | None] = {key: 100.0 for key in rankings.ALL_MEASURE_KEYS}
+        for measure in rankings.PILLAR_MEASURES["activities"]:
+            values[measure["key"]] = None
+
+        pillars, _, _, composite = rankings._score_pillars(values, populations)
+
+        assert pillars["activities"] is None
+        # The remaining pillars are renormalised, so a top performer still reads
+        # as a top performer rather than being dragged down by the gap.
+        assert composite == pytest.approx(
+            rankings._percentile(100.0, populations["surplus_per_member"])
+        )
+
+
 class TestBanding:
     def test_bands_are_ordered(self):
         from app.analytics import rankings

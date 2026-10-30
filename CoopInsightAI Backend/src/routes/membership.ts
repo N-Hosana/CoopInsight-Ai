@@ -29,6 +29,7 @@ import {
 } from "../services/exitProcess";
 import { broadcastToCooperative } from "../services/broadcast";
 import { assemblyDateTime, registerAllMembers } from "../services/assemblies";
+import { renderPdf, pdfFileName } from "../services/pdf";
 
 const router = Router();
 
@@ -1973,6 +1974,83 @@ router.get("/certificates", async (req: Request, res: Response) => {
     res.json({ success: true, data: result.rows });
   } catch (err) {
     console.error("GET /membership/certificates error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// ─── GET /certificates/:id/pdf ────────────────────────────────────────────────
+// The certificate as a PDF, built from the stored record — not from anything
+// the browser sends — so the file a former member carries away says exactly
+// what the cooperative issued. The holder may download their own; the issuing
+// cooperative and administrators may download any they issued.
+router.get("/certificates/:id/pdf", async (req: Request, res: Response) => {
+  try {
+    const found = await query(`SELECT * FROM membership_certificates WHERE id = $1`, [req.params.id]);
+    const c = found.rows[0];
+    if (!c) return res.status(404).json({ success: false, message: "Certificate not found" });
+
+    const role = req.user!.role;
+    const holder = c.issued_to_user_id === req.user!.userId;
+    const issuer = ["manager", "cooperative"].includes(role) && req.user!.cooperativeId === c.cooperative_id;
+    const administrator = ["admin", "generalManager"].includes(role);
+    if (!holder && !issuer && !administrator) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const day = (v: unknown) =>
+      v ? new Date(v as string).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" }) : "Not recorded";
+    const amount = (v: unknown) => (v == null ? "Not recorded" : `RWF ${Math.round(Number(v)).toLocaleString("en-US")}`);
+
+    const pdf = await renderPdf({
+      title: "Certificate of Membership",
+      subtitle: `Certificate no. ${c.certificate_number}`,
+      organisation: {
+        name: c.cooperative_name,
+        lines: c.registration_number ? [`Registration no. ${c.registration_number}`] : [],
+      },
+      meta: [
+        { label: "Issued", value: day(c.issued_at) },
+        ...(c.issued_by_name ? [{ label: "Issued by", value: c.issued_by_name }] : []),
+      ],
+      narrative: [
+        ...(c.revoked_at
+          ? [`THIS CERTIFICATE WAS REVOKED ON ${day(c.revoked_at).toUpperCase()}. ${c.revocation_reason ?? ""}`.trim()]
+          : []),
+        c.statement,
+      ],
+      sections: [
+        {
+          title: "Particulars",
+          facts: [
+            { label: "Member", value: c.member_name },
+            { label: "Membership number", value: c.membership_number ?? "Not recorded" },
+            { label: "National ID", value: c.national_id ?? "Not recorded" },
+            { label: "Member from", value: day(c.joined_on) },
+            { label: "Member until", value: day(c.left_on) },
+            { label: "Length of membership", value: c.months_of_membership != null ? `${c.months_of_membership} months` : "Not recorded" },
+            ...(c.roles_held ? [{ label: "Offices held", value: c.roles_held }] : []),
+            { label: "Total contributed", value: amount(c.total_contributions) },
+            ...(c.settlement_amount != null ? [{ label: "Settled on leaving", value: amount(c.settlement_amount) }] : []),
+            ...(c.assembly_resolution ? [{ label: "Resolution", value: c.assembly_resolution }] : []),
+          ],
+        },
+        {
+          title: "Verification",
+          paragraphs: [
+            `Verification code: ${c.verification_code}. Anyone shown this certificate can confirm it with the ` +
+              "cooperative or on the CoopInsight verification page using this code.",
+          ],
+        },
+      ],
+      signatories: ["President", "Secretary"],
+      footer: `Certificate ${c.certificate_number} — verification code ${c.verification_code}`,
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${pdfFileName(`certificate-${c.certificate_number}`)}"`);
+    res.send(pdf);
+  } catch (err) {
+    console.error("GET /membership/certificates/:id/pdf error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });

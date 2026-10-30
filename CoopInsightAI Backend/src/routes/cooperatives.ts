@@ -612,6 +612,17 @@ router.get("/", async (req: Request, res: Response) => {
 
     // Role-based scoping
     const restrictToOwn = ["manager", "cooperative", "member"].includes(role);
+    // A cooperative's own people see their own cooperative and nothing else.
+    // With none attached, that is nothing — it used to fall through to the
+    // whole register.
+    if (restrictToOwn && !userCoopId) {
+      return res.json({
+        success: true,
+        data: [],
+        view: { id: selected.id, label: selected.label, description: selected.description },
+        pagination: { page: pageNum, limit: limitNum, total: 0, totalPages: 0 },
+      });
+    }
 
     const params: unknown[] = [
       sector || null,
@@ -980,6 +991,9 @@ router.delete("/:id", authorize("admin", "generalManager"), async (req: Request,
 router.get("/:id/leadership", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    if (!(await canReadCooperative(req, id))) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
 
     const result = await query(
       `SELECT * FROM cooperative_leadership WHERE cooperative_id = $1 ORDER BY created_at`,

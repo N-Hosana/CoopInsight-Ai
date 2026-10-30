@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../services/api";
+import { downloadFromApi } from "../services/pdf";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { Input } from "../components/Input";
@@ -26,6 +27,7 @@ import {
   Circle,
   Copy,
   Printer,
+  Download,
   SkipForward,
 } from "lucide-react";
 
@@ -569,12 +571,28 @@ function CertificateCard({ certificate }: { certificate: MembershipCertificate }
             <p className="mt-1 text-xs text-gray-500">Issued by {certificate.issued_by_name}</p>
           )}
         </div>
-        <Button size="sm" variant="outline" onClick={() => window.print()} className="print:hidden">
-          <span className="flex items-center gap-2">
-            <Printer className="h-4 w-4" />
-            Print or save as PDF
-          </span>
-        </Button>
+        <div className="flex flex-wrap gap-2 print:hidden">
+          <Button
+            size="sm"
+            onClick={() =>
+              downloadFromApi(
+                `/membership/certificates/${certificate.id}/pdf`,
+                `certificate-${certificate.certificate_number}.pdf`
+              ).catch((err: any) => alert(err?.message ?? "The certificate could not be downloaded."))
+            }
+          >
+            <span className="flex items-center gap-2">
+              <Download className="h-4 w-4" />
+              Download PDF
+            </span>
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => window.print()}>
+            <span className="flex items-center gap-2">
+              <Printer className="h-4 w-4" />
+              Print
+            </span>
+          </Button>
+        </div>
       </div>
     </div>
   );

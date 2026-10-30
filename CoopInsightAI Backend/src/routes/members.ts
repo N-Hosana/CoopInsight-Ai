@@ -176,6 +176,40 @@ router.get("/", async (req: Request, res: Response) => {
     const restrictToOwn = ["manager", "cooperative", "member"].includes(role);
     const effectiveCoopId = restrictToOwn ? userCoopId : (cooperativeId as string) || null;
 
+    // Who sees which members:
+    //   manager / cooperative   their own cooperative's register, nobody else's
+    //   member                  their own entry only
+    //   sector officer          members of cooperatives in their sector
+    //   district, RCA, admin    every member
+    // A manager with no cooperative attached used to fall through to "no
+    // filter" and be handed every member in the district.
+    if (restrictToOwn && !userCoopId) {
+      return res.json({
+        success: true,
+        data: [],
+        pagination: { page: pageNum, limit: limitNum, total: 0, totalPages: 0 },
+      });
+    }
+    const me = await query(`SELECT sector, oversight_level, member_id FROM users WHERE id = $1`, [
+      req.user!.userId,
+    ]);
+    const scopeValues: unknown[] = [];
+    let scopeSql = "";
+    const scopeFrom = (base: number) => {
+      scopeValues.length = 0;
+      let sql = "";
+      if (role === "member") {
+        scopeValues.push(me.rows[0]?.member_id ?? null);
+        sql += ` AND m.id = $${base + scopeValues.length}::uuid`;
+      }
+      if (role === "government" && me.rows[0]?.oversight_level === "sector" && me.rows[0].sector) {
+        scopeValues.push(me.rows[0].sector);
+        sql += ` AND m.cooperative_id IN (SELECT id FROM cooperatives WHERE sector = $${base + scopeValues.length})`;
+      }
+      return sql;
+    };
+
+    scopeSql = scopeFrom(6);
     const params: unknown[] = [
       effectiveCoopId || null,
       status || null,
@@ -183,6 +217,7 @@ router.get("/", async (req: Request, res: Response) => {
       search || null,
       limitNum,
       offset,
+      ...scopeValues,
     ];
 
     const dataQuery = `
@@ -196,15 +231,18 @@ router.get("/", async (req: Request, res: Response) => {
         AND ($4::text IS NULL OR m.full_name ILIKE '%' || $4 || '%'
           OR m.phone ILIKE '%' || $4 || '%'
           OR m.national_id ILIKE '%' || $4 || '%')
+        ${scopeSql}
       ORDER BY m.created_at DESC
       LIMIT $5 OFFSET $6
     `;
 
+    const countScopeSql = scopeFrom(4);
     const countParams: unknown[] = [
       effectiveCoopId || null,
       status || null,
       sector || null,
       search || null,
+      ...scopeValues,
     ];
 
     const countQuery = `
@@ -217,6 +255,7 @@ router.get("/", async (req: Request, res: Response) => {
         AND ($4::text IS NULL OR m.full_name ILIKE '%' || $4 || '%'
           OR m.phone ILIKE '%' || $4 || '%'
           OR m.national_id ILIKE '%' || $4 || '%')
+        ${countScopeSql}
     `;
 
     const [dataResult, countResult] = await Promise.all([

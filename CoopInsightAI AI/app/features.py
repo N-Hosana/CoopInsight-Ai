@@ -181,10 +181,6 @@ def get_member_engagement_features(cooperative_id: str) -> list[dict[str, Any]]:
                  WHERE ap.member_id = m.id) AS activities_invited,
                (SELECT COUNT(*) FROM activity_participants ap
                  WHERE ap.member_id = m.id AND ap.attended) AS activities_attended,
-               (SELECT COUNT(*) FROM activity_participants ap
-                  JOIN activities a ON a.id = ap.activity_id
-                 WHERE ap.member_id = m.id AND ap.attended
-                   AND a.type = 'training') AS trainings_attended,
                (SELECT COUNT(*) FROM member_contributions mc
                  WHERE mc.member_id = m.id) AS contribution_count,
                (SELECT COALESCE(SUM(mc.amount), 0) FROM member_contributions mc
@@ -201,18 +197,6 @@ def get_member_engagement_features(cooperative_id: str) -> list[dict[str, Any]]:
         r["total_savings"] = _f(r["total_savings"])
         r["contribution_total"] = _f(r["contribution_total"])
     return rows
-
-
-def count_cooperative_trainings(cooperative_id: str) -> int:
-    row = db.fetch_one(
-        """
-        SELECT COUNT(*) AS n FROM activities
-         WHERE cooperative_id = %s AND deleted_at IS NULL
-           AND type = 'training' AND status = 'completed'
-        """,
-        (cooperative_id,),
-    )
-    return int(row["n"]) if row else 0
 
 
 def count_cooperative_activities(cooperative_id: str) -> int:

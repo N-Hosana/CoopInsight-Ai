@@ -207,12 +207,15 @@ const getNavigationForUser = (
     { name: "Documents", path: "/cooperative-documents", icon: FileText, group: "My cooperative", roles: ["manager", "member"] },
 
     // ── Oversight ─────────────────────────────────────────────────────────
-    { name: "Cooperative register", path: "/cooperatives", icon: Users, group: "Oversight", roles: ["admin", "manager", "government", "generalManager"] },
+    // The register is the oversight view across cooperatives. A manager runs
+    // one cooperative and has its profile, members and records under "My
+    // cooperative"; the register of the others is not theirs to browse.
+    { name: "Cooperative register", path: "/cooperatives", icon: Users, group: "Oversight", roles: ["admin", "government", "generalManager"] },
     { name: "District monitoring", path: "/government-monitoring", icon: Building2, group: "Oversight", roles: ["government", "admin", "generalManager"] },
     { name: "Monthly audit", path: "/monthly-audit", icon: Stethoscope, group: "Oversight", roles: ["government", "admin", "generalManager"] },
     { name: "Cooperative documents", path: "/cooperative-documents", icon: FileText, group: "Oversight", roles: ["admin", "government", "generalManager"] },
     { name: "Reports", path: "/reports", icon: FileText, group: "Oversight", roles: ["admin", "manager", "government", "generalManager"] },
-    { name: "AI insights", path: "/ai-insights", icon: Brain, group: "Oversight", roles: ["admin", "manager", "member", "generalManager"] },
+    { name: "AI insights", path: "/ai-insights", icon: Brain, group: "Oversight", roles: ["admin", "manager", "member", "government", "generalManager"] },
 
     // ── RCA ───────────────────────────────────────────────────────────────
     // Formation, dissolution and the four certificate services are one page
@@ -455,7 +458,14 @@ function AppRoutes() {
         }
       >
         <Route index element={<Dashboard />} />
-        <Route path="cooperatives" element={<Cooperatives />} />
+        <Route
+          path="cooperatives"
+          element={
+            <RoleRoute roles={["admin", "government", "generalManager"]}>
+              <Cooperatives />
+            </RoleRoute>
+          }
+        />
         <Route path="members" element={<Members />} />
         <Route path="members/new" element={<AddMember />} />
         <Route path="members/:id" element={<MemberDetails />} />

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../services/api";
+import { downloadPdf } from "../services/pdf";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { Select } from "../components/Select";
@@ -186,28 +187,33 @@ export function CooperativeRankings({ embedded = false }: { embedded?: boolean }
   const podium = useMemo(() => (table?.standings ?? []).slice(0, 3), [table]);
   const dimensions = useMemo(() => dimensionOrder(table), [table]);
 
+  /** The league table as a PDF. */
   const exportCsv = () => {
     if (!table) return;
-    const header = [
-      "Rank", "Cooperative", "Sector", "Type", "Members", "Composite",
-      ...dimensions.map((d) => table.dimensions[d]),
-      "Previous rank", "Band",
-    ];
-    const rows = table.standings.map((s) => [
-      s.rank, s.name, s.sector, s.type, s.memberCount, s.compositeScore,
-      ...dimensions.map((d) => (s.scores[d] === null ? "n/a" : s.scores[d])),
-      s.previousRank ?? "n/a", BAND_STYLES[s.band]?.label ?? s.band,
-    ]);
-    const csv = [header, ...rows]
-      .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `district-league-${table.period}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadPdf({
+      title: "District League Table",
+      subtitle: `Period ${table.period}`,
+      narrative: [
+        "Cooperatives are ranked on a composite of the dimensions shown, each scored as a percentile within the district. " +
+          "A dimension with no data is left out of a cooperative's composite rather than counted as zero, and shows as n/a.",
+      ],
+      summary: [
+        { label: "Cooperatives ranked", value: String(table.standings.length) },
+        { label: "Top of the table", value: table.standings[0]?.name ?? "-" },
+      ],
+      sections: [
+        {
+          title: "Standings",
+          columns: ["Rank", "Cooperative", "Sector", "Members", "Composite", ...dimensions.map((d) => table.dimensions[d]), "Previous rank", "Band"],
+          rows: table.standings.map((s) => [
+            s.rank, s.name, s.sector, s.memberCount, s.compositeScore,
+            ...dimensions.map((d) => (s.scores[d] === null ? "n/a" : s.scores[d])),
+            s.previousRank ?? "n/a", BAND_STYLES[s.band]?.label ?? s.band,
+          ]),
+        },
+      ],
+      signatories: ["Prepared by", "Reviewed by"],
+    }).catch((err: any) => alert(err?.message ?? "The PDF could not be produced."));
   };
 
   if (loading && !table) {
@@ -250,7 +256,7 @@ export function CooperativeRankings({ embedded = false }: { embedded?: boolean }
           <Button variant="outline" onClick={exportCsv}>
             <span className="flex items-center gap-2">
               <Download className="w-4 h-4" />
-              Export CSV
+              Download PDF
             </span>
           </Button>
         </div>

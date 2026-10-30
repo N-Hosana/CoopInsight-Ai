@@ -140,9 +140,11 @@ train against. Weights are stated in `WEIGHTS` so a manager can argue with them:
 
 | Component | Weight |
 |---|---|
-| `activityFrequency` | 0.40 |
-| `contributionConsistency` | 0.40 |
-| `trainingParticipation` | 0.20 |
+| `activityFrequency` | 0.50 |
+| `contributionConsistency` | 0.50 |
+
+Training is not a component of its own: a training is an activity and is already
+counted in `activityFrequency`.
 
 Normalisation is **relative to the cooperative's own best performer**, not an
 absolute target: a cooperative that holds two activities a year should not have

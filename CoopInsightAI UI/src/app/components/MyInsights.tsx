@@ -103,7 +103,11 @@ function Tile({ icon: Icon, label, value, sub }: { icon: typeof Info; label: str
   );
 }
 
-export function MyInsights() {
+/**
+ * `embedded` shows only the personal part, without the page heading or the
+ * cooperative section — for a manager, whose cooperative has its own tab.
+ */
+export function MyInsights({ embedded = false }: { embedded?: boolean } = {}) {
   const navigate = useNavigate();
   const [data, setData] = useState<MyData | null>(null);
   const [notLinked, setNotLinked] = useState<string | null>(null);
@@ -116,8 +120,9 @@ export function MyInsights() {
     setLoading(true);
     Promise.allSettled([
       api.get<{ data: MyData | null; message?: string }>("/ai/me"),
-      api.get<{ data: CoopInsight[] }>("/ai/insights?page=1&limit=20"),
-      api.get<{ data: { engagement?: any[]; cooperativeStats?: Engagement["stats"] } }>("/ai/member-engagement"),
+      embedded ? Promise.resolve({ data: [] as CoopInsight[] }) : api.get<{ data: CoopInsight[] }>("/ai/insights?page=1&limit=20"),
+      // own=1: this person's score and the cooperative's averages, nobody else's.
+      api.get<{ data: { engagement?: any[]; cooperativeStats?: Engagement["stats"] } }>("/ai/member-engagement?own=1"),
     ])
       .then(([me, coop, eng]) => {
         if (me.status === "fulfilled") {
@@ -135,6 +140,7 @@ export function MyInsights() {
         }
       })
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (loading) return <p className="py-8 text-gray-500">Working out your insights…</p>;
@@ -155,17 +161,24 @@ export function MyInsights() {
       : null;
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6 py-8">
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
-          <Brain className="h-8 w-8 text-[#2D6A4F]" />
-          Your insights
-        </h1>
-        <p className="mt-1 text-gray-600">
-          How you are doing as a member of {data.member.cooperativeName}, and how the cooperative is doing.
+    <div className={embedded ? "space-y-6" : "max-w-6xl mx-auto space-y-6 py-8"}>
+      {embedded ? (
+        <p className="text-sm text-gray-600">
+          Your own record as a member of {data.member.cooperativeName}: your savings, attendance and loans.
           Only your own records are used; other members are counted, never named.
         </p>
-      </div>
+      ) : (
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            <Brain className="h-8 w-8 text-[#2D6A4F]" />
+            Your insights
+          </h1>
+          <p className="mt-1 text-gray-600">
+            How you are doing as a member of {data.member.cooperativeName}, and how the cooperative is doing.
+            Only your own records are used; other members are counted, never named.
+          </p>
+        </div>
+      )}
 
       {data.member.former && (
         <div className="rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-800">
@@ -269,6 +282,7 @@ export function MyInsights() {
       </div>
 
       {/* Your cooperative */}
+      {!embedded && (
       <div className="space-y-3">
         <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
           <Building2 className="h-5 w-5 text-[#2D6A4F]" />
@@ -310,6 +324,7 @@ export function MyInsights() {
           </Card>
         )}
       </div>
+      )}
 
       <p className="text-xs text-gray-500">{data.method}</p>
     </div>

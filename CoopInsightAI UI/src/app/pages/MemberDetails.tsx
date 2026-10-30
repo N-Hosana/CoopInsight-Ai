@@ -20,6 +20,7 @@ import {
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { api } from "../services/api";
+import { downloadPdf } from "../services/pdf";
 import { MemberHistory } from "../components/MemberHistory";
 
 /**
@@ -204,67 +205,60 @@ export function MemberDetails() {
   const isOwn = scope === "own";
   const who = isOwn ? "you" : profile?.member.full_name ?? "this member";
 
+  /** The member's record as a PDF statement. */
   const exportReport = () => {
     if (!profile) return;
     const { member, financial, participation } = profile;
-    const report = [
-      "MEMBER RECORD",
-      `Generated: ${new Date().toLocaleString()}`,
-      "",
-      `Name:            ${member.full_name}`,
-      `Membership no.:  ${member.membership_number}`,
-      `National ID:     ${member.national_id}`,
-      `Role:            ${titleCase(member.role)}`,
-      `Status:          ${titleCase(member.status)}`,
-      `Cooperative:     ${member.cooperative_name}`,
-      `Member since:    ${formatDate(member.membership_date)}`,
-      `Phone:           ${member.phone}`,
-      `Email:           ${member.email ?? "—"}`,
-      "",
-      "FINANCIAL POSITION",
-      `Savings:              ${money(financial.savings)}`,
-      `Contributions paid:   ${financial.contributionCount}`,
-      `Outstanding loans:    ${money(financial.outstandingLoans)}`,
-      `Dividends received:   ${money(financial.dividendsPaid)}`,
-      "",
-      "PARTICIPATION",
-      `Invited to:   ${participation.invited} activities`,
-      `Attended:     ${participation.attended}`,
-      `Attendance:   ${participation.attendanceRate == null ? "not measurable" : `${participation.attendanceRate}%`}`,
-      "",
-      `CONTRIBUTIONS (${profile.contributions.length})`,
-      ...profile.contributions.map(
-        (c) => `  ${formatDate(c.date)}  ${titleCase(c.type).padEnd(16)} ${money(c.amount)}`
-      ),
-      "",
-      `LOANS (${profile.loans.length})`,
-      ...profile.loans.map(
-        (l) => `  ${formatDate(l.issued_at)}  ${money(l.amount)} — ${l.status}, balance ${money(l.balance)}`
-      ),
-      "",
-      `ACTIVITIES (${profile.activities.length})`,
-      ...profile.activities.map(
-        (a) => `  ${formatDate(a.date)}  ${a.attended ? "attended" : "absent  "}  ${a.title}`
-      ),
-      "",
-      `TRANSACTIONS (${profile.transactions.length})`,
-      ...profile.transactions.map(
-        (t) => `  ${formatDate(t.date)}  ${t.type.padEnd(8)} ${money(t.amount)}  ${t.description}`
-      ),
-      "",
-      `STATUS CHANGES (${profile.statusLog.length})`,
-      ...profile.statusLog.map(
-        (s) => `  ${formatDate(s.changed_at)}  ${s.old_status} → ${s.new_status}  ${s.reason ?? ""}`
-      ),
-    ].join("\n");
-
-    const blob = new Blob([report], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `member-${member.membership_number}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadPdf({
+      title: "Member Statement",
+      subtitle: `${member.full_name} · Membership no. ${member.membership_number}`,
+      cooperativeId: (member as any).cooperative_id,
+      summary: [
+        { label: "Savings", value: money(financial.savings) },
+        { label: "Outstanding loans", value: money(financial.outstandingLoans) },
+        { label: "Dividends received", value: money(financial.dividendsPaid) },
+        { label: "Attendance", value: participation.attendanceRate == null ? "n/a" : `${participation.attendanceRate}%` },
+      ],
+      sections: [
+        {
+          title: "Member",
+          facts: [
+            { label: "Name", value: member.full_name },
+            { label: "Membership number", value: member.membership_number ?? "" },
+            { label: "National ID", value: member.national_id ?? "" },
+            { label: "Role", value: titleCase(member.role) },
+            { label: "Status", value: titleCase(member.status) },
+            { label: "Cooperative", value: member.cooperative_name ?? "" },
+            { label: "Member since", value: formatDate(member.membership_date) },
+            { label: "Phone", value: member.phone ?? "" },
+            { label: "Email", value: member.email ?? "" },
+          ],
+        },
+        {
+          title: `Contributions (${profile.contributions.length})`,
+          columns: ["Date", "Kind", "Amount", "Note"],
+          rows: profile.contributions.map((c) => [formatDate(c.date), titleCase(c.type), money(c.amount), c.notes ?? ""]),
+          totals: ["Total", "", money(profile.contributions.reduce((a, c) => a + Number(c.amount), 0)), ""],
+        },
+        {
+          title: `Loans (${profile.loans.length})`,
+          columns: ["Issued", "Amount", "Balance", "Status"],
+          rows: profile.loans.map((l) => [formatDate(l.issued_at), money(l.amount), money(l.balance), titleCase(l.status)]),
+        },
+        {
+          title: `Activities (${profile.activities.length})`,
+          note: `Registered for ${participation.invited}, attended ${participation.attended}.`,
+          columns: ["Date", "Activity", "Attended"],
+          rows: profile.activities.map((a) => [formatDate(a.date), a.title, a.attended ? "Yes" : "No"]),
+        },
+        {
+          title: `Membership changes (${profile.statusLog.length})`,
+          columns: ["Date", "From", "To", "Reason"],
+          rows: profile.statusLog.map((s) => [formatDate(s.changed_at), s.old_status ?? "", s.new_status, s.reason ?? ""]),
+        },
+      ],
+      signatories: ["Member", "Manager / Treasurer"],
+    }).catch((err: any) => alert(err?.message ?? "The PDF could not be produced."));
   };
 
   if (loading) return <p className="text-gray-500">Loading the member record…</p>;
@@ -386,7 +380,7 @@ export function MemberDetails() {
           <Button variant="outline" onClick={exportReport}>
             <span className="flex items-center gap-2">
               <Download className="w-4 h-4" />
-              Export record
+              Download PDF
             </span>
           </Button>
         </div>

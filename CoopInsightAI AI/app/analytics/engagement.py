@@ -8,12 +8,17 @@ member as "engaged" — so there is nothing to train a classifier against. What 
 defensible is a **transparent weighted index** over observable behaviour, with
 the weights stated openly so a cooperative manager can argue with them.
 
-Three components, each normalised to 0–100:
+Two components, each normalised to 0–100:
 
-  * activityFrequency        — attendance at cooperative activities
+  * activityFrequency        — attendance at cooperative activities of every
+                               kind (meetings, assemblies, trainings, work days)
   * contributionConsistency  — how regularly the member pays in, relative to how
                                long they have been a member
-  * trainingParticipation    — attendance at training specifically
+
+Training is not scored on its own. A training is an activity like any other and
+is already counted in activityFrequency; a separate training component counted
+the same attendance twice and scored every member of a cooperative that ran no
+training as unmeasured.
 
 Normalisation is **relative to the cooperative's own best performer**, not to an
 absolute target. A cooperative that holds two activities a year should not have
@@ -42,9 +47,8 @@ MODEL_NAME = "member_engagement_scorer"
 
 # Stated openly so they can be challenged and changed.
 WEIGHTS = {
-    "activityFrequency": 0.40,
-    "contributionConsistency": 0.40,
-    "trainingParticipation": 0.20,
+    "activityFrequency": 0.50,
+    "contributionConsistency": 0.50,
 }
 
 
@@ -87,7 +91,6 @@ def score(cooperative_id: str) -> dict[str, Any]:
         }
 
     activities_held = features.count_cooperative_activities(cooperative_id)
-    trainings_held = features.count_cooperative_trainings(cooperative_id)
 
     # Raw signals first, normalised afterwards against the cohort.
     raw: list[dict[str, Any]] = []
@@ -98,7 +101,6 @@ def score(cooperative_id: str) -> dict[str, Any]:
                 "id": str(m["id"]),
                 "name": m["full_name"],
                 "attended": float(m["activities_attended"] or 0),
-                "trainings": float(m["trainings_attended"] or 0),
                 # Contributions per month of membership — a long-standing member
                 # who paid once is less consistent than a new member who paid once.
                 "contribution_rate": float(m["contribution_count"] or 0) / tenure_months,
@@ -114,7 +116,6 @@ def score(cooperative_id: str) -> dict[str, Any]:
         return [round(float(v / peak * 100.0), 1) for v in values], True
 
     activity_scores, activity_measured = normalise("attended")
-    training_scores, training_measured = normalise("trainings")
     contribution_scores, contribution_measured = normalise("contribution_rate")
 
     # Fall back to savings held when no contribution ledger exists — it is the
@@ -129,7 +130,6 @@ def score(cooperative_id: str) -> dict[str, Any]:
     measured = {
         "activityFrequency": activity_measured,
         "contributionConsistency": contribution_measured,
-        "trainingParticipation": training_measured,
     }
     active_weight = sum(w for k, w in WEIGHTS.items() if measured[k])
 
@@ -138,7 +138,6 @@ def score(cooperative_id: str) -> dict[str, Any]:
         components = {
             "activityFrequency": activity_scores[i],
             "contributionConsistency": contribution_scores[i],
-            "trainingParticipation": training_scores[i],
         }
         if active_weight > 0:
             overall = sum(
@@ -153,7 +152,6 @@ def score(cooperative_id: str) -> dict[str, Any]:
                 "memberName": r["name"],
                 "activityFrequency": components["activityFrequency"],
                 "contributionConsistency": components["contributionConsistency"],
-                "trainingParticipation": components["trainingParticipation"],
                 "overallScore": round(overall, 1),
                 "band": _band(overall),
             }
@@ -169,7 +167,7 @@ def score(cooperative_id: str) -> dict[str, Any]:
             f"{'No activity attendance has been logged. ' if not measured['activityFrequency'] else ''}"
             "Those components are shown as 0 but excluded from the overall score, "
             "which is weighted only over what is actually measured. "
-            f"Activities held: {activities_held}, trainings held: {trainings_held}."
+            f"Activities held: {activities_held}."
         )
 
     return {

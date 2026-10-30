@@ -3,6 +3,8 @@ import { query } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
 import { callAIService, AI_SERVICE_URL } from "../services/aiClient";
 import { memberInsights } from "../services/memberInsights";
+import { cooperativeBrief } from "../services/cooperativeBrief";
+import { oversightBrief } from "../services/oversightBrief";
 
 const router = Router();
 router.use(authenticate);
@@ -176,6 +178,29 @@ router.get("/insights/:id", async (req: Request, res: Response) => {
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
     console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// GET /cooperative-brief — how one cooperative is doing, in plain language:
+// a headline, five rated areas, what to fix in priority order, what is going
+// well. A manager gets their own cooperative whatever is asked; an officer or
+// administrator names the one they want.
+router.get("/cooperative-brief", async (req: Request, res: Response) => {
+  try {
+    if (req.user!.role === "member") {
+      return res.status(403).json({ success: false, message: "Members have their own insights page." });
+    }
+    const target = await oneCooperative(await aiScope(req));
+    if (!target.ok) return res.status(target.status).json({ success: false, message: target.message });
+    if (!target.cooperativeId) {
+      return res.status(400).json({ success: false, message: "Choose a cooperative." });
+    }
+    const data = await cooperativeBrief(target.cooperativeId);
+    if (!data) return res.status(404).json({ success: false, message: "Cooperative not found" });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("GET /ai/cooperative-brief error:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -422,8 +447,44 @@ router.post("/forecasts/generate", async (req: Request, res: Response) => {
   }
 });
 
+// GET /oversight-brief
+// Insights across every cooperative the viewer supervises: a sector officer's
+// sector, the district office's district, or everything for the RCA and
+// administrators. `sector` (and, overall, `district`) narrow it for those who
+// see more than one.
+router.get(
+  "/oversight-brief",
+  authorize("admin", "generalManager", "government"),
+  async (req: Request, res: Response) => {
+    try {
+      const me = await query(`SELECT sector, oversight_level FROM users WHERE id = $1`, [req.user!.userId]);
+      const oversight = req.user!.role === "government" ? (me.rows[0]?.oversight_level as string | null) : "rca";
+      const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+
+      if (oversight === "sector") {
+        if (!me.rows[0]?.sector) {
+          return res.status(400).json({ success: false, message: "Your account has no sector assigned." });
+        }
+        return res.json({
+          success: true,
+          data: await oversightBrief({ level: "sector", sector: me.rows[0].sector, district: null }),
+        });
+      }
+      const data = await oversightBrief({
+        level: oversight === "district" ? "district" : "overall",
+        sector: text(req.query.sector),
+        district: text(req.query.district),
+      });
+      res.json({ success: true, data });
+    } catch (err) {
+      console.error("GET /ai/oversight-brief error:", err);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
 // GET /member-engagement
-router.get("/member-engagement", async (req: Request, res: Response) => {
+router.get("/member-engagement",async (req: Request, res: Response) => {
   try {
     const target = await oneCooperative(await aiScope(req));
     if (!target.ok) return res.status(target.status).json({ success: false, message: target.message });
@@ -450,7 +511,9 @@ router.get("/member-engagement", async (req: Request, res: Response) => {
     }
     // A member sees their own score and the cooperative's figures, never a
     // colleague's name or score.
-    if (req.user!.role === "member") {
+    // `?own=1` asks for the same narrowing — a manager reading their own
+    // record as a member wants their own score, not the whole list.
+    if (req.user!.role === "member" || req.query.own === "1") {
       aiData = await ownEngagementOnly(req, aiData);
     }
     res.json({ success: true, data: aiData });

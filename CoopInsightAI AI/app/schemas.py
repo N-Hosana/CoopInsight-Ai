@@ -103,7 +103,6 @@ class EngagementEntry(BaseModel):
     memberName: str
     activityFrequency: float = Field(ge=0, le=100)
     contributionConsistency: float = Field(ge=0, le=100)
-    trainingParticipation: float = Field(ge=0, le=100)
     overallScore: float = Field(ge=0, le=100)
     band: Literal["high", "moderate", "at_risk"]
 

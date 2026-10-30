@@ -71,17 +71,70 @@ Run these first. If any fail, fix that before demonstrating anything.
 
 | Check | Command | Expected |
 |---|---|---|
-| AI unit tests | `cd "CoopInsightAI AI" && .\.venv\Scripts\python.exe -m pytest tests/ -q` | 54 passed |
+| AI unit tests | `cd "CoopInsightAI AI" && .\.venv\Scripts\python.exe -m pytest tests/ -q` | 65 passed |
 | Backend types | `cd "CoopInsightAI Backend" && npx tsc --noEmit` | no output |
 | Frontend types | `cd "CoopInsightAI UI" && npx tsc --noEmit` | no output |
 | Backend build | `cd "CoopInsightAI Backend" && pnpm build` | `dist/` created |
 | Frontend build | `cd "CoopInsightAI UI" && pnpm build` | `dist/` created |
 
-The 54 unit tests cover the statistical core without needing a database —
-outlier detection, forecast damping, percentile fairness, the monthly audit's
-scoring rules and period selection, and several regression tests for bugs found
-and fixed during development (including an audit that defaulted to a month which
-had not happened yet).
+The 65 unit tests cover the statistical core without needing a database —
+outlier detection, forecast damping, percentile fairness, the league table's
+three pillars and their weighting, the monthly audit's scoring rules and period
+selection, and several regression tests for bugs found and fixed during
+development (including an audit that defaulted to a month which had not happened
+yet).
+
+### End-to-end process checks
+
+These two drive the real HTTP API the way the app does, against a seeded
+database, and print a PASS/FAIL line per assertion. They are the fastest way to
+confirm the whole approval machinery still holds after a change.
+
+**Backend must be running** (`pnpm dev`) and the database freshly seeded.
+
+| Check | Command | Covers |
+|---|---|---|
+| Member exit | `cd "CoopInsightAI Backend" && pnpm verify:exit` | 50 assertions — all five login tiers, the security lockdown, the nine register views, and a member exit driven from filing to certificate |
+| Dissolution | `cd "CoopInsightAI Backend" && pnpm verify:dissolution` | 27 assertions — attendance and majority thresholds, president-only filing, RCA visibility from filing, the three approvals in order, the audit, the liquidation, the strike-off |
+
+`verify:exit` leaves one archived member and one certificate behind.
+**`verify:dissolution` strikes TMC off the register** — reseed afterwards:
+
+```bash
+cd "CoopInsightAI Backend" && pnpm seed
+```
+
+What `verify:exit` asserts, in order, is worth reading as a specification of the
+exit process:
+
+```
+release is refused with no assembly                 409 requiresMeeting
+settlement is refused before the assembly votes     409
+manager calls the assembly                          201 + broadcast
+the member can read the notice in Messages          (not just a notification)
+assembly vote is recorded                           quorum checked
+release is refused with no settlement recorded      409 requiresSettlement
+overpayment is refused                              400
+unexplained underpayment is refused                 400
+settlement is recorded                              201
+member confirms receipt                             200
+release is recorded                                 certificate issued, member archived
+the departed member can still open their certificate
+the code verifies
+```
+
+And `verify:dissolution` asserts the stages cannot be skipped:
+
+```
+filing refused without three-quarters attendance     409
+filing refused on a bare majority                    409  (reserved matter)
+filing refused with no liquidator appointed          400
+an ordinary member is refused                        403  (president only)
+the RCA cannot approve it at sector stage            403
+refused with no audit                                409 requiresAudit
+still refused: the liquidation is unfinished         409 requiresDistribution
+RCA strikes it off                                   200  permit revoked
+```
 
 ---
 
@@ -265,13 +318,19 @@ curl -X PATCH http://localhost:5000/api/membership/exit-requests/<id>/decision \
 # → "No general assembly has resolved on this request yet…"  requiresMeeting: true
 ```
 
-**Test B — notice period.** Call an assembly for three days' time.
-Expected: *"Members must be given at least 7 days' notice."*
+**Test B — notice period.** A removal cannot wait for the March or October
+ordinary sitting, so it is convened as an **extraordinary** assembly, which the
+RCA gives a 3-day notice period. Call one for two days' time.
 
-**Test C — call it properly.** Pick a date at least 7 days out and a location.
+Expected: *"An extraordinary assembly needs at least 3 days' notice under the
+RCA rules. The date you chose is 2 day(s) away."*
 
-Expected: *"General assembly called for … 25 of 49 members must attend for the
-vote to stand."* Then check two things:
+**Test C — call it properly.** Pick a date at least 3 days out and a location.
+
+Expected: *"General assembly called for … 37 of 49 members must attend for the
+vote to stand (extraordinary assembly, call 1)."* That is **three-quarters** —
+the RCA's first-call quorum for an extraordinary assembly. Then check two
+things:
 
 - **Activities** now shows *"General Assembly — removal request: UWIHOREYE
   Josephine"* on that date. The meeting is a real calendar entry, not a hidden
@@ -283,11 +342,30 @@ the outcome:
 
 | Figures entered | Expected |
 |---|---|
-| 9 present, 8 for, resolution *approve* | Refused — quorum is 25 of 49; record it as deferred |
+| 9 present, 8 for, resolution *approve* | Refused — quorum is 37 of 49; record it as deferred |
 | 30 present, 40 votes cast | Refused — more votes than attendees |
-| 30 present, 10 for / 18 against, minuted as *approve* | Refused — the vote does not carry |
+| 38 present, 10 for / 18 against, minuted as *approve* | Refused — the vote does not carry |
 | Any resolution with no minute of the reasoning | Refused — the member is entitled to know why |
-| 31 present, 24 for / 5 against / 2 abstain, *approve*, with a minute | Accepted, quorum met |
+| 38 present, 24 for / 5 against / 2 abstain, *approve*, with a minute | Accepted, quorum met |
+
+**Test D2 — the two-call rule.** This is the part that is purely RCA procedure
+and worth showing on its own. Record the first call as **30 present** (short of
+37) and resolution *deferred*.
+
+Expected: the response names the quorum basis — *"37 of 49 (75%, extraordinary
+assembly, first call)"* — and sets a second-call deadline **3 working days**
+out. Then:
+
+| Step | Expected |
+|---|---|
+| Schedule the second call a month away | Refused — *"must sit by … within 3 working days of the failed first call"* |
+| Schedule it inside the window | Accepted — *"25 of 49 … (extraordinary assembly, call 2)"*, i.e. one half |
+| Record the second call as 20 present, deferred | `referredToAgency: true`; sector and RCA officers are notified |
+| Try to call a third assembly | Refused — *"the matter now goes to the National Agency for direction rather than to a third assembly"* |
+
+**Test D3 — the reporting clocks.** Every held meeting returns two deadlines and
+shows them on the assembly panel: minutes to the **Sector and District
+administrations within 3 working days**, and to the **RCA within 7 days**.
 
 **Test E — the decision must match the resolution.** With the assembly having
 voted to release her, try to record a rejection.
@@ -395,8 +473,11 @@ No field visit or funding referral was recorded before dissolution was requested
 > months of history relative to the day you ran it. The *shape* of the finding —
 > traded in every month, still in surplus, no support attempted — is stable.
 
-It also confirms the vote carried: *"38 for, 6 against, 2 abstained (83% in
-favour; two-thirds required)."*
+It also confirms the vote carried. Dissolution is one of the matters the RCA
+reserves to a **three-quarters** majority, so the check reads: *"38 for, 6
+against, 2 abstained (83% of 46 cast; at least 75% required)."* Drop the votes
+in favour to 30 and it fails — 65% is an absolute majority but not a reinforced
+one.
 
 **Test E — a refused audit blocks the approval.** Conclude the audit as *the
 grounds do not hold*, then try to approve anyway.
@@ -493,10 +574,19 @@ Expand UNITAX. It should list, in plain language:
 ```
 Nothing has been recorded for 8 months — the cooperative looks dormant.
 Income was recorded in only 0 of the last 6 months.
-No meeting has been held in the last 6 months.
-2 of 3 office-bearers are recorded by name.
+Only 1 of the 2 ordinary general assemblies (March and October) were held in the last 12 months.
+No meeting of any kind in the last 6 months.
+2 of the 5 Board of Directors seats are recorded by name.
+No member has paid a contribution in the last three months.
 The temporary operating permit expires in 52 days.
 ```
+
+Two of those lines come straight from the RCA rulebook. Governance is scored
+against the **statutory March and October sittings**, not a meeting cadence this
+project invented; and the Board is **five** seats, not the three office-bearers
+the sector register happens to hold. Every cooperative reports a board shortfall
+for that reason — it is a true statement about the register, and it is left
+visible rather than papered over.
 
 Note the last line — the audit reads the permit too, so one screen connects the
 dormancy to the licence that was never converted.
@@ -728,6 +818,10 @@ Restart it and the pages recover with no page reload logic beyond a refresh.
 | Reject an exit request with no note | Rejected by the backend |
 | Approve an exit with no assembly resolution | Rejected — `requiresMeeting: true` |
 | Record a vote that did not reach quorum as carried | Rejected — record it as deferred |
+| Schedule an extraordinary assembly on 2 days' notice | Rejected — the RCA requires 3 |
+| Schedule a second call outside the 3-working-day window | Rejected, naming the deadline |
+| Call a third assembly after two failed calls | Rejected — the matter is the RCA's |
+| Convene an assembly for a cooperative over 100 members with no delegate count recorded | Rejected — quorum would be counted against the wrong body |
 | Approve a dissolution before the RCA audit | Rejected — `requiresAudit: true` |
 | Approve a dissolution the audit refused | Rejected, naming the audit reference |
 | Apply for funding you are blocked from | Rejected up front, with the blockers |

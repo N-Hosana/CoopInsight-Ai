@@ -5,6 +5,7 @@ import { Input } from "../components/Input";
 import { Select } from "../components/Select";
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../services/api";
+import { downloadFromApi } from "../services/pdf";
 import {
   FileText,
   Download,
@@ -20,40 +21,38 @@ import {
   Landmark,
   ShieldCheck,
   BarChart3,
+  CalendarCheck,
+  Stethoscope,
+  BookOpen,
 } from "lucide-react";
-
-const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
  * REPORTS
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * This page had eight panels — a template generator, an export-options picker,
- * a charts toggle, a custom report builder, an executive-summary previewer, a
- * report library, an available-reports list and a history archive — and most of
- * them fabricated their contents in the browser and threw them away on reload.
- * The schedules were a hardcoded array with fictional recipients, and the View
- * and Download buttons opened `file_url`, which the backend always set to the
- * literal string "pending".
+ * The reports a cooperative is actually asked for — by its general assembly,
+ * its sector cooperative officer, the RCA or a lender — generated from its own
+ * records and downloaded as a PDF: letterhead, period, a plain reading of the
+ * figures, tables with totals, and the offices that sign it.
  *
- * What is actually needed is three things, so there are three:
+ *   1. GENERATE      choose the report and the period
+ *   2. YOUR REPORTS  what has been generated; read it here or download it
+ *   3. SCHEDULES     reports that run on a timetable
  *
- *   1. GENERATE   pick what kind of report, over what period, for whom
- *   2. YOUR REPORTS  what has been generated, grouped by kind, each one
- *                    genuinely viewable and downloadable
- *   3. SCHEDULES  reports that run on a timetable, created and deleted here
- *
- * The classifications are kept — they are how anyone finds anything — but every
- * button now does what it says.
+ * A manager's reports are about their own cooperative. Officers and
+ * administrators choose a cooperative, or leave it blank for every one in
+ * their reach.
  */
 
 interface Template {
   id: string;
   name: string;
   description: string;
+  audience?: string;
   type: string;
-  parameters: string[];
+  /** A position report describes where things stand today; it takes no period. */
+  position?: boolean;
 }
 
 interface ReportRow {
@@ -62,12 +61,23 @@ interface ReportRow {
   type: string;
   format: string;
   file_url: string | null;
-  row_count: number | null;
   period_from: string | null;
   period_to: string | null;
   generated_at: string | null;
   created_at: string;
   cooperative_id: string | null;
+  cooperative_name?: string | null;
+  generated_by_name?: string | null;
+}
+
+interface ReportSection {
+  title: string;
+  note?: string;
+  paragraphs?: string[];
+  facts?: Array<{ label: string; value: string }>;
+  columns?: string[];
+  rows?: Array<Array<string | number | null>>;
+  totals?: Array<string | number | null>;
 }
 
 interface ReportContent {
@@ -77,9 +87,11 @@ interface ReportContent {
   periodFrom: string | null;
   periodTo: string | null;
   generatedAt: string;
+  preparedBy?: string | null;
+  narrative?: string[];
   summary: Array<{ label: string; value: string }>;
-  sections: Array<{ title: string; note?: string; columns: string[]; rows: Array<Array<string | number | null>> }>;
-  rowCount: number;
+  sections: ReportSection[];
+  signatories?: string[];
 }
 
 interface Schedule {
@@ -93,28 +105,40 @@ interface Schedule {
   active: boolean;
 }
 
-/** How each classification is presented. Icons make the list scannable. */
 const TYPE_STYLE: Record<string, { icon: typeof FileText; tone: string }> = {
   financial_summary: { icon: Wallet, tone: "bg-[#2D6A4F]/10 text-[#2D6A4F]" },
-  member_activity: { icon: Users, tone: "bg-indigo-100 text-indigo-700" },
   savings_growth: { icon: PiggyBank, tone: "bg-emerald-100 text-emerald-700" },
   loan_performance: { icon: Landmark, tone: "bg-amber-100 text-amber-800" },
-  compliance: { icon: ShieldCheck, tone: "bg-purple-100 text-purple-700" },
+  member_activity: { icon: Users, tone: "bg-indigo-100 text-indigo-700" },
+  activities: { icon: CalendarCheck, tone: "bg-teal-100 text-teal-700" },
   budget_variance: { icon: BarChart3, tone: "bg-sky-100 text-sky-700" },
-  annual: { icon: FileText, tone: "bg-gray-100 text-gray-700" },
+  compliance: { icon: ShieldCheck, tone: "bg-purple-100 text-purple-700" },
+  audit: { icon: Stethoscope, tone: "bg-rose-100 text-rose-700" },
+  annual: { icon: BookOpen, tone: "bg-gray-100 text-gray-700" },
 };
 
-const FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "annually"];
+const FREQUENCIES = ["monthly", "quarterly", "annually"];
 
 const formatDate = (v: string | null) =>
   v ? new Date(v).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "—";
 
-/** First of the month twelve months back, and today — a sensible default span. */
-const defaultRange = () => {
-  const to = new Date();
-  const from = new Date(to.getFullYear() - 1, to.getMonth(), 1);
-  return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
-};
+const iso = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** The periods a cooperative reports on, so nobody has to type dates. */
+function periods(): Array<{ id: string; label: string; from: string; to: string }> {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const q = Math.floor(m / 3);
+  return [
+    { id: "this_year", label: `This year so far (${y})`, from: iso(new Date(y, 0, 1)), to: iso(now) },
+    { id: "last_year", label: `Last year (${y - 1})`, from: iso(new Date(y - 1, 0, 1)), to: iso(new Date(y - 1, 11, 31)) },
+    { id: "last_quarter", label: "Last quarter", from: iso(new Date(y, q * 3 - 3, 1)), to: iso(new Date(y, q * 3, 0)) },
+    { id: "last_month", label: "Last month", from: iso(new Date(y, m - 1, 1)), to: iso(new Date(y, m, 0)) },
+    { id: "last_12", label: "Last 12 months", from: iso(new Date(y - 1, m, now.getDate() + 1)), to: iso(now) },
+  ];
+}
 
 export function Reports() {
   const { user } = useAuth();
@@ -131,16 +155,17 @@ export function Reports() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  const range = defaultRange();
+  const presets = useMemo(periods, []);
   const [form, setForm] = useState({
     type: "financial_summary",
-    from: range.from,
-    to: range.to,
+    preset: "this_year",
+    from: presets[0].from,
+    to: presets[0].to,
     cooperativeId: "",
   });
 
   const [filter, setFilter] = useState("All");
-  const [viewing, setViewing] = useState<ReportContent | null>(null);
+  const [viewing, setViewing] = useState<{ row: ReportRow; content: ReportContent } | null>(null);
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleForm, setScheduleForm] = useState({
     type: "financial_summary",
@@ -174,22 +199,27 @@ export function Reports() {
         .then((r) => setCooperatives(r.data ?? []))
         .catch(() => setCooperatives([]));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const chosen = templates.find((t) => t.type === form.type);
 
   const generate = async () => {
     setGenerating(true);
     setError("");
     setMessage("");
     try {
-      const res = await api.post<{ message: string }>("/reports/generate", {
+      const res = await api.post<{ message: string; data: ReportRow & { content: ReportContent } }>("/reports/generate", {
         type: form.type,
         from: form.from,
         to: form.to,
-        format: "csv",
+        format: "pdf",
         cooperativeId: form.cooperativeId || undefined,
       });
       setMessage(res.message);
       await load();
+      // Show it straight away: the point of generating is to read it.
+      if (res.data?.content) setViewing({ row: res.data, content: res.data.content });
     } catch (err: any) {
       setError(err?.message ?? "Could not generate the report.");
     } finally {
@@ -197,20 +227,14 @@ export function Reports() {
     }
   };
 
-  /** Opens the stored content in a panel — this is what "View" means. */
+  /** Opens the stored report on screen. */
   const view = async (report: ReportRow) => {
     setBusy(report.id);
     setError("");
     try {
-      const token = localStorage.getItem("coopinsight_access_token");
-      const res = await fetch(`${BASE_URL}/reports/${report.id}/download?format=json`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.message ?? "Could not open this report.");
-      }
-      setViewing(await res.json());
+      const res = await api.get<{ data: ReportRow & { content: ReportContent | null } }>(`/reports/${report.id}`);
+      if (!res.data?.content) throw new Error("This report has no stored contents. Generate it again.");
+      setViewing({ row: report, content: res.data.content });
     } catch (err: any) {
       setError(err?.message ?? "Could not open this report.");
     } finally {
@@ -218,33 +242,31 @@ export function Reports() {
     }
   };
 
-  /**
-   * Downloads the real file.
-   *
-   * It goes through fetch rather than a plain link because the endpoint needs
-   * the bearer token; the blob is then handed to the browser as a save.
-   */
-  const download = async (report: ReportRow, format: "csv" | "json") => {
+  /** Downloads the report: a PDF to print and sign, or the figures for a spreadsheet. */
+  const download = async (report: ReportRow, format: "pdf" | "csv") => {
     setBusy(report.id);
     setError("");
     try {
-      const token = localStorage.getItem("coopinsight_access_token");
-      const res = await fetch(`${BASE_URL}/reports/${report.id}/download?format=${format}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.message ?? "Could not download this report.");
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${report.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.${format}`;
-      a.click();
-      URL.revokeObjectURL(url);
+      await downloadFromApi(
+        `/reports/${report.id}/download?format=${format}`,
+        `${report.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.${format}`
+      );
     } catch (err: any) {
       setError(err?.message ?? "Could not download this report.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async (report: ReportRow) => {
+    if (!window.confirm(`Delete "${report.title}"? The figures can be generated again.`)) return;
+    setBusy(report.id);
+    setError("");
+    try {
+      await api.delete(`/reports/${report.id}`);
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? "Could not delete this report.");
     } finally {
       setBusy(null);
     }
@@ -263,7 +285,7 @@ export function Reports() {
       await api.post("/reports/schedule", {
         type: scheduleForm.type,
         frequency: scheduleForm.frequency,
-        format: "csv",
+        format: "pdf",
         recipients,
       });
       setMessage("Schedule created.");
@@ -298,7 +320,6 @@ export function Reports() {
     [reports, filter]
   );
 
-  /** Counts per classification, so the filter chips carry their own evidence. */
   const counts = useMemo(() => {
     const out: Record<string, number> = {};
     for (const r of reports) out[r.type] = (out[r.type] ?? 0) + 1;
@@ -312,59 +333,83 @@ export function Reports() {
       <div>
         <h1 className="text-3xl font-bold text-gray-900">Reports</h1>
         <p className="text-gray-600 mt-1 max-w-3xl">
-          Generate a report from the cooperative's own records, read it here, and download it as a
-          spreadsheet. Every report is a snapshot: it keeps the figures as they stood when it was
-          run, so it still means the same thing when it is read months later.
+          {isOversight
+            ? "Reports on the cooperatives you supervise, built from their own records."
+            : `The reports ${user?.cooperativeName ?? "your cooperative"} is asked for — by its general assembly, the sector officer, the RCA or a lender — built from its own records.`}{" "}
+          Each one downloads as a PDF ready to print and sign, and keeps the figures as they stood on
+          the day it was generated.
         </p>
       </div>
 
       {message && (
-        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          {message}
-        </div>
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">{message}</div>
       )}
       {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
-        </div>
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
       )}
 
       {/* ── 1. Generate ──────────────────────────────────────────────────── */}
       <Card className="p-6">
         <h2 className="text-lg font-semibold text-gray-900">Generate a report</h2>
-        <p className="mt-1 text-sm text-gray-600">
-          {templates.find((t) => t.type === form.type)?.description ??
-            "Choose what kind of report you need."}
-        </p>
+        <p className="mt-1 text-sm text-gray-600">Choose the report you need.</p>
 
-        <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Select
-            label="Kind of report"
-            value={form.type}
-            onChange={(e) => setForm({ ...form, type: e.target.value })}
-            options={templates.map((t) => ({ value: t.type, label: t.name }))}
-          />
-          <Input
-            label="From"
-            type="date"
-            value={form.from}
-            onChange={(e) => setForm({ ...form, from: e.target.value })}
-          />
-          <Input
-            label="To"
-            type="date"
-            value={form.to}
-            onChange={(e) => setForm({ ...form, to: e.target.value })}
-          />
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {templates.map((t) => {
+            const style = TYPE_STYLE[t.type] ?? TYPE_STYLE.annual;
+            const Icon = style.icon;
+            const selected = form.type === t.type;
+            return (
+              <button
+                key={t.type}
+                onClick={() => setForm({ ...form, type: t.type })}
+                className={`rounded-xl border p-4 text-left transition-colors ${
+                  selected ? "border-[#2D6A4F] bg-[#2D6A4F]/5 ring-1 ring-[#2D6A4F]" : "border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`rounded-lg p-2 ${style.tone}`}>
+                    <Icon className="h-4 w-4" />
+                  </span>
+                  <p className="font-semibold text-gray-900">{t.name}</p>
+                </div>
+                <p className="mt-2 text-sm text-gray-600">{t.description}</p>
+                {t.audience && <p className="mt-2 text-xs text-gray-400">For: {t.audience}</p>}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-5 grid gap-4 border-t border-gray-200 pt-5 sm:grid-cols-2 lg:grid-cols-4">
+          {chosen?.position ? (
+            <div className="sm:col-span-2 lg:col-span-3">
+              <label className="mb-1 block text-sm font-medium text-gray-700">Period</label>
+              <p className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-600">
+                This report shows the position as it stands today, so it takes no period.
+              </p>
+            </div>
+          ) : (
+            <>
+              <Select
+                label="Period"
+                value={form.preset}
+                onChange={(e) => {
+                  const p = presets.find((x) => x.id === e.target.value);
+                  setForm(p ? { ...form, preset: p.id, from: p.from, to: p.to } : { ...form, preset: "custom" });
+                }}
+                options={[...presets.map((p) => ({ value: p.id, label: p.label })), { value: "custom", label: "Choose dates…" }]}
+              />
+              <Input label="From" type="date" value={form.from}
+                onChange={(e) => setForm({ ...form, preset: "custom", from: e.target.value })} />
+              <Input label="To" type="date" value={form.to}
+                onChange={(e) => setForm({ ...form, preset: "custom", to: e.target.value })} />
+            </>
+          )}
           {isOversight ? (
             <Select
               label="Cooperative"
               value={form.cooperativeId}
               onChange={(e) => setForm({ ...form, cooperativeId: e.target.value })}
-              options={[
-                { value: "", label: "All in scope" },
-                ...cooperatives.map((c) => ({ value: c.id, label: c.name })),
-              ]}
+              options={[{ value: "", label: "All in my scope" }, ...cooperatives.map((c) => ({ value: c.id, label: c.name }))]}
             />
           ) : (
             <div>
@@ -377,10 +422,10 @@ export function Reports() {
         </div>
 
         <div className="mt-5">
-          <Button onClick={generate} disabled={generating}>
+          <Button onClick={generate} disabled={generating || (!chosen?.position && form.from > form.to)}>
             <span className="flex items-center gap-2">
               <FileText className="h-4 w-4" />
-              {generating ? "Generating…" : "Generate"}
+              {generating ? "Generating…" : `Generate the ${chosen?.name ?? "report"}`}
             </span>
           </Button>
         </div>
@@ -396,17 +441,11 @@ export function Reports() {
                 key={t}
                 onClick={() => setFilter(t)}
                 className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors ${
-                  filter === t
-                    ? "border-[#2D6A4F] bg-[#2D6A4F] text-white"
-                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                  filter === t ? "border-[#2D6A4F] bg-[#2D6A4F] text-white" : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
                 }`}
               >
                 {t === "All" ? "All" : nameFor(t)}
-                <span
-                  className={`rounded-full px-1.5 font-semibold ${
-                    filter === t ? "bg-white/20" : "bg-gray-100 text-gray-600"
-                  }`}
-                >
+                <span className={`rounded-full px-1.5 font-semibold ${filter === t ? "bg-white/20" : "bg-gray-100 text-gray-600"}`}>
                   {t === "All" ? reports.length : counts[t]}
                 </span>
               </button>
@@ -418,16 +457,14 @@ export function Reports() {
           <Card className="p-10 text-center">
             <FileText className="mx-auto h-8 w-8 text-gray-400" />
             <p className="mt-3 font-medium text-gray-900">Nothing generated yet</p>
-            <p className="mt-1 text-sm text-gray-500">
-              Use the panel above — a report takes a moment and is saved here.
-            </p>
+            <p className="mt-1 text-sm text-gray-500">Choose a report above. It is saved here once generated.</p>
           </Card>
         ) : (
           <div className="space-y-3">
             {visible.map((r) => {
               const style = TYPE_STYLE[r.type] ?? TYPE_STYLE.annual;
               const Icon = style.icon;
-              const downloadable = Boolean(r.file_url && r.file_url !== "unavailable");
+              const available = Boolean(r.file_url && r.file_url !== "unavailable");
               return (
                 <Card key={r.id} className="p-5">
                   <div className="flex flex-wrap items-start justify-between gap-4">
@@ -438,41 +475,35 @@ export function Reports() {
                       <div className="min-w-0">
                         <p className="font-semibold text-gray-900">{r.title}</p>
                         <p className="text-sm text-gray-500">
-                          {nameFor(r.type)}
-                          {r.period_from && r.period_to &&
-                            ` · ${formatDate(r.period_from)} to ${formatDate(r.period_to)}`}
-                          {` · generated ${formatDate(r.generated_at ?? r.created_at)}`}
+                          {isOversight && `${r.cooperative_name ?? "All cooperatives"} · `}
+                          {r.period_from && r.period_to
+                            ? `${formatDate(r.period_from)} to ${formatDate(r.period_to)}`
+                            : "Position on the day"}
                         </p>
-                        {r.row_count != null && (
-                          <p className="text-xs text-gray-400">
-                            {r.row_count} row{r.row_count === 1 ? "" : "s"}
-                          </p>
-                        )}
+                        <p className="text-xs text-gray-400">
+                          Generated {formatDate(r.generated_at ?? r.created_at)}
+                          {r.generated_by_name && ` by ${r.generated_by_name}`}
+                        </p>
                       </div>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      {downloadable ? (
+                      {available ? (
                         <>
                           <Button size="sm" variant="secondary" disabled={busy === r.id} onClick={() => view(r)}>
-                            <span className="flex items-center gap-1.5">
-                              <Eye className="h-4 w-4" />
-                              View
-                            </span>
+                            <span className="flex items-center gap-1.5"><Eye className="h-4 w-4" />Read</span>
                           </Button>
-                          <Button size="sm" disabled={busy === r.id} onClick={() => download(r, "csv")}>
-                            <span className="flex items-center gap-1.5">
-                              <Download className="h-4 w-4" />
-                              CSV
-                            </span>
+                          <Button size="sm" disabled={busy === r.id} onClick={() => download(r, "pdf")}>
+                            <span className="flex items-center gap-1.5"><Download className="h-4 w-4" />PDF</span>
                           </Button>
-                          <Button size="sm" variant="outline" disabled={busy === r.id} onClick={() => download(r, "json")}>
-                            JSON
+                          <Button size="sm" variant="outline" disabled={busy === r.id} onClick={() => download(r, "csv")} >
+                            Spreadsheet
                           </Button>
+                          <button onClick={() => remove(r)} disabled={busy === r.id} className="p-2 text-gray-400 hover:text-red-600" aria-label="Delete report">
+                            <Trash2 className="h-4 w-4" />
+                          </button>
                         </>
                       ) : (
-                        // Honest about the old rows rather than offering a
-                        // button that opens nothing.
                         <span className="inline-flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-800">
                           <AlertTriangle className="h-3.5 w-3.5" />
                           No file — generate it again
@@ -494,17 +525,12 @@ export function Reports() {
             <CalendarClock className="mt-0.5 h-5 w-5 text-gray-700" />
             <div>
               <h2 className="text-lg font-semibold text-gray-900">Scheduled reports</h2>
-              <p className="text-sm text-gray-600">
-                Reports that run on a timetable and go out to a named list of people.
-              </p>
+              <p className="text-sm text-gray-600">Reports that run on a timetable and go out to a named list of people.</p>
             </div>
           </div>
           {!showSchedule && (
             <Button variant="outline" onClick={() => setShowSchedule(true)}>
-              <span className="flex items-center gap-2">
-                <Plus className="h-4 w-4" />
-                Add a schedule
-              </span>
+              <span className="flex items-center gap-2"><Plus className="h-4 w-4" />Add a schedule</span>
             </Button>
           )}
         </div>
@@ -512,41 +538,28 @@ export function Reports() {
         {showSchedule && (
           <div className="mt-5 space-y-4 border-t border-gray-200 pt-5">
             <div className="grid gap-4 sm:grid-cols-3">
-              <Select
-                label="Kind of report"
-                value={scheduleForm.type}
+              <Select label="Report" value={scheduleForm.type}
                 onChange={(e) => setScheduleForm({ ...scheduleForm, type: e.target.value })}
-                options={templates.map((t) => ({ value: t.type, label: t.name }))}
-              />
-              <Select
-                label="How often"
-                value={scheduleForm.frequency}
+                options={templates.map((t) => ({ value: t.type, label: t.name }))} />
+              <Select label="How often" value={scheduleForm.frequency}
                 onChange={(e) => setScheduleForm({ ...scheduleForm, frequency: e.target.value })}
-                options={FREQUENCIES.map((f) => ({ value: f, label: f[0].toUpperCase() + f.slice(1) }))}
-              />
-              <Input
-                label="Send to (comma separated)"
-                value={scheduleForm.recipients}
+                options={FREQUENCIES.map((f) => ({ value: f, label: f[0].toUpperCase() + f.slice(1) }))} />
+              <Input label="Send to (comma separated)" value={scheduleForm.recipients}
                 onChange={(e) => setScheduleForm({ ...scheduleForm, recipients: e.target.value })}
-                placeholder="name@example.rw, other@example.rw"
-              />
+                placeholder="name@example.rw, other@example.rw" />
             </div>
             <div className="flex flex-wrap gap-3">
               <Button disabled={busy === "schedule"} onClick={createSchedule}>
                 {busy === "schedule" ? "Saving…" : "Create the schedule"}
               </Button>
-              <Button variant="outline" onClick={() => setShowSchedule(false)}>
-                Cancel
-              </Button>
+              <Button variant="outline" onClick={() => setShowSchedule(false)}>Cancel</Button>
             </div>
           </div>
         )}
 
         <div className="mt-5 space-y-2">
           {schedules.length === 0 ? (
-            <p className="text-sm text-gray-500">
-              Nothing is scheduled. Reports are only produced when someone asks for one.
-            </p>
+            <p className="text-sm text-gray-500">Nothing is scheduled. Reports are only produced when someone asks for one.</p>
           ) : (
             schedules.map((s) => {
               const recipients = Array.isArray(s.recipients)
@@ -559,10 +572,7 @@ export function Reports() {
                     }
                   })();
               return (
-                <div
-                  key={s.id}
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 p-4"
-                >
+                <div key={s.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 p-4">
                   <div>
                     <p className="font-medium text-gray-900">{s.title || nameFor(s.type)}</p>
                     <p className="text-sm text-gray-600 capitalize">
@@ -571,16 +581,8 @@ export function Reports() {
                     </p>
                     <p className="text-xs text-gray-500">To: {recipients.join(", ")}</p>
                   </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy === s.id}
-                    onClick={() => deleteSchedule(s.id)}
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <Trash2 className="h-4 w-4" />
-                      Remove
-                    </span>
+                  <Button size="sm" variant="outline" disabled={busy === s.id} onClick={() => deleteSchedule(s.id)}>
+                    <span className="flex items-center gap-1.5"><Trash2 className="h-4 w-4" />Remove</span>
                   </Button>
                 </div>
               );
@@ -589,33 +591,35 @@ export function Reports() {
         </div>
       </Card>
 
-      {/* ── The viewer ───────────────────────────────────────────────────── */}
+      {/* ── The reader ───────────────────────────────────────────────────── */}
       {viewing && (
         <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
           <div className="my-8 w-full max-w-5xl rounded-2xl bg-white shadow-xl">
             <div className="flex items-start justify-between gap-4 border-b border-gray-200 p-6">
               <div>
-                <h2 className="text-xl font-semibold text-gray-900">{viewing.title}</h2>
+                <p className="text-sm font-semibold text-[#2D6A4F]">{viewing.content.cooperativeName ?? "All cooperatives in scope"}</p>
+                <h2 className="text-xl font-semibold text-gray-900">{viewing.content.title}</h2>
                 <p className="text-sm text-gray-500">
-                  {viewing.cooperativeName ?? "All cooperatives in scope"}
-                  {viewing.periodFrom && viewing.periodTo &&
-                    ` · ${formatDate(viewing.periodFrom)} to ${formatDate(viewing.periodTo)}`}
-                  {` · generated ${formatDate(viewing.generatedAt)}`}
+                  {viewing.content.periodFrom && viewing.content.periodTo
+                    ? `${formatDate(viewing.content.periodFrom)} to ${formatDate(viewing.content.periodTo)}`
+                    : "Position on the day"}
+                  {` · generated ${formatDate(viewing.content.generatedAt)}`}
+                  {viewing.content.preparedBy && ` by ${viewing.content.preparedBy}`}
                 </p>
               </div>
-              <button
-                onClick={() => setViewing(null)}
-                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
-                aria-label="Close"
-              >
+              <button onClick={() => setViewing(null)} className="rounded-lg p-2 text-gray-500 hover:bg-gray-100" aria-label="Close">
                 <X className="h-5 w-5" />
               </button>
             </div>
 
             <div className="space-y-6 p-6">
-              {viewing.summary.length > 0 && (
+              {(viewing.content.narrative ?? []).map((p, i) => (
+                <p key={i} className="text-sm leading-relaxed text-gray-800">{p}</p>
+              ))}
+
+              {viewing.content.summary.length > 0 && (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  {viewing.summary.map((item) => (
+                  {viewing.content.summary.map((item) => (
                     <div key={item.label} className="rounded-xl border border-gray-200 p-4">
                       <p className="text-xs text-gray-500">{item.label}</p>
                       <p className="mt-1 text-lg font-semibold text-gray-900">{item.value}</p>
@@ -624,49 +628,74 @@ export function Reports() {
                 </div>
               )}
 
-              {viewing.sections.map((section) => (
+              {viewing.content.sections.map((section) => (
                 <div key={section.title}>
-                  <p className="font-medium text-gray-900">{section.title}</p>
+                  <p className="font-semibold text-gray-900">{section.title}</p>
                   {section.note && <p className="text-xs text-gray-500">{section.note}</p>}
-                  <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200">
-                    <table className="w-full text-sm">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          {section.columns.map((c) => (
-                            <th key={c} className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-700">
-                              {c}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-200">
-                        {section.rows.length === 0 ? (
+                  {(section.paragraphs ?? []).map((p, i) => (
+                    <p key={i} className="mt-2 text-sm leading-relaxed text-gray-800">{p}</p>
+                  ))}
+                  {section.facts && section.facts.length > 0 && (
+                    <dl className="mt-2 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+                      {section.facts.map((f) => (
+                        <div key={f.label} className="flex justify-between gap-4 border-b border-gray-100 py-1">
+                          <dt className="text-gray-500">{f.label}</dt>
+                          <dd className="text-right font-medium text-gray-900">{f.value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
+                  {section.columns && section.columns.length > 0 && (
+                    <div className="mt-2 max-h-[28rem] overflow-auto rounded-lg border border-gray-200">
+                      <table className="w-full text-sm">
+                        <thead className="sticky top-0 bg-gray-50">
                           <tr>
-                            <td colSpan={section.columns.length} className="px-3 py-4 text-center text-gray-500">
-                              Nothing in this period.
-                            </td>
+                            {section.columns.map((c, i) => (
+                              <th key={i} className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-700">{c}</th>
+                            ))}
                           </tr>
-                        ) : (
-                          section.rows.map((row, i) => (
-                            <tr key={i}>
-                              {row.map((cell, j) => (
-                                <td key={j} className="whitespace-nowrap px-3 py-2 text-gray-800">
-                                  {cell}
-                                </td>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200">
+                          {(section.rows ?? []).length === 0 ? (
+                            <tr>
+                              <td colSpan={section.columns.length} className="px-3 py-4 text-center text-gray-500">
+                                Nothing recorded for this period.
+                              </td>
+                            </tr>
+                          ) : (
+                            (section.rows ?? []).map((row, i) => (
+                              <tr key={i}>
+                                {row.map((cell, j) => (
+                                  <td key={j} className="px-3 py-2 text-gray-800">{cell}</td>
+                                ))}
+                              </tr>
+                            ))
+                          )}
+                          {section.totals && (
+                            <tr className="bg-gray-50 font-semibold">
+                              {section.totals.map((cell, j) => (
+                                <td key={j} className="px-3 py-2 text-gray-900">{cell}</td>
                               ))}
                             </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               ))}
+
+              {viewing.content.signatories && viewing.content.signatories.length > 0 && (
+                <p className="border-t border-gray-200 pt-4 text-xs text-gray-500">
+                  The PDF carries signature lines for: {viewing.content.signatories.join(", ")}.
+                </p>
+              )}
             </div>
 
             <div className="flex justify-end gap-3 border-t border-gray-200 p-6">
-              <Button variant="outline" onClick={() => setViewing(null)}>
-                Close
+              <Button variant="outline" onClick={() => setViewing(null)}>Close</Button>
+              <Button disabled={busy === viewing.row.id} onClick={() => download(viewing.row, "pdf")}>
+                <span className="flex items-center gap-2"><Download className="h-4 w-4" />Download PDF</span>
               </Button>
             </div>
           </div>

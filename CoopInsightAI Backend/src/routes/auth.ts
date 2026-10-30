@@ -4,11 +4,49 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { query } from "../config/db";
 import { authenticate } from "../middleware/auth";
-import { sendOTPEmail, sendPasswordResetEmail, sendWelcomeEmail } from "../services/email";
+import { emailConfigured, sendEmailCode, verifyEmailCode } from "../services/email";
 
 const router = Router();
 
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
+const isProduction = () => process.env.NODE_ENV === "production";
+
+/**
+ * Stored in place of a code when Supabase holds the real one. A submitted code
+ * must be six digits, so this can never be matched by guessing.
+ */
+const HELD_BY_SUPABASE = "------";
+const isCode = (v: unknown) => /^\d{6}$/.test(String(v ?? ""));
+
+/**
+ * Issue a verification code to an address.
+ *
+ * Supabase generates and emails the code when it is configured, and never
+ * tells us what it is. A code of our own is kept as well in two cases: outside
+ * production, so a developer (and the seeded accounts, whose addresses are not
+ * real mailboxes) can sign in from the `devOtp` in the response; and when
+ * Supabase is not configured at all, where it is printed to the server console.
+ * The two codes are different and either is accepted.
+ *
+ * `failed` means nothing usable was issued and the caller must say so.
+ */
+async function issueCode(email: string) {
+  const delivery = await sendEmailCode(email);
+  if (!delivery.sent && emailConfigured()) {
+    console.error(`[EMAIL] Supabase did not send a code to ${email}: ${delivery.reason}`);
+  }
+  const keepLocal = !isProduction() || !emailConfigured();
+  const code = keepLocal ? generateOTP() : HELD_BY_SUPABASE;
+  if (keepLocal) console.log(`[OTP] ${email} → ${code}`);
+  return {
+    code,
+    devOtp: !isProduction() ? code : null,
+    failed: !delivery.sent && !keepLocal,
+    rateLimited: !delivery.sent && !!delivery.rateLimited,
+  };
+}
+
+const NOT_SENT = "We could not send your verification code. Please try again in a minute.";
 
 // GET /cooperatives — public, minimal fields only, used by the registration form
 router.get("/cooperatives", async (req: Request, res: Response) => {
@@ -80,19 +118,14 @@ router.post("/login", async (req: Request, res: Response) => {
 
     await query("UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = $1", [user.id]);
 
-    const otp = generateOTP();
+    const issued = await issueCode(user.email);
+    if (issued.failed) {
+      return res.status(issued.rateLimited ? 429 : 503).json({ success: false, message: NOT_SENT });
+    }
     await query("DELETE FROM otp_codes WHERE user_id = $1 AND purpose = 'login'", [user.id]);
     await query(
       "INSERT INTO otp_codes (user_id, code, purpose, expires_at) VALUES ($1, $2, 'login', NOW() + INTERVAL '5 minutes')",
-      [user.id, otp]
-    );
-
-    // Always log OTP to terminal for development visibility
-    console.log(`[OTP] ${user.email} → ${otp}`);
-
-    // Send OTP via email (non-blocking)
-    sendOTPEmail(user.email, user.name, otp).catch((err) =>
-      console.error("[EMAIL] Failed to send OTP:", err.message)
+      [user.id, issued.code]
     );
 
     // Log login activity — non-fatal so it never blocks the OTP response
@@ -107,7 +140,7 @@ router.post("/login", async (req: Request, res: Response) => {
       otpRequired: true,
       userId: user.id,
       // Expose OTP in non-production so devs don't need to watch the terminal
-      ...(process.env.NODE_ENV !== "production" ? { devOtp: otp } : {}),
+      ...(issued.devOtp ? { devOtp: issued.devOtp } : {}),
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -137,18 +170,32 @@ router.post("/send-otp", async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    const otp = generateOTP();
+    // A new code is only for a sign-in already under way: the password step
+    // is what opens one, and this must not be a way round it.
+    const pending = await query(
+      "SELECT 1 FROM otp_codes WHERE user_id = $1 AND purpose = 'login' AND created_at > NOW() - INTERVAL '15 minutes'",
+      [user.id]
+    );
+    if (!pending.rowCount) {
+      return res.status(401).json({ success: false, message: "Please sign in with your password again." });
+    }
+
+    const issued = await issueCode(user.email);
+    if (issued.failed) {
+      return res.status(issued.rateLimited ? 429 : 503).json({ success: false, message: NOT_SENT });
+    }
     await query("DELETE FROM otp_codes WHERE user_id = $1 AND purpose = 'login'", [user.id]);
     await query(
       "INSERT INTO otp_codes (user_id, code, purpose, expires_at) VALUES ($1, $2, 'login', NOW() + INTERVAL '5 minutes')",
-      [user.id, otp]
+      [user.id, issued.code]
     );
 
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[DEV OTP]", user.email, otp);
-    }
-
-    return res.json({ success: true, message: "OTP sent", expiresInMinutes: 5 });
+    return res.json({
+      success: true,
+      message: "OTP sent",
+      expiresInMinutes: 5,
+      ...(issued.devOtp ? { devOtp: issued.devOtp } : {}),
+    });
   } catch (err) {
     console.error("Send OTP error:", err);
     return res.status(500).json({ success: false, message: "Internal server error" });
@@ -164,13 +211,17 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
       return res.status(400).json({ message: "userId and otp are required" });
     }
 
-    if (String(otp).length !== 6) {
+    if (!isCode(otp)) {
       return res.status(400).json({ message: "OTP must be 6 digits" });
     }
 
+    // The sign-in the password step opened. Without one there is nothing to
+    // verify, whatever code is offered.
     const otpResult = await query(
-      "SELECT *, expires_at < NOW() AS is_expired FROM otp_codes WHERE user_id = $1 AND code = $2 AND purpose = 'login'",
-      [userId, String(otp)]
+      `SELECT o.*, o.expires_at < NOW() AS is_expired, u.email
+         FROM otp_codes o JOIN users u ON u.id = o.user_id
+        WHERE o.user_id = $1 AND o.purpose = 'login'`,
+      [userId]
     );
     const otpRecord = otpResult.rows[0];
 
@@ -180,6 +231,11 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
     if (otpRecord.is_expired) {
       await query("DELETE FROM otp_codes WHERE id = $1", [otpRecord.id]);
       return res.status(401).json({ success: false, message: "OTP expired. Please log in again." });
+    }
+    // Our own code where one was kept; otherwise the one Supabase emailed.
+    const matches = otpRecord.code === String(otp) || (await verifyEmailCode(otpRecord.email, String(otp)));
+    if (!matches) {
+      return res.status(401).json({ success: false, message: "Invalid OTP" });
     }
     await query("DELETE FROM otp_codes WHERE id = $1", [otpRecord.id]);
 
@@ -393,15 +449,15 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
     const user = userResult.rows[0];
 
     if (user) {
-      const otp = generateOTP();
+      // Whether or not a code went out is not reported: the answer below must
+      // be the same for an address with an account and one without.
+      const issued = await issueCode(user.email);
       await query("DELETE FROM password_resets WHERE email = $1", [email.toLowerCase()]);
-      await query(
-        "INSERT INTO password_resets (email, code, expires_at) VALUES ($1, $2, NOW() + INTERVAL '5 minutes')",
-        [email.toLowerCase(), otp]
-      );
-
-      if (process.env.NODE_ENV !== "production") {
-        console.log("[DEV PASSWORD RESET OTP]", email, otp);
+      if (!issued.failed) {
+        await query(
+          "INSERT INTO password_resets (email, code, expires_at) VALUES ($1, $2, NOW() + INTERVAL '5 minutes')",
+          [email.toLowerCase(), issued.code]
+        );
       }
     }
 
@@ -426,12 +482,17 @@ router.post("/verify-reset-otp", async (req: Request, res: Response) => {
     }
 
     const result = await query(
-      "SELECT * FROM password_resets WHERE email = $1 AND code = $2 AND expires_at > NOW()",
-      [email.toLowerCase(), String(otp)]
+      "SELECT * FROM password_resets WHERE email = $1 AND token IS NULL AND expires_at > NOW()",
+      [email.toLowerCase()]
     );
     const record = result.rows[0];
 
-    if (!record) {
+    // Our own code where one was kept; otherwise the one Supabase emailed.
+    const matches =
+      !!record &&
+      isCode(otp) &&
+      (record.code === String(otp) || (await verifyEmailCode(email.toLowerCase(), String(otp))));
+    if (!matches) {
       return res.status(401).json({ success: false, message: "Invalid or expired reset code" });
     }
 

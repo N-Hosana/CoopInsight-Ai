@@ -1,127 +1,65 @@
-import { Resend } from "resend";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-const FROM_EMAIL = `${process.env.SENDGRID_FROM_NAME || "CoopInsight AI"} <${process.env.SENDGRID_FROM_EMAIL || "onboarding@resend.dev"}>`;
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * VERIFICATION CODES BY EMAIL, THROUGH SUPABASE AUTH
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Supabase has no "send this email" call; what it has is Supabase Auth, which
+ * generates a one-time code, emails it, and later says whether a code is right.
+ * That is all this application needs email for, so Supabase does both halves:
+ *
+ *   sendEmailCode(email)          Supabase generates a code and emails it
+ *   verifyEmailCode(email, code)  Supabase says whether the code is the one sent
+ *
+ * The application never sees the code. Accounts, passwords and sessions stay in
+ * this application's own database; the Supabase user that is created for each
+ * address exists only so that Supabase has somewhere to send to.
+ *
+ * Who sends the email, what it says and how long a code lasts are set in the
+ * Supabase dashboard (Authentication → Emails), not here. The templates must
+ * contain {{ .Token }} or the email carries a link instead of a code.
+ */
 
-const isConfigured = (): boolean =>
-  !!process.env.RESEND_API_KEY && !process.env.RESEND_API_KEY.startsWith("re_placeholder");
+let client: SupabaseClient | null = null;
 
-const getClient = () => new Resend(process.env.RESEND_API_KEY!);
+export const emailConfigured = (): boolean => !!process.env.SUPABASE_URL && !!process.env.SUPABASE_ANON_KEY;
 
-export async function sendOTPEmail(
-  toEmail: string,
-  toName: string,
-  otp: string
-): Promise<void> {
-  const subject = "Your CoopInsight AI Login Code";
-  const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-      <div style="text-align: center; margin-bottom: 24px;">
-        <h1 style="color: #1d4ed8; font-size: 24px; margin: 0;">CoopInsight AI</h1>
-        <p style="color: #6b7280; font-size: 14px; margin: 4px 0 0;">Gasabo District Cooperative Platform</p>
-      </div>
-      <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; text-align: center;">
-        <p style="color: #374151; font-size: 16px; margin: 0 0 8px;">Hello <strong>${toName}</strong>,</p>
-        <p style="color: #374151; font-size: 14px; margin: 0 0 24px;">
-          Use the code below to complete your login. It expires in <strong>5 minutes</strong>.
-        </p>
-        <div style="background: #1d4ed8; border-radius: 8px; padding: 20px; display: inline-block; min-width: 160px;">
-          <span style="color: #ffffff; font-size: 36px; font-weight: bold; letter-spacing: 10px; font-family: monospace;">
-            ${otp}
-          </span>
-        </div>
-        <p style="color: #9ca3af; font-size: 12px; margin: 20px 0 0;">
-          If you did not request this code, please ignore this email.
-        </p>
-      </div>
-      <p style="color: #9ca3af; font-size: 11px; text-align: center; margin-top: 24px;">
-        © 2025 CoopInsight AI — Gasabo District, Rwanda
-      </p>
-    </div>
-  `;
-
-  if (!isConfigured()) {
-    console.log(`[EMAIL — Resend not configured, OTP not sent]`);
-    console.log(`  To: ${toEmail} | OTP: ${otp}`);
-    return;
+function supabase(): SupabaseClient {
+  if (!client) {
+    client = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!, {
+      // A server holds no Supabase session: every call stands alone.
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    });
   }
-
-  const { error } = await getClient().emails.send({
-    from: FROM_EMAIL,
-    to: toEmail,
-    subject,
-    html,
-  });
-
-  if (error) throw new Error(error.message);
-  console.log(`[EMAIL] OTP sent to ${toEmail}`);
+  return client;
 }
 
-export async function sendPasswordResetEmail(
-  toEmail: string,
-  toName: string,
-  resetLink: string
-): Promise<void> {
-  const subject = "Reset your CoopInsight AI password";
-  const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-      <h1 style="color: #1d4ed8;">CoopInsight AI</h1>
-      <p>Hello <strong>${toName}</strong>,</p>
-      <p>Click the button below to reset your password. This link expires in 1 hour.</p>
-      <a href="${resetLink}"
-         style="display:inline-block;background:#1d4ed8;color:#fff;padding:12px 24px;
-                border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0;">
-        Reset Password
-      </a>
-      <p style="color:#9ca3af;font-size:12px;">If you did not request this, ignore this email.</p>
-    </div>
-  `;
+export type Delivery = { sent: true } | { sent: false; reason: string; rateLimited?: boolean };
 
-  if (!isConfigured()) {
-    console.log(`[EMAIL] Password reset link for ${toEmail}: ${resetLink}`);
-    return;
+/** Ask Supabase to email a fresh code to this address. Never throws. */
+export async function sendEmailCode(email: string): Promise<Delivery> {
+  if (!emailConfigured()) return { sent: false, reason: "Supabase is not configured" };
+  try {
+    const { error } = await supabase().auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: true },
+    });
+    if (error) return { sent: false, reason: error.message, rateLimited: error.status === 429 };
+    console.log(`[EMAIL] Verification code sent to ${email}`);
+    return { sent: true };
+  } catch (err: any) {
+    return { sent: false, reason: err?.message ?? "Supabase could not be reached" };
   }
-
-  const { error } = await getClient().emails.send({
-    from: FROM_EMAIL,
-    to: toEmail,
-    subject,
-    html,
-  });
-
-  if (error) throw new Error(error.message);
 }
 
-export async function sendWelcomeEmail(
-  toEmail: string,
-  toName: string,
-  verificationLink: string
-): Promise<void> {
-  const subject = "Welcome to CoopInsight AI — Verify your email";
-  const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-      <h1 style="color: #1d4ed8;">Welcome to CoopInsight AI</h1>
-      <p>Hello <strong>${toName}</strong>,</p>
-      <p>Your account has been created. Click below to verify your email address.</p>
-      <a href="${verificationLink}"
-         style="display:inline-block;background:#1d4ed8;color:#fff;padding:12px 24px;
-                border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0;">
-        Verify Email
-      </a>
-      <p style="color:#9ca3af;font-size:12px;">This link expires in 24 hours.</p>
-    </div>
-  `;
-
-  if (!isConfigured()) {
-    console.log(`[EMAIL] Welcome/verify link for ${toEmail}: ${verificationLink}`);
-    return;
+/** Whether this is the code Supabase emailed to this address. A code works once. */
+export async function verifyEmailCode(email: string, code: string): Promise<boolean> {
+  if (!emailConfigured()) return false;
+  try {
+    const { data, error } = await supabase().auth.verifyOtp({ email, token: code, type: "email" });
+    return !error && !!data.user;
+  } catch {
+    return false;
   }
-
-  const { error } = await getClient().emails.send({
-    from: FROM_EMAIL,
-    to: toEmail,
-    subject,
-    html,
-  });
-
-  if (error) throw new Error(error.message);
 }

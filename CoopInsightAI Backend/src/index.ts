@@ -12,6 +12,7 @@ import transactionRoutes from "./routes/transactions";
 import activityRoutes from "./routes/activities";
 import dashboardRoutes from "./routes/dashboard";
 import reportRoutes from "./routes/reports";
+import exportRoutes from "./routes/exports";
 import messageRoutes from "./routes/messages";
 import notificationRoutes from "./routes/notifications";
 import securityRoutes from "./routes/security";
@@ -34,6 +35,8 @@ const port = process.env.PORT || 5000;
 const localhostPattern = /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/;
 app.use(
   cors({
+    // Lets the browser read the file name the server gives a download.
+    exposedHeaders: ["Content-Disposition"],
     origin:
       process.env.NODE_ENV === "production"
         ? process.env.CLIENT_URL
@@ -46,7 +49,8 @@ app.use(
           },
   })
 );
-app.use(express.json());
+// 2 MB: a long table posted to /api/exports/pdf is larger than the 100 KB default.
+app.use(express.json({ limit: "2mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 // ── Health check ─────────────────────────────
@@ -76,6 +80,7 @@ app.use("/api/dashboard", dashboardRoutes);
 
 // ── Reports & Budget ─────────────────────────
 app.use("/api/reports", reportRoutes);
+app.use("/api/exports", exportRoutes);
 
 // ── Communication ────────────────────────────
 app.use("/api/messages", messageRoutes);

@@ -6,6 +6,7 @@ import {
 import { useAuth } from "../contexts/AuthContext";
 import { useNavigate } from "react-router";
 import { api } from "../services/api";
+import { downloadPdf } from "../services/pdf";
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -186,22 +187,25 @@ export function SecurityAudit() {
     });
   }, [allAuditLogs, categoryFilter, statusFilter, searchQuery]);
 
+  /** The audit trail as filtered on screen, as a PDF. */
   const handleExportAuditTrail = () => {
-    const csv = [
-      ["ID", "User", "Role", "Action", "Target", "Category", "Timestamp", "IP", "Status"],
-      ...filteredLogs.map((l) => [l.id, l.user, l.role, l.action, l.target, l.category, l.timestamp, l.ip, l.status]),
-    ]
-      .map((r) => r.join(","))
-      .join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `audit-trail-${new Date().toISOString().split("T")[0]}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const failed = filteredLogs.filter((l) => String(l.status).toLowerCase() !== "success").length;
+    downloadPdf({
+      title: "Security Audit Trail",
+      subtitle: `${filteredLogs.length} event(s)${categoryFilter && categoryFilter !== "all" ? `, category: ${categoryFilter}` : ""}`,
+      summary: [
+        { label: "Events", value: String(filteredLogs.length) },
+        { label: "Not successful", value: String(failed) },
+      ],
+      sections: [
+        {
+          title: "Events",
+          note: "Most recent first, as filtered on the Security & audit page.",
+          columns: ["When", "User", "Role", "Action", "Target", "Category", "IP", "Result"],
+          rows: filteredLogs.map((l) => [l.timestamp, l.user, l.role, l.action, l.target, l.category, l.ip, l.status]),
+        },
+      ],
+    }).catch((err: any) => alert(err?.message ?? "The PDF could not be produced."));
   };
 
   const handleSendSecurityMessage = () => {
@@ -235,7 +239,7 @@ export function SecurityAudit() {
             onClick={handleExportAuditTrail}
             className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium"
           >
-            <Download className="w-4 h-4" /> Export Audit Trail
+            <Download className="w-4 h-4" /> Download PDF
           </button>
           <button
             onClick={() => setShowMessageModal(true)}

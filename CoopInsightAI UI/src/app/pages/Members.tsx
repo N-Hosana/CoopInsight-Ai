@@ -6,6 +6,7 @@ import { Select } from "../components/Select";
 import { useAuth } from "../contexts/AuthContext";
 import { Plus, UserCircle, Search, Download } from "lucide-react";
 import { api } from "../services/api";
+import { downloadPdf } from "../services/pdf";
 
 interface Member {
   id: string;
@@ -46,7 +47,12 @@ export function Members() {
     { value: "", label: "All cooperatives" },
   ]);
 
+  // A manager sees their own cooperative's members and nothing else, so there
+  // is no cooperative to choose between; officers and administrators can.
+  const ownCooperativeOnly = ["manager", "cooperative"].includes(user?.role ?? "");
+
   useEffect(() => {
+    if (ownCooperativeOnly) return;
     api
       .get<any>("/cooperatives?page=1&limit=100")
       .then((res: any) => {
@@ -59,7 +65,7 @@ export function Members() {
       .catch(() => {
         // Keep the default "All cooperatives" option on failure
       });
-  }, []);
+  }, [ownCooperativeOnly]);
 
   const fetchMembers = async () => {
     setLoading(true);
@@ -111,33 +117,32 @@ export function Members() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchTerm, filterCooperative, filterStatus]);
 
+  /** The member list on screen, as a PDF. */
   const handleBulkExport = () => {
-    const csv = [
-      ["Member ID", "Name", "Role", "Email", "Phone", "Cooperative", "Status", "Join Date", "Contribution"],
-      ...members.map((m) => [
-        m.id,
-        m.name,
-        m.role,
-        m.email,
-        m.phone,
-        m.cooperative,
-        m.status || "Active",
-        m.joinDate || "N/A",
-        m.contribution,
-      ]),
-    ]
-      .map((row) => row.join(","))
-      .join("\n");
-
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `members-${new Date().toISOString().split("T")[0]}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const active = members.filter((m) => (m.status || "Active").toLowerCase() === "active").length;
+    downloadPdf({
+      title: "Member Register",
+      subtitle: `${members.length} member(s)${filterStatus ? `, status: ${filterStatus}` : ""}${searchTerm ? `, matching "${searchTerm}"` : ""}`,
+      cooperativeId: filterCooperative || undefined,
+      summary: [
+        { label: "Members listed", value: String(members.length) },
+        { label: "Active", value: String(active) },
+        { label: "Not active", value: String(members.length - active) },
+      ],
+      sections: [
+        {
+          title: "Members",
+          columns: ownCooperativeOnly
+            ? ["Name", "Role", "Phone", "Email", "Status", "Joined"]
+            : ["Name", "Cooperative", "Role", "Phone", "Status", "Joined"],
+          rows: members.map((m) =>
+            ownCooperativeOnly
+              ? [m.name, m.role, m.phone, m.email, m.status || "Active", m.joinDate || ""]
+              : [m.name, m.cooperative, m.role, m.phone, m.status || "Active", m.joinDate || ""]
+          ),
+        },
+      ],
+    }).catch((err: any) => alert(err?.message ?? "The PDF could not be produced."));
   };
 
   return (
@@ -147,7 +152,7 @@ export function Members() {
         <div className="flex gap-3">
           <Button variant="secondary" onClick={handleBulkExport}>
             <Download className="w-4 h-4 mr-2" />
-            Export
+            Download PDF
           </Button>
           {(user?.role === "manager" || user?.role === "admin") && (
             <Button onClick={() => navigate("/members/new")}>
@@ -159,7 +164,7 @@ export function Members() {
       </div>
 
       <Card className="p-6">
-        <div className="grid gap-4 md:grid-cols-3 mb-6">
+        <div className={`grid gap-4 mb-6 ${ownCooperativeOnly ? "md:grid-cols-2" : "md:grid-cols-3"}`}>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
@@ -170,12 +175,14 @@ export function Members() {
               className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2D6A4F] outline-none"
             />
           </div>
-          <Select
-            label="Cooperative"
-            options={cooperativeOptions}
-            value={filterCooperative}
-            onChange={(e) => setFilterCooperative(e.target.value)}
-          />
+          {!ownCooperativeOnly && (
+            <Select
+              label="Cooperative"
+              options={cooperativeOptions}
+              value={filterCooperative}
+              onChange={(e) => setFilterCooperative(e.target.value)}
+            />
+          )}
           <Select
             label="Status"
             options={statusOptions}

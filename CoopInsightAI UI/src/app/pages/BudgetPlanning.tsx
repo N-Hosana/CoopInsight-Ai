@@ -5,6 +5,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { useNavigate } from "react-router";
 import { formatFrw } from "../data/financialData";
 import { api } from "../services/api";
+import { downloadPdf } from "../services/pdf";
 
 interface BudgetLine {
   id: string;
@@ -155,24 +156,33 @@ export function BudgetPlanning() {
     }
   };
 
+  /** The budget plan as a PDF, for the general assembly to approve. */
   const handleDownloadBudgetPlan = () => {
-    const content = [`Budget Plan: ${planName}`, `Cooperative: ${cooperativeName}`, `Period: ${planPeriod}`, `Status: ${planStatus}`, "", "Budget Lines:"];
-    content.push(
-      ...budgetLines.map((line, index) =>
-        `${index + 1}. ${line.category} — Allocated: ${formatFrw(line.allocated)}, Projected: ${formatFrw(line.projected)}, Notes: ${line.notes || "None"}`
-      )
-    );
-    content.push("", `Total Allocated: ${formatFrw(summary.totalAllocated)}`, `Total Projected: ${formatFrw(summary.totalProjected)}`, `Variance: ${formatFrw(summary.totalVariance)}`);
-
-    const blob = new Blob([content.join("\n")], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${planName.replace(/\s+/g, "_")}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadPdf({
+      title: `Budget Plan: ${planName}`,
+      subtitle: `Period: ${planPeriod} · Status: ${planStatus}`,
+      summary: [
+        { label: "Total allocated", value: formatFrw(summary.totalAllocated) },
+        { label: "Total projected", value: formatFrw(summary.totalProjected) },
+        { label: "Variance", value: formatFrw(summary.totalVariance) },
+        { label: "Budget lines", value: String(budgetLines.length) },
+      ],
+      sections: [
+        {
+          title: "Budget lines",
+          columns: ["Line", "Allocated", "Projected", "Difference", "Notes"],
+          rows: budgetLines.map((line) => [
+            line.category,
+            formatFrw(line.allocated),
+            formatFrw(line.projected),
+            formatFrw(Number(line.allocated) - Number(line.projected)),
+            line.notes || "",
+          ]),
+          totals: ["Total", formatFrw(summary.totalAllocated), formatFrw(summary.totalProjected), formatFrw(summary.totalVariance), ""],
+        },
+      ],
+      signatories: ["President", "Secretary", "Manager / Treasurer"],
+    }).catch((err: any) => alert(err?.message ?? "The PDF could not be produced."));
   };
 
   return (
@@ -189,7 +199,7 @@ export function BudgetPlanning() {
         <div className="flex flex-wrap gap-3">
           <Button variant="secondary" onClick={handleDownloadBudgetPlan}>
             <Download className="w-4 h-4 mr-2" />
-            Export Plan
+            Download PDF
           </Button>
           <Button onClick={handleAddBudgetLine} disabled={saving}>
             <Plus className="w-4 h-4 mr-2" />

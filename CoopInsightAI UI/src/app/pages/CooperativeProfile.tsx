@@ -4,6 +4,7 @@ import { useParams, useSearchParams, useNavigate } from "react-router";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { api } from "../services/api";
+import { downloadPdf } from "../services/pdf";
 import {
   Building2,
   MapPin,
@@ -226,58 +227,51 @@ export function CooperativeProfile() {
     }
   };
 
+  /** The cooperative's profile as a PDF. */
   const handleExportProfile = () => {
     if (!cooperative) return;
-
-    const report = `
-COOPERATIVE PROFILE EXPORT
-Generated: ${new Date().toLocaleString()}
-
-BASIC INFORMATION
-Name: ${cooperative.name}
-Registration Number: ${cooperative.registrationNumber}
-Type: ${cooperative.type}
-Status: ${cooperative.status}
-Registration Date: ${cooperative.registrationDate}
-
-LOCATION & OPERATIONS
-District: ${cooperative.district}
-Sector: ${cooperative.sector}
-Operating Area: ${cooperative.operatingArea}
-Membership Size: ${cooperative.membershipSize}
-
-LEADERSHIP
-President: ${cooperative.president || "Not recorded"}
-Email: ${cooperative.presidentEmail || "N/A"}
-Phone: ${cooperative.presidentPhone || "N/A"}
-
-Vice President: ${cooperative.vicePresident || "Not recorded"}
-Email: ${cooperative.vicePresidentEmail || "N/A"}
-Phone: ${cooperative.vicePresidentPhone || "N/A"}
-
-Secretary: ${cooperative.secretary || "Vacant / not recorded"}
-Email: ${cooperative.secretaryEmail || "N/A"}
-Phone: ${cooperative.secretaryPhone || "N/A"}
-
-Sector Cooperative Officer: ${cooperative.sectorOfficer || "Not recorded"}
-Phone: ${cooperative.sectorOfficerPhone || "N/A"}
-
-DOCUMENTS (${documents.length})
-${documents.map((doc) => `- ${doc.name} (${doc.type}) - ${new Date(doc.uploaded_at).toLocaleDateString()}`).join("\n")}
-
-DESCRIPTION
-${cooperative.description}
-    `.trim();
-
-    const blob = new Blob([report], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `cooperative-profile-${cooperative.id}-${new Date().toISOString().split("T")[0]}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const officer = (name?: string, phone?: string, email?: string) =>
+      name ? [name, phone, email].filter(Boolean).join(" · ") : "Not recorded";
+    downloadPdf({
+      title: "Cooperative Profile",
+      cooperativeId: cooperative.id,
+      sections: [
+        {
+          title: "Registration",
+          facts: [
+            { label: "Name", value: cooperative.name },
+            { label: "Registration number", value: cooperative.registrationNumber || "Not recorded" },
+            { label: "Registered on", value: cooperative.registrationDate || "Not recorded" },
+            { label: "Type", value: cooperative.type || "Not recorded" },
+            { label: "Status", value: cooperative.status || "Not recorded" },
+          ],
+        },
+        {
+          title: "Location and membership",
+          facts: [
+            { label: "District", value: cooperative.district || "Not recorded" },
+            { label: "Sector", value: cooperative.sector || "Not recorded" },
+            { label: "Operating area", value: cooperative.operatingArea || "Not recorded" },
+            { label: "Members", value: String(cooperative.membershipSize ?? "") },
+          ],
+        },
+        {
+          title: "Leadership",
+          facts: [
+            { label: "President", value: officer(cooperative.president, cooperative.presidentPhone, cooperative.presidentEmail) },
+            { label: "Vice President", value: officer(cooperative.vicePresident, cooperative.vicePresidentPhone, cooperative.vicePresidentEmail) },
+            { label: "Secretary", value: officer(cooperative.secretary, cooperative.secretaryPhone, cooperative.secretaryEmail) },
+            { label: "Sector Cooperative Officer", value: officer(cooperative.sectorOfficer, cooperative.sectorOfficerPhone) },
+          ],
+        },
+        ...(cooperative.description ? [{ title: "About the cooperative", paragraphs: [cooperative.description] }] : []),
+        {
+          title: `Documents on file (${documents.length})`,
+          columns: ["Document", "Kind", "Added"],
+          rows: documents.map((doc) => [doc.name, doc.type, new Date(doc.uploaded_at).toLocaleDateString()]),
+        },
+      ],
+    }).catch((err: any) => alert(err?.message ?? "The PDF could not be produced."));
   };
 
   if (loading) {
@@ -326,7 +320,7 @@ ${cooperative.description}
         <div className="flex gap-3">
           <Button variant="secondary" onClick={handleExportProfile}>
             <Download className="w-4 h-4 mr-2" />
-            Export Profile
+            Download PDF
           </Button>
           {canEdit && (
             <Button variant="secondary" onClick={() => { setIsEditing(!isEditing); setSaveError(null); }}>

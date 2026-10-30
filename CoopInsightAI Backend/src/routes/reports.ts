@@ -1,32 +1,76 @@
 import { Router, Request, Response } from "express";
 import { query } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
-import { buildReport, toCsv } from "../services/reportBuilder";
+import { buildReport, toCsv, toPdfSpec, REPORT_TITLES } from "../services/reportBuilder";
+import { renderPdf, pdfFileName } from "../services/pdf";
 
 const router = Router();
 router.use(authenticate);
 
-const VALID_REPORT_TYPES = [
-  "financial_summary",
-  "member_activity",
-  "loan_performance",
-  "savings_growth",
-  "compliance",
-  "audit",
-  "budget_variance",
-  "annual",
-];
+const VALID_REPORT_TYPES = Object.keys(REPORT_TITLES);
 const VALID_FORMATS = ["pdf", "excel", "csv", "json"];
 
+/**
+ * The reports on offer — the papers a cooperative is actually asked for.
+ * `position` reports describe where things stand today and take no period.
+ */
 const TEMPLATES = [
-  { id: "financial_summary", name: "Financial Summary", description: "Overview of income, expenses, and net position", type: "financial_summary", parameters: ["from", "to", "cooperativeId"] },
-  { id: "member_activity", name: "Member Activity Report", description: "Track member transactions and engagement", type: "member_activity", parameters: ["from", "to", "cooperativeId"] },
-  { id: "loan_performance", name: "Loan Performance Report", description: "Loan disbursements, repayments, and defaults", type: "loan_performance", parameters: ["from", "to", "cooperativeId"] },
-  { id: "savings_growth", name: "Savings Growth Report", description: "Member savings trends and growth analysis", type: "savings_growth", parameters: ["from", "to", "cooperativeId"] },
-  { id: "compliance", name: "Compliance Report", description: "Regulatory compliance status and gaps", type: "compliance", parameters: ["cooperativeId"] },
-  { id: "budget_variance", name: "Budget Variance Report", description: "Actual vs planned budget comparison", type: "budget_variance", parameters: ["budgetId", "cooperativeId"] },
-  { id: "annual", name: "Annual Report", description: "Comprehensive annual cooperative report", type: "annual", parameters: ["year", "cooperativeId"] },
+  { id: "financial_summary", type: "financial_summary", name: REPORT_TITLES.financial_summary, audience: "General assembly, sector officer, lenders", description: "What came in and what went out, by category and by month, with the surplus or deficit and the full cash book.", position: false },
+  { id: "savings_growth", type: "savings_growth", name: REPORT_TITLES.savings_growth, audience: "Members, general assembly", description: "Each member's savings at the start and end of the period, what they paid in, and the share capital they hold.", position: false },
+  { id: "loan_performance", type: "loan_performance", name: REPORT_TITLES.loan_performance, audience: "Board, credit committee", description: "Loans paid out and repaid, what is still owed, and how much of it is overdue.", position: false },
+  { id: "member_activity", type: "member_activity", name: REPORT_TITLES.member_activity, audience: "Board, sector officer", description: "How the register moved — who joined and left — its make-up, and each member's payments and attendance.", position: false },
+  { id: "activities", type: "activities", name: REPORT_TITLES.activities, audience: "General assembly, sector officer", description: "Activities scheduled and held, attendance at each, and whether the March and October assemblies sat.", position: false },
+  { id: "budget_variance", type: "budget_variance", name: REPORT_TITLES.budget_variance, audience: "Board, general assembly", description: "Each line of the approved budget against what was actually recorded.", position: false },
+  { id: "compliance", type: "compliance", name: REPORT_TITLES.compliance, audience: "Sector officer, RCA", description: "A checklist of what the regulator requires — permit, board, assemblies, balance sheet, documents — and what is outstanding.", position: true },
+  { id: "audit", type: "audit", name: REPORT_TITLES.audit, audience: "Board, sector officer", description: "The latest monthly audit: the score, how it is made up, each finding and what to do about it.", position: true },
+  { id: "annual", type: "annual", name: REPORT_TITLES.annual, audience: "General assembly, RCA", description: "The year in one document: membership, accounts, balance sheet, savings, loans, activities and compliance.", position: false },
 ];
+
+/**
+ * Whose reports the caller may see and make:
+ *   manager / cooperative   their own cooperative's
+ *   sector officer          cooperatives in their sector, and district reports they ran
+ *   district, RCA, admin    all
+ * The list, the viewer and the download all used to be open to any signed-in
+ * non-member, so a manager could read another cooperative's reports — or
+ * generate one for it by naming its id.
+ */
+async function reportScope(req: Request, alias = "r"): Promise<{ clause: string; params: unknown[] }> {
+  const role = req.user!.role;
+  if (["manager", "cooperative"].includes(role)) {
+    return { clause: `${alias}.cooperative_id = $1`, params: [req.user!.cooperativeId ?? null] };
+  }
+  if (role === "government") {
+    const me = await query(`SELECT sector, oversight_level FROM users WHERE id = $1`, [req.user!.userId]);
+    if (me.rows[0]?.oversight_level === "sector" && me.rows[0].sector) {
+      return {
+        clause: `(${alias}.cooperative_id IN (SELECT id FROM cooperatives WHERE sector = $1) OR ${alias}.generated_by = $2)`,
+        params: [me.rows[0].sector, req.user!.userId],
+      };
+    }
+  }
+  return { clause: "TRUE", params: [] };
+}
+
+/** The cooperative a new report may be about, or why not. null = every cooperative in reach. */
+async function reportTarget(
+  req: Request,
+  requested: string | null
+): Promise<{ ok: true; cooperativeId: string | null } | { ok: false; status: number; message: string }> {
+  const role = req.user!.role;
+  if (["manager", "cooperative"].includes(role)) {
+    if (!req.user!.cooperativeId) return { ok: false, status: 400, message: "Your account is not attached to a cooperative." };
+    return { ok: true, cooperativeId: req.user!.cooperativeId };
+  }
+  if (role === "government" && requested) {
+    const me = await query(`SELECT sector, oversight_level FROM users WHERE id = $1`, [req.user!.userId]);
+    if (me.rows[0]?.oversight_level === "sector") {
+      const inSector = await query(`SELECT 1 FROM cooperatives WHERE id = $1 AND sector = $2`, [requested, me.rows[0].sector]);
+      if (!inSector.rowCount) return { ok: false, status: 403, message: "That cooperative is outside your sector." };
+    }
+  }
+  return { ok: true, cooperativeId: requested };
+}
 
 // GET / — paginated list
 router.get("/", async (req: Request, res: Response) => {
@@ -36,8 +80,9 @@ router.get("/", async (req: Request, res: Response) => {
 
     const { page = 1, limit = 20, type, cooperativeId, from, to, search } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
-    const params: any[] = [];
-    const conditions: string[] = [];
+    const scoped = await reportScope(req);
+    const params: any[] = [...scoped.params];
+    const conditions: string[] = [scoped.clause];
 
     if (type) { params.push(type); conditions.push(`r.type = $${params.length}`); }
     if (cooperativeId) { params.push(cooperativeId); conditions.push(`r.cooperative_id = $${params.length}`); }
@@ -212,14 +257,15 @@ router.get("/:id", async (req: Request, res: Response) => {
     const { id } = req.params;
     const role = req.user!.role;
     if (role === "member") return res.status(403).json({ success: false, message: "Access denied" });
+    const scoped = await reportScope(req);
 
     const result = await query(
       `SELECT r.*, u.name AS generated_by_name, c.name AS cooperative_name
        FROM reports r
        LEFT JOIN users u ON u.id = r.generated_by
        LEFT JOIN cooperatives c ON c.id = r.cooperative_id
-       WHERE r.id = $1`,
-      [id]
+       WHERE r.id = $${scoped.params.length + 1} AND ${scoped.clause}`,
+      [...scoped.params, id]
     );
     if (!result.rows.length) {
       return res.status(404).json({ success: false, message: "Report not found" });
@@ -231,21 +277,23 @@ router.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
-// GET /:id/download
 // GET /:id/download — the report itself, as a file.
 //
-// `?format=csv` streams a spreadsheet; `json` returns the structured content
-// the viewer renders. Reports generated before the builder existed have no
-// content and say so, rather than serving an empty file that looks like a
-// report with nothing in it.
+// PDF by default: a report is a document to print, sign and hand over.
+// `?format=csv` gives the same figures for a spreadsheet, `json` the
+// structured content. Reports recorded before contents were stored say so
+// rather than serving an empty file.
 router.get("/:id/download", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const format = String(req.query.format ?? "csv").toLowerCase();
+    if (req.user!.role === "member") return res.status(403).json({ success: false, message: "Access denied" });
+    const format = String(req.query.format ?? "pdf").toLowerCase();
+    const scoped = await reportScope(req);
 
     const result = await query(
-      `SELECT title, type, content, format, generated_at FROM reports WHERE id = $1`,
-      [id]
+      `SELECT r.title, r.type, r.content, r.format, r.generated_at FROM reports r
+        WHERE r.id = $${scoped.params.length + 1} AND ${scoped.clause}`,
+      [...scoped.params, id]
     );
     if (!result.rows.length) {
       return res.status(404).json({ success: false, message: "Report not found" });
@@ -262,20 +310,24 @@ router.get("/:id/download", async (req: Request, res: Response) => {
       });
     }
 
-    const safeName = String(row.title).replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-    const stamp = row.generated_at
-      ? new Date(row.generated_at).toISOString().slice(0, 10)
-      : "report";
+    const stamp = row.generated_at ? new Date(row.generated_at).toISOString().slice(0, 10) : undefined;
+    const base = pdfFileName(row.title, stamp).replace(/\.pdf$/, "");
 
     if (format === "json") {
       res.setHeader("Content-Type", "application/json");
-      res.setHeader("Content-Disposition", `attachment; filename="${safeName}-${stamp}.json"`);
+      res.setHeader("Content-Disposition", `attachment; filename="${base}.json"`);
       return res.send(JSON.stringify(row.content, null, 2));
     }
+    if (format === "csv" || format === "excel") {
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${base}.csv"`);
+      return res.send(toCsv(row.content));
+    }
 
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="${safeName}-${stamp}.csv"`);
-    return res.send(toCsv(row.content));
+    const pdf = await renderPdf(toPdfSpec(row.content));
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${base}.pdf"`);
+    return res.send(pdf);
   } catch (err) {
     console.error("GET /reports/:id/download error:", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -307,7 +359,13 @@ router.post("/generate", async (req: Request, res: Response) => {
     // page led nowhere. The figures are queried here and stored with the row,
     // which is what makes the download real — and what freezes the report at
     // the moment it was run, instead of silently recomputing later.
-    const scopedCooperativeId = cooperativeId || req.user!.cooperativeId || null;
+    // A manager's report is about their own cooperative whatever id is sent.
+    const target = await reportTarget(req, cooperativeId || null);
+    if (!target.ok) return res.status(target.status).json({ success: false, message: target.message });
+    const scopedCooperativeId = target.cooperativeId;
+    if (from > to) {
+      return res.status(400).json({ success: false, message: "The period must start before it ends." });
+    }
     const resolvedTitle = title || TEMPLATES.find((t) => t.type === type)?.name || `${type} report`;
 
     const content = await buildReport({
@@ -316,6 +374,7 @@ router.post("/generate", async (req: Request, res: Response) => {
       cooperativeId: scopedCooperativeId,
       from,
       to,
+      preparedBy: req.user!.name ?? null,
     });
 
     const result = await query(
@@ -343,8 +402,8 @@ router.post("/generate", async (req: Request, res: Response) => {
       data: result.rows[0],
       message:
         content.rowCount > 0
-          ? `Report generated — ${content.rowCount} row(s). Open or download it from the list.`
-          : "Report generated, but there was no data in that period.",
+          ? `${resolvedTitle} generated. Open it, or download it as a PDF, from the list.`
+          : `${resolvedTitle} generated, but nothing was recorded for that period.`,
     });
   } catch (err) {
     console.error(err);

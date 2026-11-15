@@ -21,6 +21,7 @@ import integrationRoutes from "./routes/integrations";
 import serviceRequestRoutes from "./routes/serviceRequests";
 import permitRoutes from "./routes/permits";
 import auditRoutes from "./routes/audits";
+import rcaAuditRoutes from "./routes/rcaAudits";
 import fundingRoutes from "./routes/funding";
 import aiRoutes from "./routes/ai";
 
@@ -73,6 +74,7 @@ app.use("/api/activities", activityRoutes);
 app.use("/api/service-requests", serviceRequestRoutes);
 app.use("/api/permits", permitRoutes);
 app.use("/api/audits", auditRoutes);
+app.use("/api/rca-audits", rcaAuditRoutes);
 app.use("/api/funding", fundingRoutes);
 
 // ── Dashboard & Monitoring ───────────────────

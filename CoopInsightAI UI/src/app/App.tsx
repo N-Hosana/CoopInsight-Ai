@@ -26,6 +26,7 @@ import {
   FileSignature,
   IdCard,
   ClipboardList,
+  ClipboardCheck,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AuthProvider, describeRole, useAuth } from "./contexts/AuthContext";
@@ -66,6 +67,7 @@ import { Permits } from "./pages/Permits";
 import { MonthlyAudit } from "./pages/MonthlyAudit";
 import { Funding } from "./pages/Funding";
 import { RcaServices } from "./pages/RcaServices";
+import { RcaAudits } from "./pages/RcaAudits";
 import { NotificationBar } from "./components/NotificationBar";
 
 function ProfileDropdown() {
@@ -222,6 +224,9 @@ const getNavigationForUser = (
     // with tabs. They were two, which left a president guessing which of them
     // held the form they needed.
     { name: "Services & requests", path: "/rca-services", icon: FileSignature, group: "RCA", roles: ["member", "manager", "admin", "generalManager", "government"] },
+    // General and financial audits: requested up the chain or announced by the
+    // RCA, plus the routine programme. Members do not request audits.
+    { name: "Audits", path: "/rca-audits", icon: ClipboardCheck, group: "RCA", roles: ["manager", "admin", "generalManager", "government"] },
     { name: "Operating permits", path: "/permits", icon: BadgeCheck, group: "RCA", roles: ["government", "admin", "generalManager", "manager", "member"] },
     { name: "External support", path: "/funding", icon: HandCoins, group: "RCA", roles: ["government", "admin", "generalManager", "manager", "member"] },
 
@@ -589,6 +594,14 @@ function AppRoutes() {
           element={
             <RoleRoute roles={["member", "manager", "admin", "generalManager", "government"]}>
               <RcaServices />
+            </RoleRoute>
+          }
+        />
+        <Route
+          path="rca-audits"
+          element={
+            <RoleRoute roles={["manager", "admin", "generalManager", "government"]}>
+              <RcaAudits />
             </RoleRoute>
           }
         />

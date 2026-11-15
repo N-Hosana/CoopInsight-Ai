@@ -1314,4 +1314,155 @@ export const MIGRATIONS: Migration[] = [
 
     `,
   },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // RCA AUDITS — REQUESTED, ANNOUNCED, AND THE ROUTINE PROGRAMME
+  //
+  // A cooperative manager, a sector officer or a district officer may ask the
+  // RCA for a general or a financial audit; it climbs the chain to the RCA
+  // officer for the district and comes back down to whoever asked. The RCA may
+  // also announce an audit unasked. Separately, sector and district committees
+  // run a routine programme of general audits and sensitization sessions.
+  // See src/services/rcaAudits.ts.
+  // ───────────────────────────────────────────────────────────────────────────
+  {
+    name: "audit_requests — requested and RCA-announced audits",
+    sql: `
+      CREATE TABLE IF NOT EXISTS audit_requests (
+        id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        reference           VARCHAR(30) UNIQUE NOT NULL,
+        origin              VARCHAR(20) NOT NULL CHECK (origin IN ('requested','rca_initiated')),
+        audit_kind          VARCHAR(20) NOT NULL CHECK (audit_kind IN ('general','financial')),
+        cooperative_id      UUID NOT NULL REFERENCES cooperatives(id) ON DELETE CASCADE,
+        sector              VARCHAR(50),
+        district            VARCHAR(50) NOT NULL DEFAULT 'Gasabo',
+        requested_by        UUID NOT NULL REFERENCES users(id),
+        requester_level     VARCHAR(20) NOT NULL
+                              CHECK (requester_level IN ('cooperative','sector','district','rca')),
+        reason_category     VARCHAR(40) NOT NULL,
+        reasons             TEXT NOT NULL,
+        preferred_date      DATE,
+        current_step        VARCHAR(30) NOT NULL,
+        status              VARCHAR(30) NOT NULL CHECK (status IN
+                              ('pending_sector','pending_district','pending_rca','returned',
+                               'waitlisted','relay_district','relay_sector','awaiting_confirmation',
+                               'reschedule_requested','announced','confirmed','in_progress',
+                               'completed','rejected','withdrawn','cancelled')),
+        step_due_at         TIMESTAMPTZ,
+        waitlist_until      DATE,
+        -- Set by the RCA officer when approving or announcing.
+        scheduled_start     TIMESTAMPTZ,
+        scheduled_end       TIMESTAMPTZ,
+        scope               JSONB NOT NULL DEFAULT '[]',
+        audit_team          TEXT,
+        rca_instructions    TEXT,
+        approved_by         UUID REFERENCES users(id),
+        approved_at         TIMESTAMPTZ,
+        reschedule_proposed_date DATE,
+        confirmed_at        TIMESTAMPTZ,
+        -- The calendar entry and broadcast the cooperative sends its members.
+        activity_id         UUID REFERENCES activities(id) ON DELETE SET NULL,
+        members_notified_at TIMESTAMPTZ,
+        members_reached     INT,
+        -- The result.
+        started_at          TIMESTAMPTZ,
+        completed_at        TIMESTAMPTZ,
+        findings            JSONB,
+        overall_rating      VARCHAR(30) CHECK (overall_rating IS NULL OR overall_rating IN
+                              ('satisfactory','needs_improvement','unsatisfactory')),
+        summary             TEXT,
+        recommendations     JSONB,
+        follow_up_by        DATE,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_requests_coop   ON audit_requests(cooperative_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_requests_status ON audit_requests(status);
+      CREATE INDEX IF NOT EXISTS idx_audit_requests_sector ON audit_requests(sector);
+
+      -- Every decision on every audit, in order: who did what at which step.
+      CREATE TABLE IF NOT EXISTS audit_request_actions (
+        id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        request_id  UUID NOT NULL REFERENCES audit_requests(id) ON DELETE CASCADE,
+        step        VARCHAR(30) NOT NULL,
+        action      VARCHAR(30) NOT NULL,
+        note        TEXT,
+        payload     JSONB,
+        acted_by    UUID REFERENCES users(id),
+        acted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_actions_request ON audit_request_actions(request_id, acted_at);
+    `,
+  },
+  {
+    name: "audit committees and the general audit programme",
+    sql: `
+      -- One committee per sector, and one for the district.
+      CREATE TABLE IF NOT EXISTS audit_committees (
+        id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        level       VARCHAR(20) NOT NULL CHECK (level IN ('sector','district')),
+        sector      VARCHAR(50),
+        name        VARCHAR(200) NOT NULL,
+        description TEXT,
+        created_by  UUID REFERENCES users(id),
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK ((level = 'sector' AND sector IS NOT NULL) OR (level = 'district' AND sector IS NULL))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_committees_one
+        ON audit_committees(level, COALESCE(sector, ''));
+
+      CREATE TABLE IF NOT EXISTS audit_committee_members (
+        id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        committee_id  UUID NOT NULL REFERENCES audit_committees(id) ON DELETE CASCADE,
+        name          VARCHAR(150) NOT NULL,
+        position      VARCHAR(100),
+        organisation  VARCHAR(150),
+        phone         VARCHAR(20),
+        email         VARCHAR(255),
+        user_id       UUID REFERENCES users(id) ON DELETE SET NULL,
+        added_by      UUID REFERENCES users(id),
+        added_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_committee_members ON audit_committee_members(committee_id);
+
+      -- One sitting of the routine: a monthly sector visit, a trimester district
+      -- visit, or a trimester sensitization session for cooperative leaders.
+      CREATE TABLE IF NOT EXISTS general_audit_rounds (
+        id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        reference        VARCHAR(30) UNIQUE NOT NULL,
+        round_type       VARCHAR(30) NOT NULL
+                           CHECK (round_type IN ('sector_general','district_general','sensitization')),
+        sector           VARCHAR(50),
+        committee_id     UUID REFERENCES audit_committees(id) ON DELETE SET NULL,
+        period_label     VARCHAR(20) NOT NULL,
+        scheduled_for    TIMESTAMPTZ NOT NULL,
+        location         TEXT NOT NULL,
+        agenda           TEXT NOT NULL,
+        status           VARCHAR(20) NOT NULL DEFAULT 'scheduled'
+                           CHECK (status IN ('scheduled','held','cancelled')),
+        minutes          TEXT,
+        leaders_attended INT,
+        held_on          DATE,
+        cancel_reason    TEXT,
+        created_by       UUID REFERENCES users(id),
+        recorded_by      UUID REFERENCES users(id),
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_rounds_period ON general_audit_rounds(round_type, period_label);
+
+      -- Which cooperatives a round covers, and what was found at each.
+      CREATE TABLE IF NOT EXISTS general_audit_round_cooperatives (
+        round_id        UUID NOT NULL REFERENCES general_audit_rounds(id) ON DELETE CASCADE,
+        cooperative_id  UUID NOT NULL REFERENCES cooperatives(id) ON DELETE CASCADE,
+        activity_id     UUID REFERENCES activities(id) ON DELETE SET NULL,
+        attended        BOOLEAN,
+        rating          VARCHAR(30) CHECK (rating IS NULL OR rating IN
+                          ('satisfactory','needs_improvement','unsatisfactory')),
+        observations    TEXT,
+        PRIMARY KEY (round_id, cooperative_id)
+      );
+    `,
+  },
 ];

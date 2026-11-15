@@ -21,9 +21,12 @@ import { LogIn, Mail, Lock, AlertCircle, ArrowLeft } from "lucide-react";
 const SEEDED_ACCOUNTS = [
   {
     label: "Member",
-    email: "member@coopinsight.rw",
+    // A real inbox, not the seeded member@coopinsight.rw, so the verification
+    // code actually arrives. Changed in the database by hand — `pnpm seed`
+    // still creates the old address.
+    email: "marketing@the-gym.rw",
     password: "Member@1234",
-    note: "TMC member — files requests",
+    note: "UWIHOREYE Josephine, TMC secretary — files requests",
   },
   {
     label: "Manager",
@@ -169,8 +172,8 @@ export function Login() {
         tagline="Empowering Rwanda's Cooperatives"
         subtext="Real-time insights, transparent governance, and AI-driven decisions for cooperatives across Gasabo District."
       />
-      <div className="flex-1 h-screen flex items-center justify-center p-4 overflow-y-auto">
-      <div className="w-full max-w-md">
+      <div className="flex-1 h-screen flex p-4 overflow-y-auto">
+      <div className="w-full max-w-md m-auto py-8">
         {/* Logo & Title */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary mb-4">

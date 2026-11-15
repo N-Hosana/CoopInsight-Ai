@@ -122,8 +122,8 @@ export function Register() {
         tagline="Join Rwanda's Cooperative Network"
         subtext="Register your account to manage members, track finances, and grow your cooperative with data-driven tools."
       />
-      <div className="flex-1 h-screen flex items-center justify-center p-4 overflow-y-auto">
-      <div className="w-full max-w-2xl">
+      <div className="flex-1 h-screen flex p-4 overflow-y-auto">
+      <div className="w-full max-w-2xl m-auto py-8">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary mb-4">
             <UserPlus className="w-8 h-8 text-primary-foreground" />

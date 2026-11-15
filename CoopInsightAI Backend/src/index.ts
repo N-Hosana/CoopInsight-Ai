@@ -24,6 +24,7 @@ import auditRoutes from "./routes/audits";
 import rcaAuditRoutes from "./routes/rcaAudits";
 import fundingRoutes from "./routes/funding";
 import aiRoutes from "./routes/ai";
+import { auditTrail } from "./middleware/auditTrail";
 
 dotenv.config();
 
@@ -52,6 +53,9 @@ app.use(
 );
 // 2 MB: a long table posted to /api/exports/pdf is larger than the 100 KB default.
 app.use(express.json({ limit: "2mb" }));
+// After the body parser (it reads the email on sign-in routes), before every
+// router (so nothing that changes data escapes the trail).
+app.use(auditTrail);
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 // ── Health check ─────────────────────────────

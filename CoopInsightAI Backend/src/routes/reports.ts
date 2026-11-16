@@ -1,30 +1,102 @@
 import { Router, Request, Response } from "express";
 import { query } from "../config/db";
 import { authenticate, authorize } from "../middleware/auth";
-import { buildReport, toCsv, toPdfSpec, REPORT_TITLES } from "../services/reportBuilder";
+import { buildReport, toCsv, toPdfSpec, periodText, REPORT_TITLES, type ReportContent } from "../services/reportBuilder";
 import { renderPdf, pdfFileName } from "../services/pdf";
+import { resolveTarget, scopeOptions } from "../services/reportScope";
+import { registerDocument, roleTitle, verifyUrl } from "../services/documentRegistry";
 
 const router = Router();
 router.use(authenticate);
 
-const VALID_REPORT_TYPES = Object.keys(REPORT_TITLES);
 const VALID_FORMATS = ["pdf", "excel", "csv", "json"];
 
+const ORGANISATION_ROLES = ["manager", "cooperative", "government", "admin", "generalManager"];
+
 /**
- * The reports on offer — the papers a cooperative is actually asked for.
+ * The reports on offer. Deliberately few: the page used to list nine, most of
+ * them slices of the same records, and nobody could tell which one they
+ * needed. These four cover what is actually asked for — the general picture,
+ * the money, the requests and audits, and standing with the regulator — and a
+ * member gets their own statement. Older report types still open and
+ * download; they are simply no longer offered for new reports.
+ *
  * `position` reports describe where things stand today and take no period.
  */
 const TEMPLATES = [
-  { id: "financial_summary", type: "financial_summary", name: REPORT_TITLES.financial_summary, audience: "General assembly, sector officer, lenders", description: "What came in and what went out, by category and by month, with the surplus or deficit and the full cash book.", position: false },
-  { id: "savings_growth", type: "savings_growth", name: REPORT_TITLES.savings_growth, audience: "Members, general assembly", description: "Each member's savings at the start and end of the period, what they paid in, and the share capital they hold.", position: false },
-  { id: "loan_performance", type: "loan_performance", name: REPORT_TITLES.loan_performance, audience: "Board, credit committee", description: "Loans paid out and repaid, what is still owed, and how much of it is overdue.", position: false },
-  { id: "member_activity", type: "member_activity", name: REPORT_TITLES.member_activity, audience: "Board, sector officer", description: "How the register moved — who joined and left — its make-up, and each member's payments and attendance.", position: false },
-  { id: "activities", type: "activities", name: REPORT_TITLES.activities, audience: "General assembly, sector officer", description: "Activities scheduled and held, attendance at each, and whether the March and October assemblies sat.", position: false },
-  { id: "budget_variance", type: "budget_variance", name: REPORT_TITLES.budget_variance, audience: "Board, general assembly", description: "Each line of the approved budget against what was actually recorded.", position: false },
-  { id: "compliance", type: "compliance", name: REPORT_TITLES.compliance, audience: "Sector officer, RCA", description: "A checklist of what the regulator requires — permit, board, assemblies, balance sheet, documents — and what is outstanding.", position: true },
-  { id: "audit", type: "audit", name: REPORT_TITLES.audit, audience: "Board, sector officer", description: "The latest monthly audit: the score, how it is made up, each finding and what to do about it.", position: true },
-  { id: "annual", type: "annual", name: REPORT_TITLES.annual, audience: "General assembly, RCA", description: "The year in one document: membership, accounts, balance sheet, savings, loans, activities and compliance.", position: false },
-];
+  {
+    type: "general",
+    name: "General Report",
+    title: REPORT_TITLES.general,
+    description: "Member engagement, activities and finances in one document.",
+    position: false,
+    roles: ORGANISATION_ROLES,
+  },
+  {
+    type: "financial_summary",
+    name: "Financial Report",
+    title: REPORT_TITLES.financial_summary,
+    description: "Income and spending by line and by month, the surplus or deficit, and the cash book.",
+    position: false,
+    roles: ORGANISATION_ROLES,
+  },
+  {
+    type: "requests_register",
+    name: "Services, Requests & Audits",
+    title: REPORT_TITLES.requests_register,
+    description: "Every request, audit and application: who asked, where it sits now, its status.",
+    position: false,
+    roles: ORGANISATION_ROLES,
+  },
+  {
+    type: "compliance",
+    name: "Compliance",
+    title: REPORT_TITLES.compliance,
+    description: "Permit, board, assemblies, balance sheet and documents — what is met and what is not.",
+    position: true,
+    roles: ORGANISATION_ROLES,
+  },
+  {
+    type: "member_statement",
+    name: "My Statement",
+    title: REPORT_TITLES.member_statement,
+    description: "Your payments, savings, attendance at activities and the requests you made.",
+    position: false,
+    roles: ["member"],
+  },
+].map((t) => ({ ...t, id: t.type }));
+
+const templatesFor = (role: string) => TEMPLATES.filter((t) => t.roles.includes(role));
+
+/** The registry entry for a stored report, made on first need, then reused. */
+async function documentFor(row: { id: string; title: string; cooperative_id: string | null; content: ReportContent; generated_by?: string | null }) {
+  const c = row.content;
+  const issued = await registerDocument({
+    kind: "report",
+    title: row.title,
+    content: c,
+    reportId: row.id,
+    cooperativeId: row.cooperative_id,
+    scopeLabel: c.scopeLabel ?? c.cooperativeName ?? "Gasabo District — all cooperatives",
+    periodFrom: c.periodFrom,
+    periodTo: c.periodTo,
+    issuedBy: row.generated_by ?? null,
+    issuedByName: c.preparedBy,
+    issuedByRole: c.preparedByRole ?? null,
+    issuedAt: c.generatedAt,
+  });
+  return {
+    reference: issued.reference,
+    verificationCode: issued.verificationCode,
+    issuedAt: issued.issuedAt,
+    issuedBy: issued.issuedByName,
+    issuedByRole: issued.issuedByRole,
+    scopeLabel: issued.scopeLabel,
+    period: periodText(c),
+    fingerprint: issued.fingerprint,
+    verifyUrl: verifyUrl(issued.verificationCode),
+  };
+}
 
 /**
  * Whose reports the caller may see and make:
@@ -37,6 +109,8 @@ const TEMPLATES = [
  */
 async function reportScope(req: Request, alias = "r"): Promise<{ clause: string; params: unknown[] }> {
   const role = req.user!.role;
+  // A member sees the statements they generated themselves, and nothing else.
+  if (role === "member") return { clause: `${alias}.generated_by = $1`, params: [req.user!.userId] };
   if (["manager", "cooperative"].includes(role)) {
     return { clause: `${alias}.cooperative_id = $1`, params: [req.user!.cooperativeId ?? null] };
   }
@@ -52,32 +126,9 @@ async function reportScope(req: Request, alias = "r"): Promise<{ clause: string;
   return { clause: "TRUE", params: [] };
 }
 
-/** The cooperative a new report may be about, or why not. null = every cooperative in reach. */
-async function reportTarget(
-  req: Request,
-  requested: string | null
-): Promise<{ ok: true; cooperativeId: string | null } | { ok: false; status: number; message: string }> {
-  const role = req.user!.role;
-  if (["manager", "cooperative"].includes(role)) {
-    if (!req.user!.cooperativeId) return { ok: false, status: 400, message: "Your account is not attached to a cooperative." };
-    return { ok: true, cooperativeId: req.user!.cooperativeId };
-  }
-  if (role === "government" && requested) {
-    const me = await query(`SELECT sector, oversight_level FROM users WHERE id = $1`, [req.user!.userId]);
-    if (me.rows[0]?.oversight_level === "sector") {
-      const inSector = await query(`SELECT 1 FROM cooperatives WHERE id = $1 AND sector = $2`, [requested, me.rows[0].sector]);
-      if (!inSector.rowCount) return { ok: false, status: 403, message: "That cooperative is outside your sector." };
-    }
-  }
-  return { ok: true, cooperativeId: requested };
-}
-
 // GET / — paginated list
 router.get("/", async (req: Request, res: Response) => {
   try {
-    const role = req.user!.role;
-    if (role === "member") return res.status(403).json({ success: false, message: "Access denied" });
-
     const { page = 1, limit = 20, type, cooperativeId, from, to, search } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
     const scoped = await reportScope(req);
@@ -94,11 +145,18 @@ router.get("/", async (req: Request, res: Response) => {
     const countParams = [...params];
     params.push(Number(limit), offset);
 
+    // The contents are left out of the list — they can run to thousands of
+    // rows — and fetched when a report is opened.
     const result = await query(
-      `SELECT r.*, u.name AS generated_by_name, c.name AS cooperative_name
+      `SELECT r.id, r.title, r.type, r.format, r.file_url, r.period_from, r.period_to, r.generated_at,
+              r.created_at, r.cooperative_id, r.generated_by, r.row_count,
+              r.content->>'scopeLabel' AS scope_label,
+              u.name AS generated_by_name, c.name AS cooperative_name,
+              d.reference, d.verification_code
        FROM reports r
        LEFT JOIN users u ON u.id = r.generated_by
        LEFT JOIN cooperatives c ON c.id = r.cooperative_id
+       LEFT JOIN issued_documents d ON d.report_id = r.id
        ${whereClause} ORDER BY r.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
@@ -115,9 +173,19 @@ router.get("/", async (req: Request, res: Response) => {
   }
 });
 
-// GET /templates
-router.get("/templates", async (_req: Request, res: Response) => {
-  res.json({ success: true, data: TEMPLATES });
+// GET /templates — the reports this account may generate.
+router.get("/templates", async (req: Request, res: Response) => {
+  res.json({ success: true, data: templatesFor(req.user!.role).map(({ roles, ...t }) => t) });
+});
+
+// GET /scope-options — what the scope picker should offer this account.
+router.get("/scope-options", async (req: Request, res: Response) => {
+  try {
+    res.json({ success: true, data: await scopeOptions(req) });
+  } catch (err) {
+    console.error("GET /reports/scope-options error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
 // GET /schedules
@@ -255,8 +323,6 @@ router.get("/budgets/:id/export", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const role = req.user!.role;
-    if (role === "member") return res.status(403).json({ success: false, message: "Access denied" });
     const scoped = await reportScope(req);
 
     const result = await query(
@@ -270,7 +336,10 @@ router.get("/:id", async (req: Request, res: Response) => {
     if (!result.rows.length) {
       return res.status(404).json({ success: false, message: "Report not found" });
     }
-    res.json({ success: true, data: result.rows[0] });
+    const row = result.rows[0];
+    // The reader shows the same reference and code the PDF carries.
+    const document = row.content ? await documentFor(row) : null;
+    res.json({ success: true, data: { ...row, document } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -286,12 +355,11 @@ router.get("/:id", async (req: Request, res: Response) => {
 router.get("/:id/download", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    if (req.user!.role === "member") return res.status(403).json({ success: false, message: "Access denied" });
     const format = String(req.query.format ?? "pdf").toLowerCase();
     const scoped = await reportScope(req);
 
     const result = await query(
-      `SELECT r.title, r.type, r.content, r.format, r.generated_at FROM reports r
+      `SELECT r.id, r.title, r.type, r.content, r.format, r.generated_at, r.cooperative_id, r.generated_by FROM reports r
         WHERE r.id = $${scoped.params.length + 1} AND ${scoped.clause}`,
       [...scoped.params, id]
     );
@@ -324,7 +392,7 @@ router.get("/:id/download", async (req: Request, res: Response) => {
       return res.send(toCsv(row.content));
     }
 
-    const pdf = await renderPdf(toPdfSpec(row.content));
+    const pdf = await renderPdf(toPdfSpec(row.content, await documentFor(row)));
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${base}.pdf"`);
     return res.send(pdf);
@@ -338,44 +406,49 @@ router.get("/:id/download", async (req: Request, res: Response) => {
 router.post("/generate", async (req: Request, res: Response) => {
   try {
     const role = req.user!.role;
-    if (role === "member") return res.status(403).json({ success: false, message: "Access denied" });
-
-    const { type, from, to, format = "pdf", cooperativeId, title } = req.body;
+    const { type, from, to, format = "pdf", cooperativeId, sector, title } = req.body;
     const userId = req.user!.userId;
 
     if (!type || !from || !to || !format) {
       return res.status(400).json({ success: false, message: "type, from, to, and format are required" });
     }
-    if (!VALID_REPORT_TYPES.includes(type)) {
-      return res.status(400).json({ success: false, message: "Invalid report type" });
+    const template = templatesFor(role).find((t) => t.type === type);
+    if (!template) {
+      return res.status(400).json({ success: false, message: "That report is not available to your account." });
     }
     if (!VALID_FORMATS.includes(format)) {
       return res.status(400).json({ success: false, message: "Invalid format" });
     }
-
-    // ── Build it now, rather than queueing something nothing consumes ──────
-    // This endpoint used to insert file_url = 'pending' and return. There was
-    // no worker, so "pending" was permanent and every download button on the
-    // page led nowhere. The figures are queried here and stored with the row,
-    // which is what makes the download real — and what freezes the report at
-    // the moment it was run, instead of silently recomputing later.
-    // A manager's report is about their own cooperative whatever id is sent.
-    const target = await reportTarget(req, cooperativeId || null);
-    if (!target.ok) return res.status(target.status).json({ success: false, message: target.message });
-    const scopedCooperativeId = target.cooperativeId;
     if (from > to) {
       return res.status(400).json({ success: false, message: "The period must start before it ends." });
     }
-    const resolvedTitle = title || TEMPLATES.find((t) => t.type === type)?.name || `${type} report`;
+
+    // ── Build it now, rather than queueing something nothing consumes ──────
+    // The figures are queried here and stored with the row, which is what
+    // makes the download real — and what freezes the report at the moment it
+    // was run, instead of silently recomputing later.
+    //
+    // Who it may cover is decided by the server (services/reportScope.ts): a
+    // member gets themselves, a manager their cooperative whatever id is sent,
+    // a sector officer their sector, district and RCA officers any of it.
+    const resolved = await resolveTarget(req, { cooperativeId, sector });
+    if (!resolved.ok) return res.status(resolved.status).json({ success: false, message: resolved.message });
+    const { target, viewer } = resolved;
+    const resolvedTitle = title || template.title;
 
     const content = await buildReport({
       type,
       title: resolvedTitle,
-      cooperativeId: scopedCooperativeId,
+      cooperativeId: target.cooperativeId,
+      sector: target.sector,
       from,
       to,
-      preparedBy: req.user!.name ?? null,
+      preparedBy: viewer.name ?? req.user!.name ?? null,
+      preparedByRole: roleTitle(viewer.role, viewer.level),
+      viewer,
+      target,
     });
+    const scopedCooperativeId = target.cooperativeId;
 
     const result = await query(
       `INSERT INTO reports
@@ -397,9 +470,13 @@ router.post("/generate", async (req: Request, res: Response) => {
       ]
     );
 
+    // Entered in the document register now, so the reference shown on screen
+    // is the one every later download prints.
+    const document = await documentFor({ ...result.rows[0], content });
+
     res.status(201).json({
       success: true,
-      data: result.rows[0],
+      data: { ...result.rows[0], document },
       message:
         content.rowCount > 0
           ? `${resolvedTitle} generated. Open it, or download it as a PDF, from the list.`

@@ -1850,3 +1850,39 @@ CREATE TABLE IF NOT EXISTS general_audit_round_cooperatives (
   observations    TEXT,
   PRIMARY KEY (round_id, cooperative_id)
 );
+
+-- issued_documents
+CREATE TABLE IF NOT EXISTS issued_documents (
+  id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  reference          VARCHAR(40) NOT NULL UNIQUE,
+  verification_code  VARCHAR(20) NOT NULL UNIQUE,
+  kind               VARCHAR(20) NOT NULL CHECK (kind IN ('report','export','register')),
+  title              TEXT NOT NULL,
+  report_id          UUID REFERENCES reports(id) ON DELETE SET NULL,
+  cooperative_id     UUID REFERENCES cooperatives(id) ON DELETE SET NULL,
+  scope_label        TEXT,
+  period_from        DATE,
+  period_to          DATE,
+  issued_by          UUID REFERENCES users(id) ON DELETE SET NULL,
+  issued_by_name     TEXT,
+  issued_by_role     TEXT,
+  fingerprint        VARCHAR(64) NOT NULL,
+  issued_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at         TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issued_documents_report ON issued_documents(report_id) WHERE report_id IS NOT NULL;
+
+-- ai_audits
+CREATE TABLE IF NOT EXISTS ai_audits (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cooperative_id  UUID NOT NULL REFERENCES cooperatives(id) ON DELETE CASCADE,
+  period          VARCHAR(7) NOT NULL,
+  score           NUMERIC(5,1),
+  band            VARCHAR(20) NOT NULL,
+  findings_count  INT NOT NULL DEFAULT 0,
+  high_count      INT NOT NULL DEFAULT 0,
+  result          JSONB NOT NULL,
+  run_by          UUID REFERENCES users(id) ON DELETE SET NULL,
+  run_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ai_audits_coop ON ai_audits(cooperative_id, run_at DESC);

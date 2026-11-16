@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import { api } from "../services/api";
 import { downloadPdf } from "../services/pdf";
 import { Card } from "./Card";
 import { Button } from "./Button";
 import { MyInsights } from "./MyInsights";
 import { MemberEngagement } from "./MemberEngagement";
+import { AiAudit } from "./AiAudit";
 import { AlertOctagon, AlertTriangle, ArrowRight, Brain, CheckCircle2, Download, Info, TrendingDown, TrendingUp } from "lucide-react";
 
 /**
@@ -54,14 +55,14 @@ interface Brief {
 }
 
 const LEVEL: Record<Level, { label: string; bar: string; badge: string }> = {
-  good: { label: "Good", bar: "bg-[#2D6A4F]", badge: "bg-green-100 text-green-800" },
-  watch: { label: "Watch", bar: "bg-amber-500", badge: "bg-amber-100 text-amber-800" },
+  good: { label: "Good", bar: "bg-[#2D6A4F]", badge: "bg-[#2D6A4F]/10 text-[#1B4332]" },
+  watch: { label: "Watch", bar: "bg-[#D4A574]", badge: "bg-[#D4A574]/15 text-[#8A6233]" },
   problem: { label: "Problem", bar: "bg-red-600", badge: "bg-red-100 text-red-700" },
 };
 
 const SEVERITY: Record<Severity, { label: string; box: string; Icon: typeof Info; icon: string }> = {
   critical: { label: "Urgent", box: "border-red-200 bg-red-50", Icon: AlertOctagon, icon: "text-red-600" },
-  major: { label: "Important", box: "border-amber-200 bg-amber-50", Icon: AlertTriangle, icon: "text-amber-600" },
+  major: { label: "Important", box: "border-[#D4A574]/40 bg-[#D4A574]/15", Icon: AlertTriangle, icon: "text-[#8A6233]" },
   minor: { label: "When you can", box: "border-gray-200 bg-gray-50", Icon: Info, icon: "text-gray-500" },
 };
 
@@ -78,7 +79,8 @@ const monthLabel = (ym: string | null) =>
 
 export function ManagerInsights() {
   const navigate = useNavigate();
-  const [tab, setTab] = useState<"cooperative" | "members" | "me">("cooperative");
+  const [params] = useSearchParams();
+  const [tab, setTab] = useState<"cooperative" | "members" | "me" | "audit">(params.get("view") === "audit" ? "audit" : "cooperative");
   const [brief, setBrief] = useState<Brief | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -127,8 +129,14 @@ export function ManagerInsights() {
             <Brain className="h-8 w-8 text-[#2D6A4F]" />
             Insights
           </h1>
+          {/* The line under the title follows the tab, so it is never wrong. */}
           <p className="mt-1 text-gray-600">
-            How {brief?.cooperative.name ?? "your cooperative"} is doing, what needs putting right, and where to do it.
+            {{
+              cooperative: `How ${brief?.cooperative.name ?? "your cooperative"} is doing and what to put right.`,
+              members: "How engaged each member is.",
+              me: "Your own savings, attendance and loans.",
+              audit: "Audit the cooperative for any month.",
+            }[tab]}
           </p>
         </div>
         {tab === "cooperative" && brief && (
@@ -140,7 +148,7 @@ export function ManagerInsights() {
       </div>
 
       <div className="inline-flex rounded-lg border border-gray-200 p-1">
-        {([["cooperative", "My cooperative"], ["members", "Members' engagement"], ["me", "My own record"]] as const).map(([id, label]) => (
+        {([["cooperative", "My cooperative"], ["members", "Members' engagement"], ["me", "My own record"], ["audit", "AI audit"]] as const).map(([id, label]) => (
           <button
             key={id}
             onClick={() => setTab(id)}
@@ -153,12 +161,10 @@ export function ManagerInsights() {
 
       {tab === "me" && <MyInsights embedded />}
 
+      {tab === "audit" && <AiAudit />}
+
       {tab === "members" && (
-        <Card className="space-y-3 p-5">
-          <div>
-            <h2 className="font-semibold text-gray-900">How engaged each member is</h2>
-            <p className="text-sm text-gray-600">From attendance at activities and how regularly each member pays contributions.</p>
-          </div>
+        <Card className="p-5">
           <MemberEngagement />
         </Card>
       )}
@@ -207,7 +213,7 @@ export function ManagerInsights() {
             </h2>
             {brief.priorities.length === 0 && (
               <Card className="flex items-center gap-3 p-5 text-sm text-gray-700">
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
+                <CheckCircle2 className="h-5 w-5 text-[#2D6A4F]" />
                 The latest audit raised no findings and the records are up to date.
               </Card>
             )}
@@ -272,7 +278,7 @@ export function ManagerInsights() {
                 <ul className="mt-3 space-y-2">
                   {brief.strengths.map((s, i) => (
                     <li key={i} className="flex items-start gap-2 text-sm text-gray-700">
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-600" />
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[#2D6A4F]" />
                       {s}
                     </li>
                   ))}

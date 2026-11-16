@@ -82,4 +82,62 @@ export async function downloadFromApi(path: string, fallbackName: string): Promi
   saveBlob(await res.blob(), serverFileName(res) ?? fallbackName);
 }
 
+/**
+ * Opens the browser's print dialog on a PDF, without saving it first.
+ *
+ * Printing the page itself would print the app around the report — sidebar,
+ * buttons, a scrolled table cut off at the fold. The PDF is the document, so
+ * that is what goes to the printer: loaded into a hidden frame and printed
+ * from there, with the same letterhead, reference and page numbers as the
+ * download.
+ */
+export function printBlob(blob: Blob): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const frame = document.createElement("iframe");
+    frame.style.position = "fixed";
+    frame.style.right = "0";
+    frame.style.bottom = "0";
+    frame.style.width = "0";
+    frame.style.height = "0";
+    frame.style.border = "0";
+    frame.src = url;
+    frame.onload = () => {
+      try {
+        frame.contentWindow?.focus();
+        frame.contentWindow?.print();
+        resolve();
+      } catch (err) {
+        // Some browsers will not script a PDF frame; open it so the user can print.
+        window.open(url, "_blank");
+        reject(err);
+      }
+      // Leave the frame long enough for the print dialog to take its copy.
+      setTimeout(() => {
+        frame.remove();
+        URL.revokeObjectURL(url);
+      }, 60_000);
+    };
+    document.body.appendChild(frame);
+  });
+}
+
+/** Renders a described document as a PDF and opens the print dialog on it. */
+export async function printPdf(spec: PdfSpec): Promise<void> {
+  const res = await fetch(`${BASE_URL}/exports/pdf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(spec),
+  });
+  if (!res.ok) throw await failure(res, "The document could not be prepared for printing.");
+  await printBlob(await res.blob());
+}
+
+/** Prints a PDF served from an authenticated API path. */
+export async function printFromApi(path: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });
+  if (!res.ok) throw await failure(res, "The document could not be prepared for printing.");
+  await printBlob(await res.blob());
+}
+
 export const rwf = (v: unknown) => `RWF ${Math.round(Number(v ?? 0)).toLocaleString("en-US")}`;

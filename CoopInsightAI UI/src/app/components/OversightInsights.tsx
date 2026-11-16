@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import { api } from "../services/api";
 import { downloadPdf } from "../services/pdf";
 import { Card } from "./Card";
 import { Button } from "./Button";
+import { AiAudit } from "./AiAudit";
 import { MemberEngagement } from "./MemberEngagement";
 import { AlertOctagon, AlertTriangle, Brain, CheckCircle2, Download, Info, TrendingDown, TrendingUp, X } from "lucide-react";
 
@@ -104,21 +105,21 @@ interface CooperativeBrief {
 }
 
 const LEVEL: Record<Level, { label: string; bar: string; badge: string }> = {
-  good: { label: "Good", bar: "bg-[#2D6A4F]", badge: "bg-green-100 text-green-800" },
-  watch: { label: "Watch", bar: "bg-amber-500", badge: "bg-amber-100 text-amber-800" },
+  good: { label: "Good", bar: "bg-[#2D6A4F]", badge: "bg-[#2D6A4F]/10 text-[#1B4332]" },
+  watch: { label: "Watch", bar: "bg-[#D4A574]", badge: "bg-[#D4A574]/15 text-[#8A6233]" },
   problem: { label: "Problem", bar: "bg-red-600", badge: "bg-red-100 text-red-700" },
 };
 
 const SEVERITY: Record<Severity, { label: string; box: string; Icon: typeof Info; icon: string }> = {
   critical: { label: "Urgent", box: "border-red-200 bg-red-50", Icon: AlertOctagon, icon: "text-red-600" },
-  major: { label: "Important", box: "border-amber-200 bg-amber-50", Icon: AlertTriangle, icon: "text-amber-600" },
+  major: { label: "Important", box: "border-[#D4A574]/40 bg-[#D4A574]/15", Icon: AlertTriangle, icon: "text-[#8A6233]" },
   minor: { label: "Minor", box: "border-gray-200 bg-gray-50", Icon: Info, icon: "text-gray-500" },
 };
 
 const BAND: Record<Band, { label: string; badge: string; bar: string }> = {
-  healthy: { label: "Healthy", badge: "bg-green-100 text-green-800", bar: "bg-[#2D6A4F]" },
-  monitor: { label: "Worth watching", badge: "bg-amber-100 text-amber-800", bar: "bg-amber-400" },
-  at_risk: { label: "At risk", badge: "bg-orange-100 text-orange-800", bar: "bg-orange-500" },
+  healthy: { label: "Healthy", badge: "bg-[#2D6A4F]/10 text-[#1B4332]", bar: "bg-[#2D6A4F]" },
+  monitor: { label: "Worth watching", badge: "bg-[#D4A574]/15 text-[#8A6233]", bar: "bg-[#D4A574]" },
+  at_risk: { label: "At risk", badge: "bg-[#D4A574]/25 text-[#7A5530]", bar: "bg-[#B8865A]" },
   critical: { label: "Critical", badge: "bg-red-100 text-red-700", bar: "bg-red-600" },
 };
 
@@ -130,7 +131,7 @@ function Change({ value }: { value: number | null }) {
   if (value == null) return <span className="text-gray-400">–</span>;
   if (value === 0) return <span className="text-gray-500">0</span>;
   return (
-    <span className={`inline-flex items-center gap-1 ${value > 0 ? "text-green-700" : "text-red-600"}`}>
+    <span className={`inline-flex items-center gap-1 ${value > 0 ? "text-[#2D6A4F]" : "text-red-600"}`}>
       {value > 0 ? <TrendingUp className="h-3.5 w-3.5" /> : <TrendingDown className="h-3.5 w-3.5" />}
       {value > 0 ? "+" : ""}{value}
     </span>
@@ -261,6 +262,8 @@ function CooperativePanel({ id, onClose }: { id: string; onClose: () => void }) 
 }
 
 export function OversightInsights() {
+  const [params] = useSearchParams();
+  const [view, setView] = useState<"overview" | "audit">(params.get("view") === "audit" ? "audit" : "overview");
   const navigate = useNavigate();
   const [brief, setBrief] = useState<Brief | null>(null);
   const [loading, setLoading] = useState(true);
@@ -372,10 +375,12 @@ export function OversightInsights() {
             Insights
           </h1>
           <p className="mt-1 text-gray-600">
-            How the cooperatives in {scope?.name ?? "your area"} are doing, what they have in common, and which need attention first.
+            {view === "audit"
+              ? "Audit any cooperative, or a whole sector, for any month."
+              : `How the cooperatives in ${scope?.name ?? "your area"} are doing, and which need attention first.`}
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className={`flex flex-wrap items-center gap-2 ${view === "audit" ? "hidden" : ""}`}>
           {scope && scope.districts.length > 0 && (
             <select
               value={district}
@@ -407,10 +412,24 @@ export function OversightInsights() {
         </div>
       </div>
 
-      {loading && !brief && <p className="text-gray-500">Reading the cooperatives' records…</p>}
-      {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+      <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1">
+        {([["overview", "Overview"], ["audit", "AI audit"]] as const).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setView(id)}
+            className={`rounded-md px-4 py-1.5 text-sm font-medium ${view === id ? "bg-[#2D6A4F] text-white" : "text-gray-600 hover:bg-gray-50"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-      {brief && (
+      {view === "audit" && <AiAudit />}
+
+      {view === "overview" && loading && !brief && <p className="text-gray-500">Reading the cooperatives' records…</p>}
+      {view === "overview" && error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+
+      {view === "overview" && brief && (
         <div className={`space-y-6 ${loading ? "opacity-60" : ""}`}>
           {/* 1. The answer, in a sentence */}
           <div className="rounded-xl bg-gradient-to-r from-[#2D6A4F] to-[#1B5E20] p-6 text-white">
@@ -480,7 +499,7 @@ export function OversightInsights() {
               </div>
               {brief.commonProblems.length === 0 && (
                 <Card className="flex items-center gap-3 p-5 text-sm text-gray-700">
-                  <CheckCircle2 className="h-5 w-5 text-green-600" />
+                  <CheckCircle2 className="h-5 w-5 text-[#2D6A4F]" />
                   The latest audits raised no findings for these cooperatives.
                 </Card>
               )}
@@ -591,7 +610,7 @@ export function OversightInsights() {
                       <tr
                         key={c.id}
                         onClick={() => choose(c.id)}
-                        className={`cursor-pointer border-b border-gray-100 last:border-0 hover:bg-gray-50 ${selected === c.id ? "bg-green-50" : ""}`}
+                        className={`cursor-pointer border-b border-gray-100 last:border-0 hover:bg-gray-50 ${selected === c.id ? "bg-[#2D6A4F]/5" : ""}`}
                       >
                         <td className="px-4 py-2.5 font-medium text-[#2D6A4F]">{c.name}</td>
                         {scope?.level !== "sector" && <td className="px-4 py-2.5 text-gray-700">{c.sector ?? "–"}</td>}

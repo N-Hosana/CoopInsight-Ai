@@ -222,6 +222,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return false;
       }
 
+      // Same reasoning for a server that answered but failed (500), or could
+      // not send the code (503) or is rate-limiting (429): the password was
+      // never judged, so do not blame it or count it towards the lockout.
+      if (err.status >= 500 || err.status === 429) {
+        setLoginError(
+          err.status === 429 || err.status === 503
+            ? err.message
+            : "The server hit an error while signing you in — your password was not rejected. Please try again in a moment."
+        );
+        return false;
+      }
+
       setLastLoginAttempt(prev => ({ ...prev, [email]: Date.now() }));
       if (err.status === 423) {
         // Account locked — max out the counter so Login.tsx shows lockout UI

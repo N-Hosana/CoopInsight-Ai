@@ -5,12 +5,12 @@ import { downloadPdf } from "../services/pdf";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { Select } from "../components/Select";
+import { MoreInfo } from "../components/MoreInfo";
 import {
   Trophy,
   TrendingUp,
   TrendingDown,
   Minus,
-  Info,
   Download,
   ChevronRight,
   AlertTriangle,
@@ -96,12 +96,47 @@ const dimensionOrder = (table: LeagueTable | null): DimensionKey[] => {
   return keys.length ? keys.sort((a, b) => table.weights[b] - table.weights[a]) : fallback;
 };
 
+// The app's own palette: forest green for good standing, gold for "needs
+// support". Red is kept for the one band that needs someone to act.
 const BAND_STYLES: Record<string, { label: string; chip: string; bar: string }> = {
-  leading: { label: "Leading", chip: "bg-green-100 text-green-800", bar: "bg-green-600" },
-  solid: { label: "Solid", chip: "bg-blue-100 text-blue-800", bar: "bg-blue-600" },
-  needs_support: { label: "Needs support", chip: "bg-amber-100 text-amber-800", bar: "bg-amber-500" },
-  at_risk: { label: "At risk", chip: "bg-red-100 text-red-700", bar: "bg-red-600" },
+  leading: { label: "Leading", chip: "bg-[#2D6A4F] text-white", bar: "bg-[#2D6A4F]" },
+  solid: { label: "Solid", chip: "bg-[#2D6A4F]/10 text-[#1B4332]", bar: "bg-[#2D6A4F]/60" },
+  needs_support: { label: "Needs support", chip: "bg-[#D4A574]/25 text-[#7A5530]", bar: "bg-[#D4A574]" },
+  at_risk: { label: "At risk", chip: "bg-red-50 text-red-700 ring-1 ring-red-200", bar: "bg-red-600" },
 };
+
+/** RWF 1.2M / RWF 350K — a column of figures should be scannable. */
+const short = (v: number) => {
+  const a = Math.abs(v);
+  const s = a >= 1_000_000 ? `${(a / 1_000_000).toFixed(1)}M` : a >= 1_000 ? `${Math.round(a / 1_000)}K` : `${Math.round(a)}`;
+  return `${v < 0 ? "−" : ""}RWF ${s}`;
+};
+
+/**
+ * What a cooperative actually did in each category this month — the figure a
+ * treasurer or officer recognises — with the comparative score beneath it.
+ */
+function Figure({ d, s }: { d: DimensionKey; s: Standing }) {
+  const e = s.evidence;
+  const score = s.scores[d];
+  let main: string;
+  let muted = false;
+  if (d === "finances") {
+    main = e.income || e.expense ? `${e.surplus >= 0 ? "+" : ""}${short(e.surplus)}` : "No entries";
+    muted = !e.income && !e.expense;
+  } else if (d === "engagement") {
+    main = `${e.contributorShare}% paying`;
+  } else {
+    main = e.activitiesScheduled ? `${e.activitiesCompleted} of ${e.activitiesScheduled} held` : "None planned";
+    muted = !e.activitiesScheduled;
+  }
+  return (
+    <div className="text-right">
+      <p className={`font-medium tabular-nums ${muted ? "text-gray-400" : "text-gray-900"}`}>{main}</p>
+      <p className="text-[11px] tabular-nums text-gray-400">{score === null ? "not scored" : `score ${score.toFixed(0)}`}</p>
+    </div>
+  );
+}
 
 const MEDAL = ["🥇", "🥈", "🥉"];
 
@@ -129,25 +164,13 @@ function RankMovement({ change }: { change: number | null }) {
   }
   const up = change > 0;
   return (
-    <span className={`inline-flex items-center gap-1 text-xs font-medium ${up ? "text-green-700" : "text-red-600"}`}>
+    <span className={`inline-flex items-center gap-1 text-xs font-medium ${up ? "text-[#2D6A4F]" : "text-[#9A6B3A]"}`}>
       {up ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
       {up ? `+${change}` : change}
     </span>
   );
 }
 
-function ScoreCell({ value }: { value: number | null }) {
-  if (value === null) {
-    return (
-      <span title="Not measurable this month — excluded from the composite" className="text-gray-300">
-        —
-      </span>
-    );
-  }
-  const tone =
-    value >= 75 ? "text-green-700" : value >= 50 ? "text-blue-700" : value >= 30 ? "text-amber-700" : "text-red-600";
-  return <span className={`font-medium ${tone}`}>{value.toFixed(0)}</span>;
-}
 
 /**
  * `embedded` is set when this is rendered as a tab of District Monitoring,
@@ -225,13 +248,7 @@ export function CooperativeRankings({ embedded = false }: { embedded?: boolean }
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className={embedded ? "sr-only" : undefined}>
           <h1 className="text-2xl font-semibold text-gray-900">District League Table</h1>
-          <p className="text-gray-600 mt-1 max-w-3xl">
-            How every cooperative in Gasabo compares this month, on three things: its{" "}
-            <strong>finances</strong>, its <strong>member engagement</strong>, and the{" "}
-            <strong>activities</strong> it actually delivered. Every score opens into the figures
-            behind it, so a cooperative that disagrees with its position can be shown exactly why it
-            sits there.
-          </p>
+          <p className="text-gray-600 mt-1">How Gasabo's cooperatives compare this month. Open a row for its figures.</p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
           {table && table.availablePeriods.length > 0 && (
@@ -364,7 +381,7 @@ export function CooperativeRankings({ embedded = false }: { embedded?: boolean }
                           </td>
                           {dimensions.map((d) => (
                             <td key={d} className="px-3 py-3 text-right">
-                              <ScoreCell value={s.scores[d]} />
+                              <Figure d={d} s={s} />
                             </td>
                           ))}
                           <td className="px-4 py-3 text-right">
@@ -491,10 +508,8 @@ export function CooperativeRankings({ embedded = false }: { embedded?: boolean }
                               </div>
 
                               {s.unmeasured.length > 0 && (
-                                <p className="mt-4 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                                  Not measurable this month: {s.unmeasured.join(", ")}. Excluded from the
-                                  composite rather than scored zero, so missing records do not count as poor
-                                  performance.
+                                <p className="mt-4 text-xs text-gray-500">
+                                  Not scored this month: {s.unmeasured.join(", ")}.
                                 </p>
                               )}
 
@@ -521,60 +536,30 @@ export function CooperativeRankings({ embedded = false }: { embedded?: boolean }
             </div>
           </Card>
 
-          {/* How it is scored */}
-          <Card className="p-6">
-            <div className="flex items-center gap-2 mb-3">
-              <Info className="w-4 h-4 text-gray-700" />
-              <h2 className="text-lg font-semibold text-gray-900">How the score is built</h2>
-            </div>
-            <p className="text-sm text-gray-600 mb-4 max-w-3xl">
-              Three pillars, each built from named measures. Every measure is a position within the
-              month's field rather than a score against a fixed target, so a small cooperative is
-              compared fairly with a large one. A measure that cannot be computed is left out of a
-              cooperative's score instead of counted as a zero.
-            </p>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {/* How it is scored — folded, at the foot of the page. */}
+          <MoreInfo title="How scores work">
+            <ul className="grid gap-2 sm:grid-cols-3">
               {dimensions.map((d) => (
-                <div key={d} className="rounded-xl border border-gray-200 p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-medium text-gray-900 text-sm">{table.dimensions[d]}</p>
-                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-700">
-                      {Math.round(table.weights[d] * 100)}%
-                    </span>
-                  </div>
-                  <p className="text-xs text-gray-600 mt-1">{table.dimensionDescriptions[d]}</p>
-                  {table.pillarMeasures?.[d] && (
-                    <ul className="mt-3 space-y-1.5 border-t border-gray-100 pt-3">
-                      {table.pillarMeasures[d].map((m) => (
-                        <li key={m.key} className="text-xs">
-                          <div className="flex items-baseline justify-between gap-2">
-                            <span className="font-medium text-gray-800">{m.label}</span>
-                            <span className="text-gray-500">{Math.round(m.weight * 100)}%</span>
-                          </div>
-                          <p className="text-gray-500">{m.description}</p>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <p className="text-xs text-gray-500 mt-3">
-                    District average score:{" "}
-                    <span className="font-medium">
-                      {Math.round(table.districtAverage[d] ?? 0).toLocaleString()}
-                    </span>
+                <li key={d} className="rounded-lg border border-gray-100 bg-white p-3">
+                  <p className="flex justify-between text-sm font-medium text-gray-900">
+                    {table.dimensions[d]} <span className="text-gray-500">{Math.round(table.weights[d] * 100)}%</span>
                   </p>
-                </div>
+                  <ul className="mt-1 space-y-0.5 text-xs text-gray-500">
+                    {(table.pillarMeasures?.[d] ?? []).map((m) => (
+                      <li key={m.key} className="flex justify-between gap-2" title={m.description}>
+                        <span>{m.label}</span>
+                        <span>{Math.round(m.weight * 100)}%</span>
+                      </li>
+                    ))}
+                  </ul>
+                </li>
               ))}
-            </div>
-            <p className="mt-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-              <strong>Deliberately not scored:</strong> accumulated savings and share capital per
-              member. It measures how long a cooperative has existed and how much it has banked, not
-              how it is performing now, and scoring it simply ranked the oldest cooperatives highest.
-              It is still shown in the figures behind each row, as context.
+            </ul>
+            <p className="text-xs">
+              Scores compare each cooperative with the others this month (0–100). Missing data is left out, not scored
+              zero. Savings held per member is shown for context but not scored.
             </p>
-            {table.note && (
-              <p className="mt-4 text-xs text-gray-600 border-t border-gray-200 pt-3">{table.note}</p>
-            )}
-          </Card>
+          </MoreInfo>
         </>
       )}
 

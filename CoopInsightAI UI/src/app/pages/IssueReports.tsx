@@ -260,14 +260,7 @@ export function IssueReportsPanel() {
             <div className="max-w-2xl">
               <h3 className="text-lg font-semibold text-gray-900">Report a problem</h3>
               <p className="mt-1 text-sm text-gray-600">
-                If something is wrong with how your cooperative is being run, this is how you raise
-                it with somebody outside it. Your report goes to the sector cooperative officer
-                first, then the district office, then the RCA — the same people who supervise the
-                cooperative and can act on it.
-              </p>
-              <p className="mt-2 text-sm text-gray-600">
-                You do not need the committee's permission, and you do not need to be an
-                office-bearer.
+                Goes to the sector officer, then the district, then the RCA. No committee permission needed.
               </p>
             </div>
           </div>

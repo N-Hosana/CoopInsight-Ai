@@ -263,25 +263,28 @@ router.get("/database", authorize("admin"), async (_req: Request, res: Response)
     }
 
     // Names come from the catalog, never from the request, and are quoted.
+    //
+    // One table at a time, deliberately. Firing all ~60 counts at once took
+    // every connection in the pool (max 20, 2 s wait), and anyone signing in
+    // during that window got a 500 instead of their verification code.
     const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
-    const rows = await Promise.all(
-      tables.rows.map(async (t: any) => {
-        const col = tsOf[t.table];
-        const r = await query(
-          col
-            ? `SELECT COUNT(*) AS rows, MIN(${q(col)}) AS oldest, MAX(${q(col)}) AS newest FROM ${q(t.table)}`
-            : `SELECT COUNT(*) AS rows FROM ${q(t.table)}`
-        );
-        return {
-          table: t.table,
-          rows: Number(r.rows[0].rows),
-          size: t.size,
-          bytes: Number(t.bytes),
-          oldest: r.rows[0].oldest ?? null,
-          newest: r.rows[0].newest ?? null,
-        };
-      })
-    );
+    const rows = [];
+    for (const t of tables.rows as any[]) {
+      const col = tsOf[t.table];
+      const r = await query(
+        col
+          ? `SELECT COUNT(*) AS rows, MIN(${q(col)}) AS oldest, MAX(${q(col)}) AS newest FROM ${q(t.table)}`
+          : `SELECT COUNT(*) AS rows FROM ${q(t.table)}`
+      );
+      rows.push({
+        table: t.table,
+        rows: Number(r.rows[0].rows),
+        size: t.size,
+        bytes: Number(t.bytes),
+        oldest: r.rows[0].oldest ?? null,
+        newest: r.rows[0].newest ?? null,
+      });
+    }
 
     res.json({ success: true, data: { ...info.rows[0], connections: Number(info.rows[0].connections), tables: rows } });
   } catch (err) {

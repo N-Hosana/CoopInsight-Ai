@@ -29,8 +29,11 @@
  * show, so a report never disagrees with the screen it was generated from.
  */
 
+import { AsyncLocalStorage } from "async_hooks";
 import { query } from "../config/db";
-import type { PdfDocumentSpec } from "./pdf";
+import type { PdfDocumentSpec, PdfDocumentInfo } from "./pdf";
+import type { Target, Viewer } from "./reportScope";
+import { listRegister, summarise, type RegisterRow } from "./requestsRegister";
 
 type Cell = string | number | null;
 
@@ -62,6 +65,11 @@ export interface ReportContent {
   /** The offices that sign the report. */
   signatories: string[];
   rowCount: number;
+  /** Who the report covers, as printed: a cooperative, a sector, the district, a member. */
+  scopeLabel?: string | null;
+  sector?: string | null;
+  /** Job title of whoever generated it. */
+  preparedByRole?: string | null;
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────
@@ -147,11 +155,29 @@ function letterhead(c: CooperativeHeader | null): ReportContent["cooperative"] {
   };
 }
 
-/** `AND <column> = $n` for one cooperative, or nothing for the whole district. */
+/**
+ * The sector a report is restricted to, when it covers a sector rather than one
+ * cooperative. Carried in async context rather than threaded through every
+ * builder's signature: each builder already funnels its cooperative filter
+ * through `scope()` below, so this one place makes all of them sector-aware.
+ */
+const sectorContext = new AsyncLocalStorage<string | null>();
+
+/**
+ * `AND <column> = $n` for one cooperative; `AND <column> IN (… that sector …)`
+ * for a sector report; nothing for the whole district.
+ */
 function scope(cooperativeId: string | null, column: string, params: unknown[]): string {
-  if (!cooperativeId) return "";
-  params.push(cooperativeId);
-  return ` AND ${column} = $${params.length}`;
+  if (cooperativeId) {
+    params.push(cooperativeId);
+    return ` AND ${column} = $${params.length}`;
+  }
+  const sector = sectorContext.getStore();
+  if (sector) {
+    params.push(sector);
+    return ` AND ${column} IN (SELECT id FROM cooperatives WHERE LOWER(sector) = LOWER($${params.length}))`;
+  }
+  return "";
 }
 
 const COOP_SIGNATORIES = ["President", "Secretary", "Manager / Treasurer"];
@@ -959,10 +985,278 @@ async function annualReport(cooperativeId: string | null, from: string, to: stri
   };
 }
 
+// ── General Report: members, activities and money in one document ────────────
+
+/**
+ * The report most people actually want: is the cooperative alive, are its
+ * members taking part, and does the money add up. Built from the same
+ * functions as the detailed reports, then cut down to what matters — headline
+ * figures, engagement, what was held, income and spending by line — and, for a
+ * sector or the district, one line per cooperative so they can be compared.
+ */
+async function generalReport(cooperativeId: string | null, from: string, to: string): Promise<Built> {
+  const [membership, activities, money_, savings] = await Promise.all([
+    membershipReport(cooperativeId, from, to),
+    activitiesReport(cooperativeId, from, to),
+    incomeAndExpenditure(cooperativeId, from, to),
+    savingsStatement(cooperativeId, from, to),
+  ]);
+  const pick = (built: Built, label: string) => built.summary.find((s) => s.label === label)?.value ?? "-";
+  const fact = (label: string) => membership.sections[0]?.facts?.find((f) => f.label === label)?.value ?? "-";
+  const surplusLabel = money_.summary.find((s) => s.label === "Surplus" || s.label === "Deficit");
+
+  const sections: ReportSection[] = [
+    {
+      title: "1. Member engagement",
+      paragraphs: membership.narrative.slice(1),
+      facts: [
+        { label: "Members at start / end", value: `${pick(membership, "Members at start")} / ${pick(membership, "Members at end")}` },
+        { label: "Joined / left", value: `${pick(membership, "Joined")} / ${pick(membership, "Left")}` },
+        { label: "Active members", value: fact("Active") },
+        { label: "Women / men", value: `${fact("Women")} / ${fact("Men")}` },
+        { label: "Paid a contribution", value: fact("Paid a contribution in the period") },
+        { label: "Attendance at activities", value: fact("Attendance at activities") },
+      ],
+    },
+    {
+      title: "2. Activities",
+      paragraphs: activities.narrative,
+      // One cooperative: list what it held. Several: the comparison table in
+      // section 5 says it better than dozens of rows of meetings.
+      ...(cooperativeId && activities.sections[0]
+        ? {
+            columns: activities.sections[0].columns,
+            rows: activities.sections[0].rows,
+            totals: activities.sections[0].totals,
+          }
+        : {}),
+    },
+    {
+      title: "3. Finances",
+      // The headline sentence is already in the opening paragraphs.
+      paragraphs: money_.narrative.slice(1),
+      columns: ["", "Amount", "Share"],
+      rows: [
+        ...(money_.sections[0]?.rows ?? []).map((r) => [`Income — ${r[0]}`, r[2], r[3]] as Cell[]),
+        ...(money_.sections[1]?.rows ?? []).map((r) => [`Expenditure — ${r[0]}`, r[2], r[3]] as Cell[]),
+      ],
+      totals: [surplusLabel?.label === "Deficit" ? "Deficit for the period" : "Surplus for the period", surplusLabel?.value ?? "-", ""],
+    },
+    {
+      title: "4. Members' savings",
+      paragraphs: savings.narrative.slice(0, 1),
+      facts: savings.summary,
+    },
+  ];
+
+  // A sector or district report compares the cooperatives it covers.
+  if (!cooperativeId) {
+    const params: unknown[] = [from, to];
+    const coopScope = scope(null, "c.id", params);
+    const per = await query(
+      `SELECT c.name, c.sector,
+              (SELECT COUNT(*) FROM members m WHERE m.cooperative_id = c.id AND m.deleted_at IS NULL AND m.status = 'active') AS members,
+              (SELECT COUNT(*) FROM activities a WHERE a.cooperative_id = c.id AND a.deleted_at IS NULL
+                  AND a.status = 'completed' AND a.date BETWEEN $1 AND $2) AS held,
+              (SELECT COUNT(*) FROM activity_participants ap JOIN activities a ON a.id = ap.activity_id
+                WHERE a.cooperative_id = c.id AND a.deleted_at IS NULL AND a.status = 'completed' AND a.date BETWEEN $1 AND $2) AS invited,
+              (SELECT COUNT(*) FROM activity_participants ap JOIN activities a ON a.id = ap.activity_id
+                WHERE a.cooperative_id = c.id AND a.deleted_at IS NULL AND a.status = 'completed' AND ap.attended
+                  AND a.date BETWEEN $1 AND $2) AS attended,
+              (SELECT COALESCE(SUM(t.amount), 0) FROM transactions t WHERE t.cooperative_id = c.id
+                  AND t.status = 'completed' AND t.type = 'income' AND t.date BETWEEN $1 AND $2) AS income,
+              (SELECT COALESCE(SUM(t.amount), 0) FROM transactions t WHERE t.cooperative_id = c.id
+                  AND t.status = 'completed' AND t.type = 'expense' AND t.date BETWEEN $1 AND $2) AS expense
+         FROM cooperatives c WHERE c.deleted_at IS NULL${coopScope}
+        ORDER BY c.sector, c.name`,
+      params
+    );
+    sections.push({
+      title: "5. Cooperative by cooperative",
+      note: "Active members today; activities, attendance and money for the period.",
+      columns: ["Cooperative", "Sector", "Members", "Activities held", "Attendance", "Income", "Expenditure", "Surplus / (deficit)"],
+      rows: per.rows.map((r) => [
+        r.name, r.sector ?? "", n(r.members), n(r.held), pct(n(r.attended), n(r.invited)),
+        money(r.income), money(r.expense), money(n(r.income) - n(r.expense)),
+      ]),
+    });
+  }
+
+  return {
+    narrative: [
+      `This report summarises the period ${longDay(from)} to ${longDay(to)}: how members took part, what ` +
+        `activities were held, and how money came in and went out.`,
+      membership.narrative[0],
+      money_.narrative[0],
+    ].filter(Boolean),
+    summary: [
+      { label: "Members at end", value: pick(membership, "Members at end") },
+      { label: "Activities held", value: pick(activities, "Held") },
+      { label: "Attendance", value: pick(activities, "Attendance") },
+      { label: "Savings at end", value: pick(savings, "Savings at end") },
+      { label: "Total income", value: pick(money_, "Total income") },
+      { label: "Total expenditure", value: pick(money_, "Total expenditure") },
+      { label: surplusLabel?.label ?? "Surplus", value: surplusLabel?.value ?? "-" },
+      { label: "Contributing members", value: fact("Paid a contribution in the period").split(" ").slice(-1)[0].replace(/[()]/g, "") },
+    ],
+    sections,
+    rowCount: membership.rowCount + activities.rowCount + money_.rowCount,
+  };
+}
+
+// ── Services, Requests and Audits Register ───────────────────────────────────
+
+const REGISTER_GROUPS: Array<{ group: RegisterRow["group"]; title: string }> = [
+  { group: "requests", title: "Formation, dissolution and certificate changes" },
+  { group: "audits", title: "Audits" },
+  { group: "issues", title: "Issues reported" },
+  { group: "exits", title: "Members asking to leave" },
+  { group: "funding", title: "External support" },
+];
+
+async function requestsRegisterReport(viewer: Viewer, target: Target, from: string, to: string): Promise<Built> {
+  const rows = await listRegister(viewer, target, { from, to });
+  const s = summarise(rows);
+  const single = !!target.cooperativeId || viewer.role === "member";
+
+  const sections: ReportSection[] = [
+    {
+      title: "Where open requests stand",
+      facts: [
+        { label: "With the sector officer", value: String(s.atSector) },
+        { label: "With the district office", value: String(s.atDistrict) },
+        { label: "With the RCA", value: String(s.atRca) },
+        { label: "Past their response date", value: String(s.overdue) },
+      ],
+    },
+  ];
+
+  for (const g of REGISTER_GROUPS) {
+    const inGroup = rows.filter((r) => r.group === g.group);
+    if (!inGroup.length) continue;
+    sections.push({
+      title: `${g.title} (${inGroup.length})`,
+      columns: ["Reference", "Submitted", "Request", "Requested by", ...(single ? [] : ["Cooperative", "Sector"]), "Now with", "Status"],
+      rows: inGroup.map((r) => [
+        r.reference, day(r.submittedAt), r.kindLabel,
+        r.requesterRole ? `${r.requester} (${r.requesterRole})` : r.requester,
+        ...(single ? [] : [r.cooperative ?? "—", r.sector ?? "—"]),
+        r.stage, r.overdue ? `${r.statusLabel} — OVERDUE` : r.statusLabel,
+      ]),
+    });
+  }
+
+  return {
+    narrative: [
+      rows.length
+        ? `${rows.length} request(s) were made between ${longDay(from)} and ${longDay(to)}. ${s.open} are still open, ` +
+          `${s.approved} were approved or completed, ${s.rejected} refused and ${s.closed} withdrawn or cancelled.`
+        : `No requests, audits or applications were made between ${longDay(from)} and ${longDay(to)}.`,
+      ...(s.overdue ? [`${s.overdue} open request(s) have passed the date by which a response was due.`] : []),
+    ],
+    summary: [
+      { label: "Requests", value: String(s.total) },
+      { label: "Open", value: String(s.open) },
+      { label: "Approved / completed", value: String(s.approved) },
+      { label: "Refused", value: String(s.rejected) },
+    ],
+    sections,
+    rowCount: rows.length,
+  };
+}
+
+// ── A member's own statement ─────────────────────────────────────────────────
+
+async function memberStatement(viewer: Viewer, target: Target, from: string, to: string): Promise<Built> {
+  if (!target.memberId) {
+    return {
+      narrative: ["Your account is not linked to a member record, so there is no statement to show. Ask your cooperative's secretary to link it."],
+      summary: [],
+      sections: [],
+      rowCount: 0,
+      signatories: [],
+    };
+  }
+
+  const [memberRes, paid, attendance, requests] = await Promise.all([
+    query(
+      `SELECT m.full_name, m.membership_number, m.membership_date, m.status, m.role, m.phone,
+              COALESCE((SELECT SUM(amount) FROM member_contributions WHERE member_id = m.id AND type = 'savings' AND date <= $2), 0) AS savings,
+              COALESCE((SELECT SUM(amount) FROM member_contributions WHERE member_id = m.id AND type = 'share_capital' AND date <= $2), 0) AS shares
+         FROM members m WHERE m.id = $1`,
+      [target.memberId, to]
+    ),
+    query(
+      `SELECT date, type, amount, notes FROM member_contributions
+        WHERE member_id = $1 AND date BETWEEN $2 AND $3 AND notes IS DISTINCT FROM '${OPENING_NOTE}'
+        ORDER BY date`,
+      [target.memberId, from, to]
+    ),
+    query(
+      `SELECT a.date, a.title, a.type, ap.attended
+         FROM activity_participants ap JOIN activities a ON a.id = ap.activity_id
+        WHERE ap.member_id = $1 AND a.deleted_at IS NULL AND a.status = 'completed' AND a.date BETWEEN $2 AND $3
+        ORDER BY a.date`,
+      [target.memberId, from, to]
+    ),
+    listRegister(viewer, target, { from, to }),
+  ]);
+
+  const m = memberRes.rows[0];
+  const total = paid.rows.reduce((a, r) => a + n(r.amount), 0);
+  const attended = attendance.rows.filter((r) => r.attended).length;
+
+  return {
+    narrative: [
+      `Statement for ${m?.full_name ?? "the member"} covering ${longDay(from)} to ${longDay(to)}. ` +
+        `${paid.rowCount} payment(s) totalling ${money(total)} were recorded, and you attended ${attended} of ` +
+        `${attendance.rowCount} activities you were registered for.`,
+    ],
+    summary: [
+      { label: "Savings held", value: money(m?.savings) },
+      { label: "Share capital", value: money(m?.shares) },
+      { label: "Paid in this period", value: money(total) },
+      { label: "Attendance", value: pct(attended, attendance.rowCount ?? 0) },
+    ],
+    sections: [
+      {
+        title: "Membership",
+        facts: [
+          { label: "Name", value: m?.full_name ?? "—" },
+          { label: "Membership number", value: m?.membership_number ?? "Not recorded" },
+          { label: "Member since", value: m?.membership_date ? longDay(m.membership_date) : "Not recorded" },
+          { label: "Status", value: title(m?.status ?? "") },
+        ],
+      },
+      {
+        title: "Payments in the period",
+        columns: ["Date", "Type", "Amount", "Note"],
+        rows: paid.rows.map((r) => [day(r.date), CONTRIBUTION_LABELS[r.type] ?? title(r.type), money(r.amount), r.notes ?? ""]),
+        totals: ["Total", "", money(total), ""],
+      },
+      {
+        title: "Activities",
+        columns: ["Date", "Activity", "Type", "Attended"],
+        rows: attendance.rows.map((r) => [day(r.date), r.title, title(r.type), r.attended ? "Yes" : "No"]),
+      },
+      {
+        title: "Your requests",
+        columns: ["Reference", "Submitted", "Request", "Now with", "Status"],
+        rows: requests.map((r) => [r.reference, day(r.submittedAt), r.kindLabel, r.stage, r.statusLabel]),
+      },
+    ],
+    rowCount: (paid.rowCount ?? 0) + (attendance.rowCount ?? 0) + requests.length,
+    signatories: ["Cooperative Secretary"],
+  };
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export const REPORT_TITLES: Record<string, string> = {
-  financial_summary: "Income and Expenditure Statement",
+  general: "General Report — Members, Activities and Finances",
+  requests_register: "Services, Requests and Audits Register",
+  member_statement: "Member Statement",
+  financial_summary: "Financial Report — Income and Expenditure",
   savings_growth: "Members' Savings and Shares Statement",
   loan_performance: "Loan Portfolio Report",
   member_activity: "Membership Report",
@@ -981,15 +1275,36 @@ export async function buildReport(options: {
   type: string;
   title?: string;
   cooperativeId: string | null;
+  /** Every cooperative in this sector, when cooperativeId is null. */
+  sector?: string | null;
   from: string;
   to: string;
   preparedBy?: string | null;
+  preparedByRole?: string | null;
+  /** Needed by the register and the member statement, which scope by person. */
+  viewer?: Viewer;
+  target?: Target;
 }): Promise<ReportContent> {
-  const { type, cooperativeId, from, to } = options;
+  const sector = options.cooperativeId ? null : options.sector ?? null;
+  return sectorContext.run(sector, () => buildInScope({ ...options, sector }));
+}
+
+async function buildInScope(options: Parameters<typeof buildReport>[0]): Promise<ReportContent> {
+  const { type, cooperativeId, from, to, sector } = options;
   const coop = cooperativeId ? await loadCooperative(cooperativeId) : null;
+  const target: Target = options.target ?? { cooperativeId, sector: sector ?? null, memberId: null, label: "" };
 
   let built: Built;
   switch (type) {
+    case "general": built = await generalReport(cooperativeId, from, to); break;
+    case "requests_register":
+      if (!options.viewer) throw new Error("The register needs to know who is asking.");
+      built = await requestsRegisterReport(options.viewer, target, from, to);
+      break;
+    case "member_statement":
+      if (!options.viewer) throw new Error("A statement needs to know who is asking.");
+      built = await memberStatement(options.viewer, target, from, to);
+      break;
     case "financial_summary": built = await incomeAndExpenditure(cooperativeId, from, to); break;
     case "savings_growth": built = await savingsStatement(cooperativeId, from, to); break;
     case "loan_performance": built = await loanPortfolio(cooperativeId, from, to); break;
@@ -1008,15 +1323,25 @@ export async function buildReport(options: {
       };
   }
 
+  // A sector report's letterhead names the sector; a district one, the district.
+  const header =
+    letterhead(coop) ??
+    (sector
+      ? { name: `${sector} Sector — Cooperative Oversight`, lines: ["Gasabo District"] }
+      : { name: "Gasabo District — Cooperative Oversight", lines: ["All cooperatives in the district"] });
+
   return {
     title: options.title || REPORT_TITLES[type] || title(type),
     type,
     cooperativeName: coop?.name ?? null,
-    cooperative: letterhead(coop),
+    cooperative: header,
     periodFrom: built.position ? null : from,
     periodTo: built.position ? null : to,
     generatedAt: new Date().toISOString(),
     preparedBy: options.preparedBy ?? null,
+    preparedByRole: options.preparedByRole ?? null,
+    scopeLabel: options.target?.label || coop?.name || (sector ? `${sector} sector — all cooperatives` : "Gasabo District — all cooperatives"),
+    sector: sector ?? coop?.sector ?? null,
     narrative: built.narrative,
     summary: built.summary,
     sections: built.sections,
@@ -1025,8 +1350,14 @@ export async function buildReport(options: {
   };
 }
 
+/** How a report's period is printed. */
+export const periodText = (content: Pick<ReportContent, "periodFrom" | "periodTo" | "generatedAt">) =>
+  content.periodFrom && content.periodTo
+    ? `${longDay(content.periodFrom)} to ${longDay(content.periodTo)}`
+    : `Position as at ${longDay(content.generatedAt)}`;
+
 /** A stored report, as the document the PDF engine prints. */
-export function toPdfSpec(content: ReportContent): PdfDocumentSpec {
+export function toPdfSpec(content: ReportContent, document?: PdfDocumentInfo): PdfDocumentSpec {
   return {
     title: content.title,
     subtitle:
@@ -1039,15 +1370,13 @@ export function toPdfSpec(content: ReportContent): PdfDocumentSpec {
       (content.cooperativeName
         ? { name: content.cooperativeName, lines: [] }
         : { name: "Gasabo District — Cooperative Oversight", lines: ["All cooperatives in scope"] }),
-    meta: [
-      ...(content.preparedBy ? [{ label: "Prepared by", value: content.preparedBy }] : []),
-      { label: "Generated", value: longDay(content.generatedAt) },
-    ],
+    document,
+    meta: [],
     narrative: content.narrative ?? [],
     summary: content.summary ?? [],
     sections: content.sections ?? [],
     signatories: content.signatories ?? [],
-    footer: `${content.title} — generated by CoopInsight AI from the cooperative's records`,
+    footer: content.title,
   };
 }
 

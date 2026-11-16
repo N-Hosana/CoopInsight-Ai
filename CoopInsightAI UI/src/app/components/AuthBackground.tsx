@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { BrandMark } from "./BrandMark";
 
 // Picks up any image dropped into src/app/assets/auth — no code change needed to add/remove photos.
 const images = Object.values(
@@ -12,8 +13,8 @@ const images = Object.values(
 interface AuthBackgroundProps {
   tagline: string;
   subtext: string;
-  /** Icon shown in the brand mark on the left panel. */
-  icon: ReactNode;
+  /** Ignored: every sign-in screen shows the CoopInsightAI mark. Kept so older callers still compile. */
+  icon?: ReactNode;
   /** Line under the product name, e.g. "Gasabo District Platform". */
   caption?: string;
   /** Wider card for long forms (registration). */
@@ -34,7 +35,7 @@ interface AuthBackgroundProps {
  * taller than the window — registration, or the login page with its test-account
  * panel — can always be scrolled into view from top to bottom.
  */
-export function AuthBackground({ tagline, subtext, icon, caption = "Gasabo District Platform", wide, children }: AuthBackgroundProps) {
+export function AuthBackground({ tagline, subtext, caption = "Gasabo District Platform", wide, children }: AuthBackgroundProps) {
   const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
@@ -91,9 +92,7 @@ export function AuthBackground({ tagline, subtext, icon, caption = "Gasabo Distr
         >
           {/* Brand panel — see-through so the photo shows behind it. */}
           <div className="relative hidden lg:flex flex-col items-center justify-center text-center p-10 text-white bg-[rgba(13,40,24,0.35)] backdrop-blur-[2px]">
-            <div className="inline-flex items-center justify-center w-24 h-24 rounded-full bg-white/95 shadow-lg mb-6 text-primary">
-              {icon}
-            </div>
+            <BrandMark size={88} className="mb-6 rounded-[20px] shadow-lg ring-4 ring-white/20" />
             <h1 className="text-2xl font-bold">CoopInsightAI</h1>
             <p className="text-white/80 italic mt-1">{caption}</p>
 
@@ -108,9 +107,7 @@ export function AuthBackground({ tagline, subtext, icon, caption = "Gasabo Distr
           <div className="bg-card/90 backdrop-blur-md p-6 sm:p-10">
             {/* On small screens the brand panel is hidden, so the name goes here. */}
             <div className="lg:hidden text-center mb-6">
-              <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-primary text-primary-foreground mb-3">
-                {icon}
-              </div>
+              <BrandMark size={56} className="mx-auto mb-3 rounded-2xl" />
               <h1 className="text-2xl font-bold text-foreground">CoopInsightAI</h1>
               <p className="text-muted-foreground text-sm mt-1">{caption}</p>
             </div>

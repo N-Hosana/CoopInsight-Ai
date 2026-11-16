@@ -1296,9 +1296,20 @@ function ProgrammeTab({ meta, flash }: { meta: Meta; flash: (m: string) => void 
 
 type TabKey = "audits" | "announce" | "programme";
 
-export function RcaAudits() {
+/**
+ * `embedded`: shown as the Audits tab of Services & requests. That page owns
+ * `?tab=`, so the audit sub-tab moves to `?audit=` and the page title is left
+ * to the host.
+ */
+export function RcaAudits({ embedded = false }: { embedded?: boolean } = {}) {
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const KEY = embedded ? "audit" : "tab";
+  const goTo = (key: TabKey) => {
+    const next = new URLSearchParams(searchParams);
+    next.set(KEY, key);
+    setSearchParams(next, { replace: embedded });
+  };
   const [meta, setMeta] = useState<Meta | null>(null);
   const [audits, setAudits] = useState<Audit[]>([]);
   const [summary, setSummary] = useState({ yourTurn: 0, open: 0, scheduled: 0, completed: 0 });
@@ -1307,7 +1318,7 @@ export function RcaAudits() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const tab = (searchParams.get("tab") as TabKey) || "audits";
+  const tab = (searchParams.get(KEY) as TabKey) || "audits";
 
   const load = useCallback(async () => {
     try {
@@ -1364,10 +1375,9 @@ export function RcaAudits() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">RCA audits</h1>
-          <p className="mt-1 text-gray-600">
-            General and financial audits of cooperatives in {meta.district} district — requested up the chain, announced by the RCA,
-            and the routine programme of visits and sensitization sessions.
+          {!embedded && <h1 className="text-2xl font-semibold text-gray-900">RCA audits</h1>}
+          <p className={embedded ? "text-sm text-gray-600" : "mt-1 text-gray-600"}>
+            Audits in {meta.district} district: requests, announcements and visits.
           </p>
         </div>
         {tab === "audits" && meta.viewer.canRequest && !requesting && (
@@ -1381,7 +1391,7 @@ export function RcaAudits() {
         {tabs.map(({ key, label, Icon }) => (
           <button
             key={key}
-            onClick={() => setSearchParams({ tab: key })}
+            onClick={() => goTo(key)}
             className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium ${tab === key ? "bg-[#2D6A4F] text-white" : "text-gray-600 hover:bg-gray-50"}`}
           >
             <Icon className="h-4 w-4" /> {label}
@@ -1440,7 +1450,7 @@ export function RcaAudits() {
         </>
       )}
 
-      {tab === "announce" && meta.viewer.canAnnounce && <AnnounceForm meta={meta} onDone={(m) => { changed(m); setSearchParams({ tab: "audits" }); }} />}
+      {tab === "announce" && meta.viewer.canAnnounce && <AnnounceForm meta={meta} onDone={(m) => { changed(m); goTo("audits"); }} />}
       {tab === "programme" && <ProgrammeTab meta={meta} flash={flash} />}
     </div>
   );

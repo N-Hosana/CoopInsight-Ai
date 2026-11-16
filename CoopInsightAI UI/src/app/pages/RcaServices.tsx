@@ -20,6 +20,9 @@ import { CooperativeRequests } from "./CooperativeRequests";
 import { IssueReportsPanel } from "./IssueReports";
 import { Membership } from "./Membership";
 import { useSearchParams } from "react-router";
+import { RequestsRegister } from "../components/RequestsRegister";
+import { RcaAudits } from "./RcaAudits";
+import { MoreInfo } from "../components/MoreInfo";
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -198,7 +201,7 @@ function AssessmentPanel({ assessment }: { assessment: Assessment }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-type TabKey = "membership" | "lifecycle" | "issues" | "apply" | "auditors";
+type TabKey = "register" | "audits" | "membership" | "lifecycle" | "issues" | "apply" | "auditors";
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -223,36 +226,48 @@ type TabKey = "membership" | "lifecycle" | "issues" | "apply" | "auditors";
  */
 const TABS: Array<{ key: TabKey; label: string; hint: string; roles: string[] }> = [
   {
+    // First, because the first question is usually "what has been asked, and
+    // where is it?" — answered for every kind of request at once.
+    key: "register",
+    label: "Register",
+    hint: "Who asked for what, and where it stands.",
+    roles: ["member", "manager", "cooperative", "admin", "generalManager", "government"],
+  },
+  {
+    key: "audits",
+    label: "Audits",
+    hint: "General and financial audits.",
+    roles: ["manager", "cooperative", "admin", "generalManager", "government"],
+  },
+  {
     key: "membership",
     label: "Leaving the cooperative",
-    hint:
-      "A member asks to be released. The general assembly decides this one — the cooperative's " +
-      "own members vote, and the RCA is only told afterwards.",
+    hint: "A member asks to leave; the general assembly decides.",
     roles: ["member", "manager", "cooperative", "admin", "generalManager"],
   },
   {
     key: "lifecycle",
     label: "Formation & dissolution",
-    hint: "Start a cooperative, or close one. Both climb sector → district → RCA.",
+    hint: "Start or close a cooperative.",
     roles: ["member", "manager", "cooperative", "admin", "generalManager", "government"],
   },
   {
     key: "issues",
     label: "Report an issue",
-    hint: "Raise a problem with your cooperative outside its own committee.",
+    hint: "Raise a problem with your cooperative.",
     roles: ["member", "manager", "cooperative", "admin", "generalManager", "government"],
   },
   {
     key: "apply",
     label: "Certificate changes",
-    hint: "Change the objective or name, add activities, or replace a lost certificate.",
+    hint: "Change name or objective, add activities, replace a certificate.",
     // Filed by the president; a member cannot commit the cooperative to these.
     roles: ["manager", "cooperative", "admin", "generalManager", "government"],
   },
   {
     key: "auditors",
     label: "Independent auditors",
-    hint: "Who may audit a cooperative, and what disqualifies them.",
+    hint: "Who may audit a cooperative.",
     roles: ["manager", "cooperative", "admin", "generalManager", "government"],
   },
 ];
@@ -269,11 +284,11 @@ export function RcaServices() {
   // ?tab= keeps the older links working — notifications already in people's
   // inboxes point at /membership, which now redirects here with ?tab=membership.
   const [searchParams, setSearchParams] = useSearchParams();
-  const [tab, setTab] = useState<TabKey>((searchParams.get("tab") as TabKey) || "lifecycle");
+  const [tab, setTab] = useState<TabKey>((searchParams.get("tab") as TabKey) || "register");
 
   const selectTab = (key: TabKey) => {
     setTab(key);
-    setSearchParams(key === "lifecycle" ? {} : { tab: key }, { replace: true });
+    setSearchParams(key === "register" ? {} : { tab: key }, { replace: true });
   };
 
   // Only the tabs this account can actually use. A member gets two.
@@ -387,27 +402,7 @@ export function RcaServices() {
           <FileSignature className="w-5 h-5 text-gray-700" />
           <h1 className="text-2xl font-semibold text-gray-900">Services &amp; requests</h1>
         </div>
-        <p className="text-gray-600 mt-1 max-w-3xl">
-          Every formal request a cooperative or its members can make. Most climb the same chain —
-          the sector cooperative officer, then the district office, then the RCA, which has the
-          final say. Leaving the cooperative is the exception: that one is decided by the general
-          assembly of the members themselves, and the RCA is only notified afterwards.
-        </p>
-        <p className="text-gray-600 mt-2 max-w-3xl text-sm">
-          {user?.role === "member" ? (
-            <>
-              As a member you can <strong>apply to form a cooperative</strong> or{" "}
-              <strong>report a problem</strong> with your own. Closing a cooperative or changing its
-              certificate is filed by its president, because those commit every member.
-            </>
-          ) : (
-            <>
-              Dissolution and certificate changes are filed by the cooperative's president and
-              decided by a General Assembly. Members may apply to form a cooperative, and may
-              report an issue about their own.
-            </>
-          )}
-        </p>
+        <p className="text-gray-600 mt-1">Requests to the RCA, and where each one stands.</p>
       </div>
 
       <div>
@@ -436,7 +431,11 @@ export function RcaServices() {
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
       )}
 
-      {tab === "membership" ? (
+      {tab === "register" ? (
+        <RequestsRegister />
+      ) : tab === "audits" ? (
+        <RcaAudits embedded />
+      ) : tab === "membership" ? (
         <Membership embedded />
       ) : tab === "lifecycle" ? (
         <CooperativeRequests />
@@ -709,6 +708,11 @@ export function RcaServices() {
           )}
         </>
       )}
+
+      <MoreInfo title="How requests work">
+        <p>Most requests climb sector officer → district office → RCA, which has the final say. Leaving the cooperative is different: the members decide at a general assembly and the RCA is told afterwards.</p>
+        <p>Dissolution and certificate changes are filed by the cooperative's president. Members can apply to form a cooperative or report an issue about their own.</p>
+      </MoreInfo>
     </div>
   );
 }

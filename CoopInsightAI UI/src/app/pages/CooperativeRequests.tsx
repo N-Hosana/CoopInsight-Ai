@@ -788,10 +788,8 @@ export function CooperativeRequests() {
           <h1 className="text-2xl font-semibold text-gray-900">Cooperative Requests</h1>
           <p className="text-gray-600 mt-1">
             {isOfficer
-              ? `Applications to form and dissolve cooperatives. You review at ${
-                  viewerStage === "any" ? "every" : STAGE_LABEL[viewerStage as string]
-                } level. Each request moves sector → district → RCA.`
-              : "Apply to start a new cooperative, or request that an existing one be wound up. Requests are reviewed by the sector officer, then the district, then the RCA."}
+              ? `You review at ${viewerStage === "any" ? "every" : STAGE_LABEL[viewerStage as string]} level.`
+              : "Start a new cooperative, or close one."}
           </p>
         </div>
         {canApply && (

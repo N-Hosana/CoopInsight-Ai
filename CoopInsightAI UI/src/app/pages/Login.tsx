@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate, Link } from "react-router";
 import { useAuth } from "../contexts/AuthContext";
 import { AuthBackground } from "../components/AuthBackground";
-import { LogIn, Mail, Lock, AlertCircle, ArrowLeft } from "lucide-react";
+import { LogIn, Mail, Lock, AlertCircle, ArrowLeft, ChevronDown } from "lucide-react";
 
 /**
  * The accounts `pnpm seed` creates. Kept in one place so the panel below and the
@@ -70,6 +70,7 @@ export function Login() {
   const [otp, setOtp] = useState(["", "", "", "", "", ""]);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [showDemo, setShowDemo] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -334,13 +335,20 @@ export function Login() {
           </div>
 
           {/* Seeded credentials — click to fill, never typed */}
-          <div className="mt-8 p-4 bg-muted rounded-lg border border-border">
-            <p className="text-xs font-semibold text-card-foreground mb-1">Test accounts (seeded)</p>
-            <p className="text-[10px] text-muted-foreground mb-3">
-              Click a row to fill the form exactly. Rows 1–3 are the approval chain, in order:
-              nothing reaches the RCA until the sector and district officers have signed it off.
-            </p>
-            <div className="space-y-1">
+          {/* Folded by default: the sign-in form is the page; demo accounts are on request. */}
+          <div className="mt-8 rounded-lg border border-border bg-muted">
+            <button
+              type="button"
+              onClick={() => setShowDemo((v) => !v)}
+              aria-expanded={showDemo}
+              className="flex w-full items-center justify-between px-4 py-3 text-left"
+            >
+              <span className="text-xs font-semibold text-card-foreground">Demo accounts</span>
+              <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${showDemo ? "rotate-180" : ""}`} />
+            </button>
+            {showDemo && (
+            <div className="space-y-1 px-4 pb-4">
+              <p className="mb-2 text-[10px] text-muted-foreground">Click a row to fill the form.</p>
               <div className="grid grid-cols-[76px_1fr_92px] gap-x-2 px-2">
                 <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Role</span>
                 <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Email</span>
@@ -369,6 +377,7 @@ export function Login() {
                 </button>
               ))}
             </div>
+            )}
           </div>
         </div>
       </div>

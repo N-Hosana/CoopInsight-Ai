@@ -21,7 +21,6 @@ import {
   X,
   ChevronDown,
   BadgeCheck,
-  Stethoscope,
   HandCoins,
   FileSignature,
   IdCard,
@@ -64,10 +63,11 @@ import { AIInsightDetail } from "./pages/AIInsightDetail";
 import { CooperativeProfile } from "./pages/CooperativeProfile";
 import { CooperativeDocuments } from "./pages/CooperativeDocuments";
 import { Permits } from "./pages/Permits";
-import { MonthlyAudit } from "./pages/MonthlyAudit";
 import { Funding } from "./pages/Funding";
 import { RcaServices } from "./pages/RcaServices";
 import { RcaAudits } from "./pages/RcaAudits";
+import { VerifyDocument } from "./pages/VerifyDocument";
+import { BrandMark } from "./components/BrandMark";
 import { NotificationBar } from "./components/NotificationBar";
 
 function ProfileDropdown() {
@@ -207,6 +207,8 @@ const getNavigationForUser = (
     { name: "Activities", path: "/activities", icon: Activity, group: "My cooperative", roles: ["manager", "member", "generalManager"] },
     { name: "Financials", path: "/financials", icon: DollarSign, group: "My cooperative", roles: ["admin", "manager", "member", "government", "generalManager"] },
     { name: "Documents", path: "/cooperative-documents", icon: FileText, group: "My cooperative", roles: ["manager", "member"] },
+    // A member's report is about themselves: their statement, nothing wider.
+    { name: "My statement", path: "/reports", icon: FileText, group: "My cooperative", roles: ["member"] },
 
     // ── Oversight ─────────────────────────────────────────────────────────
     // The register is the oversight view across cooperatives. A manager runs
@@ -214,7 +216,6 @@ const getNavigationForUser = (
     // cooperative"; the register of the others is not theirs to browse.
     { name: "Cooperative register", path: "/cooperatives", icon: Users, group: "Oversight", roles: ["admin", "government", "generalManager"] },
     { name: "District monitoring", path: "/government-monitoring", icon: Building2, group: "Oversight", roles: ["government", "admin", "generalManager"] },
-    { name: "Monthly audit", path: "/monthly-audit", icon: Stethoscope, group: "Oversight", roles: ["government", "admin", "generalManager"] },
     { name: "Cooperative documents", path: "/cooperative-documents", icon: FileText, group: "Oversight", roles: ["admin", "government", "generalManager"] },
     { name: "Reports", path: "/reports", icon: FileText, group: "Oversight", roles: ["admin", "manager", "government", "generalManager"] },
     { name: "AI insights", path: "/ai-insights", icon: Brain, group: "Oversight", roles: ["admin", "manager", "member", "government", "generalManager"] },
@@ -293,7 +294,10 @@ function Layout() {
       <aside className={`fixed inset-y-0 left-0 z-40 w-64 transform bg-sidebar border-r border-sidebar-border flex flex-col transition-transform duration-200 md:static md:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
         <div className="flex items-center justify-between p-6 border-b border-sidebar-border md:hidden">
           <div>
-            <h1 className="text-2xl font-bold text-secondary">CoopInsightAI</h1>
+            <div className="flex items-center gap-2.5">
+              <BrandMark size={34} className="flex-shrink-0 rounded-lg ring-1 ring-white/15" />
+              <h1 className="text-2xl font-bold text-secondary">CoopInsightAI</h1>
+            </div>
             <p className="text-sm text-sidebar-foreground/80 mt-1">Gasabo District</p>
           </div>
           <button onClick={() => setSidebarOpen(false)} className="p-2 rounded-lg bg-slate-100 text-slate-700">
@@ -301,7 +305,10 @@ function Layout() {
           </button>
         </div>
         <div className="hidden md:block p-6 border-b border-sidebar-border">
-          <h1 className="text-2xl font-bold text-secondary">CoopInsightAI</h1>
+          <div className="flex items-center gap-2.5">
+              <BrandMark size={34} className="flex-shrink-0 rounded-lg ring-1 ring-white/15" />
+              <h1 className="text-2xl font-bold text-secondary">CoopInsightAI</h1>
+            </div>
           <p className="text-sm text-sidebar-foreground/80 mt-1">Gasabo District</p>
         </div>
 
@@ -454,6 +461,9 @@ function AppRoutes() {
       <Route path="/register" element={<Register />} />
       <Route path="/email-verification" element={<EmailVerification />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
+      {/* Public: whoever is handed a printed report must be able to check it. */}
+      <Route path="/verify" element={<VerifyDocument />} />
+      <Route path="/verify/:code" element={<VerifyDocument />} />
       <Route
         path="/"
         element={
@@ -581,11 +591,8 @@ function AppRoutes() {
         />
         <Route
           path="monthly-audit"
-          element={
-            <RoleRoute roles={["government", "admin", "generalManager"]}>
-              <MonthlyAudit />
-            </RoleRoute>
-          }
+          // Replaced by the AI audit tab on AI Insights; old links land there.
+          element={<Navigate to="/ai-insights?view=audit" replace />}
         />
         <Route path="permits" element={<Permits />} />
         <Route path="funding" element={<Funding />} />

@@ -4,11 +4,11 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { query } from "../config/db";
 import { authenticate } from "../middleware/auth";
-import { emailConfigured, sendEmailCode, verifyEmailCode } from "../services/email";
+import { emailConfigured, sendEmailCode, verifyEmailCode, smtpConfigured, sendOwnCode } from "../services/email";
 
 const router = Router();
 
-const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
+const generateOTP = () => crypto.randomInt(100000, 1000000).toString();
 const isProduction = () => process.env.NODE_ENV === "production";
 
 /**
@@ -21,17 +21,33 @@ const isCode = (v: unknown) => /^\d{6}$/.test(String(v ?? ""));
 /**
  * Issue a verification code to an address.
  *
- * Supabase generates and emails the code when it is configured, and never
- * tells us what it is. A code of our own is kept as well in two cases: outside
- * production, so a developer (and the seeded accounts, whose addresses are not
- * real mailboxes) can sign in from the `devOtp` in the response; and when
- * Supabase is not configured at all, where it is printed to the server console.
- * The two codes are different and either is accepted.
+ * With SMTP configured (see services/email.ts) there is ONE code: six digits,
+ * chosen here, stored, emailed, and — outside production — also returned as
+ * `devOtp` for the screen. The email and the screen show the same number.
+ *
+ * Without SMTP, Supabase generates and emails its own code and never tells us
+ * what it is. A code of our own is then kept as well, outside production or
+ * when Supabase is not configured either; the two differ and either is
+ * accepted.
  *
  * `failed` means nothing usable was issued and the caller must say so.
  */
-async function issueCode(email: string) {
-  const delivery = await sendEmailCode(email);
+async function issueCode(email: string, purpose: "login" | "reset" = "login") {
+  if (smtpConfigured()) {
+    const code = generateOTP();
+    const delivery = await sendOwnCode(email, code, purpose);
+    if (!delivery.sent) console.error(`[EMAIL] SMTP did not send a code to ${email}: ${delivery.reason}`);
+    if (!isProduction()) console.log(`[OTP] ${email} → ${code}`);
+    return {
+      code,
+      devOtp: !isProduction() ? code : null,
+      // Outside production the code on screen still works if the mail failed.
+      failed: !delivery.sent && isProduction(),
+      rateLimited: false,
+    };
+  }
+
+  const delivery = await sendEmailCode(email, purpose);
   if (!delivery.sent && emailConfigured()) {
     console.error(`[EMAIL] Supabase did not send a code to ${email}: ${delivery.reason}`);
   }
@@ -448,10 +464,14 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
     const userResult = await query("SELECT * FROM users WHERE email = $1", [email.toLowerCase()]);
     const user = userResult.rows[0];
 
+    let devOtp: string | null = null;
     if (user) {
       // Whether or not a code went out is not reported: the answer below must
-      // be the same for an address with an account and one without.
-      const issued = await issueCode(user.email);
+      // be the same for an address with an account and one without. (Outside
+      // production the code is also returned, as for sign-in, so a developer
+      // can reset a seeded account whose address is not a real mailbox.)
+      const issued = await issueCode(user.email, "reset");
+      devOtp = issued.devOtp;
       await query("DELETE FROM password_resets WHERE email = $1", [email.toLowerCase()]);
       if (!issued.failed) {
         await query(
@@ -465,6 +485,7 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
       success: true,
       message: "If that email exists, a reset code has been sent.",
       otpRequired: true,
+      ...(devOtp ? { devOtp } : {}),
     });
   } catch (err) {
     console.error("Forgot password error:", err);
@@ -491,7 +512,7 @@ router.post("/verify-reset-otp", async (req: Request, res: Response) => {
     const matches =
       !!record &&
       isCode(otp) &&
-      (record.code === String(otp) || (await verifyEmailCode(email.toLowerCase(), String(otp))));
+      (record.code === String(otp) || (await verifyEmailCode(email.toLowerCase(), String(otp), "reset")));
     if (!matches) {
       return res.status(401).json({ success: false, message: "Invalid or expired reset code" });
     }

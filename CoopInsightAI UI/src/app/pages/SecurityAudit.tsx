@@ -475,21 +475,21 @@ export function SecurityAudit() {
         {[
           {
             label: "Security checks passed", value: s ? `${passed}/${s.posture.length}` : "—",
-            sub: "Read from the running system", icon: Shield, bg: "bg-green-50", color: "text-green-600",
+            sub: "Read from the running system", icon: Shield, bg: "bg-[#2D6A4F]/10", color: "text-[#2D6A4F]",
           },
           {
             label: "Active sessions", value: s ? String(s.activeSessions) : "—",
-            sub: s ? `${s.usersSignedInToday} user(s) signed in today` : "", icon: Activity, bg: "bg-blue-50", color: "text-blue-600",
+            sub: s ? `${s.usersSignedInToday} user(s) signed in today` : "", icon: Activity, bg: "bg-[#2D6A4F]/10", color: "text-[#2D6A4F]",
           },
           {
             label: "Failed sign-ins (7 days)", value: s ? String(s.failedLogins7d) : "—",
             sub: s ? `${s.unknownAccountAttempts7d} on unknown accounts · ${s.lockedAccountsNow} locked now` : "",
-            icon: Lock, bg: "bg-red-50", color: "text-red-600",
+            icon: Lock, ...(s && s.lockedAccountsNow > 0 ? { bg: "bg-red-50", color: "text-red-600" } : { bg: "bg-[#2D6A4F]/10", color: "text-[#2D6A4F]" }),
           },
           {
             label: "Unresolved anomalies", value: s ? String(s.unresolvedAnomalies) : "—",
             sub: s ? (["high", "medium", "low"].map((k) => `${s.unresolvedBySeverity[k] ?? 0} ${k}`).join(" · ")) : "",
-            icon: AlertTriangle, bg: "bg-yellow-50", color: "text-yellow-600",
+            icon: AlertTriangle, ...(s && (s.unresolvedBySeverity.high ?? 0) > 0 ? { bg: "bg-red-50", color: "text-red-600" } : { bg: "bg-[#2D6A4F]/10", color: "text-[#2D6A4F]" }),
           },
         ].map((m) => {
           const Icon = m.icon;
@@ -770,8 +770,7 @@ export function SecurityAudit() {
             <div>
               <h3 className="font-semibold text-gray-900 mb-1">Every sign-in attempt</h3>
               <p className="text-xs text-gray-500 mb-3">
-                Recorded at the password step. “Success” means the password was right and a code was sent; whether the
-                code was then entered shows in the Audit Log as “Sign-in code check”.
+                Recorded at the password step; code checks are in the Audit Log.
               </p>
               <div className="flex flex-wrap items-center gap-3 mb-4">
                 <div className="relative flex-1 min-w-48">
@@ -838,10 +837,8 @@ export function SecurityAudit() {
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <div>
                 <h3 className="font-semibold text-gray-900">Anomaly detection</h3>
-                <p className="text-xs text-gray-500">
-                  Found automatically in the last 90 days of sign-ins: 5+ wrong passwords on one account in an hour, one IP
-                  failing on 3+ accounts in an hour, repeated attempts on non-existent accounts, attempts on locked
-                  accounts, and administrator sign-ins between midnight and 05:00 Kigali time.
+                <p className="text-xs text-gray-500" title="5+ wrong passwords on one account in an hour · one IP failing on 3+ accounts in an hour · attempts on non-existent or locked accounts · admin sign-ins 00:00–05:00">
+                  Detected from the last 90 days of sign-ins.
                 </p>
               </div>
               <select

@@ -107,11 +107,20 @@ export function Integrations() {
   const disconnectedCount = integrations.filter((i) => i.status === "disconnected").length;
   const activeErrors = errors.filter((e) => !e.resolved).length;
 
+  // Synced in the last day, from each integration's own last_sync — not a
+  // fixed number.
+  const syncedToday = integrations.filter(
+    (i) => i.last_sync && Date.now() - new Date(i.last_sync).getTime() < 86_400_000
+  ).length;
+
+  // Theme colours, as on the dashboard. Red only where someone needs to act.
+  const THEME = { color: "text-[#2D6A4F]", bg: "bg-[#2D6A4F]/10" };
+  const ALERT = { color: "text-red-600", bg: "bg-red-50" };
   const healthMetrics = [
-    { label: "Active Integrations",  value: String(connectedCount),    icon: CheckCircle,  color: "text-green-600",  bg: "bg-green-50"  },
-    { label: "Disconnected",         value: String(disconnectedCount),  icon: XCircle,      color: "text-red-600",    bg: "bg-red-50"    },
-    { label: "Successful Syncs (24h)",value: "47",                      icon: RefreshCw,    color: "text-blue-600",   bg: "bg-blue-50"   },
-    { label: "Active Errors",        value: String(activeErrors),       icon: AlertTriangle, color: "text-yellow-600", bg: "bg-yellow-50" },
+    { label: "Active Integrations", value: String(connectedCount), icon: CheckCircle, ...THEME },
+    { label: "Disconnected", value: String(disconnectedCount), icon: XCircle, ...(disconnectedCount ? ALERT : THEME) },
+    { label: "Synced (24h)", value: String(syncedToday), icon: RefreshCw, ...THEME },
+    { label: "Active Errors", value: String(activeErrors), icon: AlertTriangle, ...(activeErrors ? ALERT : THEME) },
   ];
 
   // ── Actions ───────────────────────────────────────────────────────────────

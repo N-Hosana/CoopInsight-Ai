@@ -1465,4 +1465,52 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    // Every PDF the system issues — a stored report or an exported page — gets
+    // a row here: a reference printed on the document, a verification code
+    // anyone holding it can check, and a fingerprint of what it said. That is
+    // what lets a bank or the RCA tell a genuine report from an edited one.
+    name: "issued_documents",
+    sql: `
+      CREATE TABLE IF NOT EXISTS issued_documents (
+        id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        reference          VARCHAR(40) NOT NULL UNIQUE,
+        verification_code  VARCHAR(20) NOT NULL UNIQUE,
+        kind               VARCHAR(20) NOT NULL CHECK (kind IN ('report','export','register')),
+        title              TEXT NOT NULL,
+        report_id          UUID REFERENCES reports(id) ON DELETE SET NULL,
+        cooperative_id     UUID REFERENCES cooperatives(id) ON DELETE SET NULL,
+        scope_label        TEXT,
+        period_from        DATE,
+        period_to          DATE,
+        issued_by          UUID REFERENCES users(id) ON DELETE SET NULL,
+        issued_by_name     TEXT,
+        issued_by_role     TEXT,
+        fingerprint        VARCHAR(64) NOT NULL,
+        issued_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        revoked_at         TIMESTAMPTZ
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_issued_documents_report ON issued_documents(report_id) WHERE report_id IS NOT NULL;
+    `,
+  },
+  {
+    // AI audits run from the AI Insights page. Each run is kept whole, so the
+    // next run of the same cooperative can say what changed since.
+    name: "ai_audits",
+    sql: `
+      CREATE TABLE IF NOT EXISTS ai_audits (
+        id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        cooperative_id  UUID NOT NULL REFERENCES cooperatives(id) ON DELETE CASCADE,
+        period          VARCHAR(7) NOT NULL,
+        score           NUMERIC(5,1),
+        band            VARCHAR(20) NOT NULL,
+        findings_count  INT NOT NULL DEFAULT 0,
+        high_count      INT NOT NULL DEFAULT 0,
+        result          JSONB NOT NULL,
+        run_by          UUID REFERENCES users(id) ON DELETE SET NULL,
+        run_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_audits_coop ON ai_audits(cooperative_id, run_at DESC);
+    `,
+  },
 ];

@@ -73,9 +73,9 @@ interface Engagement {
 }
 
 const TONE: Record<Tone, { box: string; Icon: typeof Info; icon: string }> = {
-  warning: { box: "border-amber-200 bg-amber-50", Icon: AlertTriangle, icon: "text-amber-600" },
-  positive: { box: "border-green-200 bg-green-50", Icon: CheckCircle2, icon: "text-green-700" },
-  info: { box: "border-blue-100 bg-blue-50", Icon: Info, icon: "text-blue-700" },
+  warning: { box: "border-[#D4A574]/40 bg-[#D4A574]/15", Icon: AlertTriangle, icon: "text-[#8A6233]" },
+  positive: { box: "border-[#2D6A4F]/20 bg-[#2D6A4F]/5", Icon: CheckCircle2, icon: "text-[#2D6A4F]" },
+  info: { box: "border-gray-200 bg-gray-50", Icon: Info, icon: "text-[#2D6A4F]" },
 };
 
 const CATEGORY_LABEL: Record<PersonalInsight["category"], string> = {
@@ -162,12 +162,7 @@ export function MyInsights({ embedded = false }: { embedded?: boolean } = {}) {
 
   return (
     <div className={embedded ? "space-y-6" : "max-w-6xl mx-auto space-y-6 py-8"}>
-      {embedded ? (
-        <p className="text-sm text-gray-600">
-          Your own record as a member of {data.member.cooperativeName}: your savings, attendance and loans.
-          Only your own records are used; other members are counted, never named.
-        </p>
-      ) : (
+      {embedded ? null : (
         <div>
           <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
             <Brain className="h-8 w-8 text-[#2D6A4F]" />
@@ -269,7 +264,7 @@ export function MyInsights({ embedded = false }: { embedded?: boolean } = {}) {
           <p className="mt-3 text-xs text-gray-600">
             Last three months {rwf(s.savingsLast3Months)}
             {change != null && (
-              <span className={change >= 0 ? "text-green-700" : "text-amber-700"}>
+              <span className={change >= 0 ? "text-[#2D6A4F]" : "text-[#8A6233]"}>
                 {" "}({change >= 0 ? "+" : ""}{Math.round(change * 100)}% on the three before)
               </span>
             )}

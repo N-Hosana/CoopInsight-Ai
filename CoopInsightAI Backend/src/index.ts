@@ -24,6 +24,9 @@ import auditRoutes from "./routes/audits";
 import rcaAuditRoutes from "./routes/rcaAudits";
 import fundingRoutes from "./routes/funding";
 import aiRoutes from "./routes/ai";
+import requestsRegisterRoutes from "./routes/requestsRegister";
+import documentRoutes from "./routes/documents";
+import aiAuditRoutes from "./routes/aiAudit";
 import { auditTrail } from "./middleware/auditTrail";
 
 dotenv.config();
@@ -92,6 +95,11 @@ app.use("/api/exports", exportRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/notifications", notificationRoutes);
 
+// ── Requests register & document verification ─
+app.use("/api/requests-register", requestsRegisterRoutes);
+// Public: whoever is handed a printed report must be able to check it.
+app.use("/api/documents", documentRoutes);
+
 // ── Admin / Platform ─────────────────────────
 app.use("/api/security", securityRoutes);
 app.use("/api/settings", settingsRoutes);
@@ -99,6 +107,8 @@ app.use("/api/integrations", integrationRoutes);
 
 // ── AI Service proxy ─────────────────────────
 app.use("/api/ai", aiRoutes);
+// Audits computed on demand from the AI service's findings.
+app.use("/api/ai-audit", aiAuditRoutes);
 
 // ── 404 handler ──────────────────────────────
 app.use((_req, res) => {

@@ -117,23 +117,19 @@ export function Register() {
   };
 
   return (
-    <div className="h-screen bg-background flex">
-      <AuthBackground
-        tagline="Join Rwanda's Cooperative Network"
-        subtext="Register your account to manage members, track finances, and grow your cooperative with data-driven tools."
-      />
-      <div className="flex-1 h-screen flex p-4 overflow-y-auto">
-      <div className="w-full max-w-2xl m-auto py-8">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary mb-4">
-            <UserPlus className="w-8 h-8 text-primary-foreground" />
+    <AuthBackground
+      wide
+      icon={<UserPlus className="w-9 h-9" />}
+      caption="Create your account — Gasabo District"
+      tagline="Join Rwanda's Cooperative Network"
+      subtext="Register your account to manage members, track finances, and grow your cooperative with data-driven tools."
+    >
+      <div className="w-full max-w-2xl mx-auto">
+        <div>
+          <div className="text-center mb-8">
+            <h2 className="text-3xl font-bold text-card-foreground">Register</h2>
+            <p className="text-muted-foreground mt-2">Create your CoopInsightAI account</p>
           </div>
-          <h1 className="text-3xl font-bold text-foreground">CoopInsightAI</h1>
-          <p className="text-muted-foreground mt-2">Create your account - Gasabo District</p>
-        </div>
-
-        <div className="bg-card rounded-2xl shadow-sm p-8 border border-border">
-          <h2 className="text-2xl font-semibold text-card-foreground mb-6">Register</h2>
 
           {error && (
             <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -396,7 +392,6 @@ export function Register() {
           </div>
         </div>
       </div>
-      </div>
-    </div>
+    </AuthBackground>
   );
 }

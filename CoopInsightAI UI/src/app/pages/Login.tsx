@@ -167,27 +167,21 @@ export function Login() {
   };
 
   return (
-    <div className="h-screen bg-background flex">
-      <AuthBackground
-        tagline="Empowering Rwanda's Cooperatives"
-        subtext="Real-time insights, transparent governance, and AI-driven decisions for cooperatives across Gasabo District."
-      />
-      <div className="flex-1 h-screen flex p-4 overflow-y-auto">
-      <div className="w-full max-w-md m-auto py-8">
-        {/* Logo & Title */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary mb-4">
-            <LogIn className="w-8 h-8 text-primary-foreground" />
+    <AuthBackground
+      icon={<LogIn className="w-9 h-9" />}
+      tagline="Empowering Rwanda's Cooperatives"
+      subtext="Real-time insights, transparent governance, and AI-driven decisions for cooperatives across Gasabo District."
+    >
+      <div className="w-full max-w-md mx-auto">
+        <div>
+          <div className="text-center mb-8">
+            <h2 className="text-3xl font-bold text-card-foreground">
+              {showOTP ? "Enter Verification Code" : "Sign In"}
+            </h2>
+            <p className="text-muted-foreground mt-2">
+              {showOTP ? "Check your email for the 6-digit code" : "Access your cooperative platform"}
+            </p>
           </div>
-          <h1 className="text-3xl font-bold text-foreground">CoopInsightAI</h1>
-          <p className="text-muted-foreground mt-2">Gasabo District Platform</p>
-        </div>
-
-        {/* Login Card */}
-        <div className="bg-card rounded-2xl shadow-sm p-8 border border-border">
-          <h2 className="text-2xl font-semibold text-card-foreground mb-6">
-            {showOTP ? "Enter Verification Code" : "Sign in to your account"}
-          </h2>
 
           {error && (
             <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
@@ -378,7 +372,6 @@ export function Login() {
           </div>
         </div>
       </div>
-      </div>
-    </div>
+    </AuthBackground>
   );
 }

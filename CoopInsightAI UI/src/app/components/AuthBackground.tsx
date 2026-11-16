@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 // Picks up any image dropped into src/app/assets/auth — no code change needed to add/remove photos.
 const images = Object.values(
@@ -12,9 +12,29 @@ const images = Object.values(
 interface AuthBackgroundProps {
   tagline: string;
   subtext: string;
+  /** Icon shown in the brand mark on the left panel. */
+  icon: ReactNode;
+  /** Line under the product name, e.g. "Gasabo District Platform". */
+  caption?: string;
+  /** Wider card for long forms (registration). */
+  wide?: boolean;
+  /** The form side of the card. */
+  children: ReactNode;
 }
 
-export function AuthBackground({ tagline, subtext }: AuthBackgroundProps) {
+/**
+ * The frame every sign-in screen sits in.
+ *
+ * The cooperative photos fill the whole window behind everything, blurred so
+ * the form stays readable, and still cross-fade from one to the next. On top
+ * sits one card: a see-through brand panel on the left (large screens only)
+ * and the form on the right.
+ *
+ * The page scrolls as a whole rather than inside a fixed-height box, so a form
+ * taller than the window — registration, or the login page with its test-account
+ * panel — can always be scrolled into view from top to bottom.
+ */
+export function AuthBackground({ tagline, subtext, icon, caption = "Gasabo District Platform", wide, children }: AuthBackgroundProps) {
   const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
@@ -25,53 +45,82 @@ export function AuthBackground({ tagline, subtext }: AuthBackgroundProps) {
     return () => clearInterval(timer);
   }, []);
 
-  if (images.length === 0) return null;
-
-  return (
-    <div className="relative hidden lg:block lg:w-[45%] overflow-hidden">
+  const dots = images.length > 1 && (
+    <div className="flex gap-2">
       {images.map((src, index) => (
-        <img
+        <button
           key={src}
-          src={src}
-          alt=""
-          className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-1000 ${
-            index === activeIndex ? "opacity-100" : "opacity-0"
-          }`}
+          type="button"
+          aria-label={`Show background photo ${index + 1}`}
+          onClick={() => setActiveIndex(index)}
+          className="h-1.5 rounded-full transition-all"
+          style={{
+            width: index === activeIndex ? "1.5rem" : "0.5rem",
+            backgroundColor: index === activeIndex ? "#FAD201" : "rgba(255,255,255,0.45)",
+          }}
         />
       ))}
+    </div>
+  );
 
-      {/* Brand-green cinematic wash — deliberately fixed (not theme-driven) so the panel reads
-          consistently in both light and dark mode. */}
-      <div
-        className="absolute inset-0"
-        style={{
-          background:
-            "linear-gradient(180deg, rgba(13,40,24,0.15) 0%, rgba(13,40,24,0.45) 55%, rgba(13,40,24,0.92) 100%)",
-        }}
-      />
+  return (
+    <div className="relative min-h-screen bg-[#0d2818]">
+      {/* Full-window photo layer. `fixed` keeps it still while the form scrolls;
+          scale-110 pushes the blur's soft edge outside the window. */}
+      <div className="fixed inset-0 overflow-hidden" aria-hidden>
+        {images.map((src, index) => (
+          <img
+            key={src}
+            src={src}
+            alt=""
+            className={`absolute inset-0 h-full w-full object-cover scale-110 blur-[5px] transition-opacity duration-1000 ${
+              index === activeIndex ? "opacity-100" : "opacity-0"
+            }`}
+          />
+        ))}
+        {/* Brand-green wash — fixed (not theme-driven) so it reads the same in light and dark mode. */}
+        <div
+          className="absolute inset-0"
+          style={{ background: "linear-gradient(180deg, rgba(13,40,24,0.55) 0%, rgba(13,40,24,0.70) 100%)" }}
+        />
+      </div>
 
-      <div className="absolute inset-x-0 bottom-0 p-10 text-white">
-        <div className="h-1 w-12 rounded-full mb-4" style={{ backgroundColor: "#FAD201" }} />
-        <h2 className="text-3xl font-bold leading-tight mb-3">{tagline}</h2>
-        <p className="text-white/80 max-w-sm">{subtext}</p>
+      <div className="relative z-10 min-h-screen flex flex-col px-4 py-6 sm:px-8 sm:py-10">
+        <div
+          className={`m-auto w-full ${wide ? "max-w-6xl" : "max-w-5xl"} grid lg:grid-cols-[5fr_7fr] rounded-3xl overflow-hidden shadow-2xl border border-white/15`}
+        >
+          {/* Brand panel — see-through so the photo shows behind it. */}
+          <div className="relative hidden lg:flex flex-col items-center justify-center text-center p-10 text-white bg-[rgba(13,40,24,0.35)] backdrop-blur-[2px]">
+            <div className="inline-flex items-center justify-center w-24 h-24 rounded-full bg-white/95 shadow-lg mb-6 text-primary">
+              {icon}
+            </div>
+            <h1 className="text-2xl font-bold">CoopInsightAI</h1>
+            <p className="text-white/80 italic mt-1">{caption}</p>
 
-        {images.length > 1 && (
-          <div className="flex gap-2 mt-6">
-            {images.map((src, index) => (
-              <button
-                key={src}
-                type="button"
-                aria-label={`Show background photo ${index + 1}`}
-                onClick={() => setActiveIndex(index)}
-                className="h-1.5 rounded-full transition-all"
-                style={{
-                  width: index === activeIndex ? "1.5rem" : "0.5rem",
-                  backgroundColor: index === activeIndex ? "#FAD201" : "rgba(255,255,255,0.4)",
-                }}
-              />
-            ))}
+            <div className="h-1 w-12 rounded-full my-8" style={{ backgroundColor: "#FAD201" }} />
+            <h2 className="text-2xl font-bold leading-tight mb-3">{tagline}</h2>
+            <p className="text-white/80 max-w-sm text-sm leading-relaxed">{subtext}</p>
+
+            {dots && <div className="mt-8">{dots}</div>}
           </div>
-        )}
+
+          {/* Form panel. */}
+          <div className="bg-card/90 backdrop-blur-md p-6 sm:p-10">
+            {/* On small screens the brand panel is hidden, so the name goes here. */}
+            <div className="lg:hidden text-center mb-6">
+              <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-primary text-primary-foreground mb-3">
+                {icon}
+              </div>
+              <h1 className="text-2xl font-bold text-foreground">CoopInsightAI</h1>
+              <p className="text-muted-foreground text-sm mt-1">{caption}</p>
+            </div>
+            {children}
+          </div>
+        </div>
+
+        <p className="text-center text-white/70 text-sm mt-6">
+          © {new Date().getFullYear()} CoopInsightAI • Gasabo District, Rwanda
+        </p>
       </div>
     </div>
   );
